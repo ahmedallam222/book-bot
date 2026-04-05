@@ -1,5 +1,67 @@
-node_modules/
+# ══════════════════════════════════════════════
+# خلاصة الكتب — .gitignore
+# ══════════════════════════════════════════════
+
+# ── البيئة والأسرار ──────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── Build Output ─────────────────────────────
 dist/
+build/
+
+# ── Node.js ──────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── TypeScript ───────────────────────────────
+*.tsbuildinfo
+
+# ── Temp Files ───────────────────────────────
+/tmp/
 temp/
+*.tmp
+*.temp
+/tmp/kholasa_books/
+
+# ── Logs ─────────────────────────────────────
+logs/
 *.log
+pm2.log
+
+# ── Database ─────────────────────────────────
+*.sqlite
+*.db
+drizzle/
+
+# ── OS ───────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Docker Volumes (local dev) ───────────────
+pgdata/
+
+# ── Testing ──────────────────────────────────
+coverage/
+.nyc_output/
+
+# ── Uploads & Downloads ──────────────────────
+uploads/
+downloads/
+*.pdf
+!test-fixtures/*.pdf
