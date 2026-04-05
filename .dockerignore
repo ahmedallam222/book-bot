@@ -1,0 +1,32 @@
+# Secrets & env
+.env
+.env.*
+!.env.example
+
+# Dependencies (يُنصَّب في Docker)
+node_modules
+*/node_modules
+
+# Build artifacts (يُنشأ داخل Docker)
+dist
+
+# Logs & temp
+*.log
+temp/
+/temp
+
+# Dev tools
+.git
+.gitignore
+.vscode
+.idea
+*.md
+!README.md
+
+# Test files
+*.test.ts
+*.spec.ts
+
+# OS files
+.DS_Store
+Thumbs.db
