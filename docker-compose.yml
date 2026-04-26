@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════════════════════
+# خلاصة الكتب — Docker Compose
+# Usage:
+#   cp .env.example .env   # ثم عدّل القيم
+#   docker compose up -d --build
+#   docker compose logs -f bot
+# ══════════════════════════════════════════════════════════════
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bookbot
+      POSTGRES_PASSWORD: bookbot_pass
+      POSTGRES_DB: bookbot
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookbot -d bookbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # تجاوز قيم .env داخل الشبكة الداخلية
+      DATABASE_URL: postgresql://bookbot:bookbot_pass@db:5432/bookbot
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      PORT: "5000"
+    ports:
+      - "5000:5000"
+    volumes:
+      - bot_temp:/app/temp
+
+volumes:
+  db_data:
+  redis_data:
+  bot_temp:
