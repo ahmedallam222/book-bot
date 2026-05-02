@@ -477,26 +477,37 @@ async function askMistral(
     }
   } catch { /* Redis miss → proceed */ }
 
-  // v25 FIX: prompt أكثر صرامة — يطلب تطابق العنوان والمؤلف لا مجرد الموضوع
-  // المشكلة القديمة: "محتمل التطابق بشكل معقول" → Mistral يقبل كتباً من نفس الموضوع
-  // مثال: "حوار مع صديقي الملحد" و "الإلحاد.. الوهم المستحيل" كلاهما عن الإلحاد → كان يقول YES
-  // FIX: prompt متعدد اللغات — يدعم العربية والإنجليزية والفرنسية وغيرها
+  // FIX: نفك ترميز الـ URL slug (مثلاً %D8%A2%D9%86%D8%A7 → آنا) قبل ما نوريه لـ Mistral.
+  // مع الـ URL الخام كان Mistral بيشوف "غير مفهوم" ويرفض حتى لو الـ slug فيه اسم الكتاب الكامل.
+  let promptFilename = urlHint;
+  try {
+    const decoded = decodeURIComponent(new URL(urlHint).pathname.split("/").pop() || "");
+    const cleaned = decoded.replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim();
+    if (cleaned.length > 1) promptFilename = cleaned;
+  } catch { /* urlHint مش URL → نسيبه زي ما هو */ }
+
+  // FIX: Prompt متوازن — صارم بشكل كافٍ يرفض كتب مختلفة تماماً، ومرن بشكل كافٍ
+  // يقبل التطابق بالـ slug/الترجمة/الـ transliteration.
+  // قبل كده كان prompt صارم جداً يرفض حتى التطابق الحرفي (filename="آنا كارنينا" + book="آنا كارنينا" → NO)
+  // بسبب "When in doubt answer NO". الجديد متعدد اللغات ويسمح بزيادات شائعة (pdf, اسم الموقع، السنة).
   const lines: string[] = [
-    `You are a strict PDF verification system. Your only job is to check if a PDF file matches the requested book.`,
+    `You are verifying whether a PDF file contains the book the user requested.`,
     `Requested book: "${bookName}"`,
   ];
   if (metaTitle) lines.push(`PDF metadata title: "${metaTitle}"`);
   else           lines.push(`(PDF metadata title is empty)`);
-  if (urlHint)   lines.push(`PDF filename: "${urlHint}"`);
+  if (promptFilename) lines.push(`PDF filename / URL hint: "${promptFilename}"`);
+  else                lines.push(`(no filename hint)`);
   lines.push(
     ``,
-    `Rules (follow strictly):`,
-    `- Answer YES only if the PDF title matches the requested book (same title, translation, or transliteration).`,
-    `- Answer YES if the requested author's name appears in the PDF title.`,
-    `- Answer YES if one is the translation of the other (e.g. "Le Petit Prince" = "الأمير الصغير").`,
-    `- Answer NO if both are on the same topic but have different titles — that is a different book.`,
-    `- Answer NO if metadata is empty and the filename does not clearly refer to the requested book.`,
-    `- When in doubt, answer NO — do not guess.`,
+    `Decide YES or NO using these rules in order:`,
+    `1) If the metadata title matches the requested book (same title in any language, transliteration, or translation), answer YES.`,
+    `2) If metadata is empty or unhelpful, check the filename hint:`,
+    `   - YES if the filename contains the requested book title (in any language, transliteration, or translation),`,
+    `     even with extra words like "pdf", "book", "كتاب", site name, year, etc.`,
+    `   - YES if the filename contains the requested author's name.`,
+    `3) Answer NO only if there is positive evidence of a different book — i.e. the filename or metadata clearly names a different specific book.`,
+    `4) If the filename has no useful information (only digits, random IDs, empty), answer NO.`,
     `Reply with one word only: YES or NO`,
   );
 
