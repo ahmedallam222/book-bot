@@ -270,10 +270,10 @@ export function buildSuccessMsg(
 // ── رسالة فشل الإرسال + روابط يدوية ──────────────────────────
 export function buildFailMsg(bookName: string, resultsCount: number): string {
   return (
-    `🔗 *وجدت ${resultsCount} رابط مباشر*\n` +
+    `🔗 *وجدت ${resultsCount} نتيجة بديلة*\n` +
     `${HR}\n` +
     `📗 _"${escMd(bookName.slice(0, 56))}"_\n\n` +
-    `لم ينجح الإرسال التلقائي — اختر رابطاً مباشراً:\n`
+    `لم ينجح الإرسال التلقائي — جرّب نتيجة مناسبة:\n`
   );
 }
 
@@ -281,12 +281,11 @@ export function buildFailMsg(bookName: string, resultsCount: number): string {
 export function buildNoResults(bookName: string, _networkIssue: boolean): string {
   const smartTips = getSmartSearchTips(bookName);
   return (
-    `😔 *لم أعثر على الكتاب*\n` +
+    `😔 *لم أجد PDF متاحاً*\n` +
     `${HR}\n` +
     `_"${escMd(bookName.slice(0, 50))}"_\n\n` +
-    `💡 *جرّب هذه الحلول:*\n` +
-    `${smartTips}\n\n` +
-    `_نبحث في ٢٠+ مصدر — لكن ليس كل كتاب متاح رقمياً بعد_`
+    `جرّب:\n${smartTips}\n\n` +
+    `_بعض الكتب مدفوعة أو غير متاحة رقمياً._`
   );
 }
 

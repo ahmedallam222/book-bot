@@ -133,10 +133,10 @@ export function buildFailMessage(
 ): string {
   if (results.length === 0) {
     return (
-      `😔 *لم أجد روابط قابلة للتحميل*\n` +
+      `😔 *لم أجد PDF قابل للإرسال*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
       `_"${escMd(bookName.slice(0, 52))}"_\n\n` +
-      `💡 جرّب صياغة مختلفة أو أضف اسم المؤلف`
+      `جرّب العنوان فقط أو أضف اسم المؤلف.`
     );
   }
 
@@ -148,25 +148,25 @@ export function buildFailMessage(
   const protectedCount = results.filter((r) => r.access === "protected_page").length;
 
   let msg =
-    `🔎 *راجعت ${results.length} نتيجة ولم أجد PDF صالحاً للإرسال*\n` +
+    `🔎 *لا يوجد PDF مباشر صالح للإرسال*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
     `_"${escMd(bookName.slice(0, 52))}"_\n`;
 
   if (totalPages > 1) msg += `_صفحة ${page + 1} من ${totalPages}_\n`;
   msg += `\n`;
-  if (directCount > 0) msg += `• ${directCount} رابط PDF فشل التحقق أو الإرسال\n`;
-  if (downloadPageCount > 0) msg += `• ${downloadPageCount} صفحة تبدو قابلة للتحميل لكنها لم تعطِ ملف PDF مباشر\n`;
-  if (protectedCount > 0) msg += `• ${protectedCount} صفحة تبدو مدفوعة/قراءة فقط\n`;
-  msg += `\n_أعرض لك النتائج للمعاينة فقط — ليست روابط تحميل مضمونة:_\n\n`;
+  if (directCount > 0) msg += `• PDF فشل: ${directCount}\n`;
+  if (downloadPageCount > 0) msg += `• تحميل محتمل: ${downloadPageCount}\n`;
+  if (protectedCount > 0) msg += `• مدفوع/قراءة فقط: ${protectedCount}\n`;
+  msg += `\n_هذه نتائج معاينة وليست تحميلًا مضمونًا:_\n\n`;
 
   slice.forEach((r, i) => {
     const rawUrl  = r.directPdfUrl || r.url;
     const safeUrl = rawUrl.replace(/\)/g, "%29").replace(/\]/g, "%5D");
     const labelByAccess: Record<BookResult["access"], string> = {
-      direct_pdf: "PDF غير مؤكد",
-      download_page: "صفحة تحميل",
-      catalog_page: "صفحة معلومات",
-      protected_page: "مدفوع/قراءة فقط",
+      direct_pdf: "PDF فشل",
+      download_page: "تحميل محتمل",
+      catalog_page: "معلومات",
+      protected_page: "مدفوع",
     };
     const label   = labelByAccess[r.access ?? (r.directPdfUrl ? "direct_pdf" : "catalog_page")];
     const star    = (r._score && r._score > 0.5) ? " ⭐" : "";
