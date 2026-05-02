@@ -239,23 +239,40 @@ export async function getSourceStats(): Promise<SourceStat[]> {
       cursor = next;
       found.forEach((k) => keys.add(k));
     } while (cursor !== "0");
+
+    cursor = "0";
+    do {
+      const [next, found] = await redis.scan(cursor, "MATCH", `${ANALYTICS_PREFIX}:source:*`, "COUNT", 100);
+      cursor = next;
+      found.forEach((k) => keys.add(k));
+    } while (cursor !== "0");
     if (keys.size === 0) return [];
 
     const domains = new Set<string>();
     for (const k of keys) {
-      domains.add(k.replace(`${ANALYTICS_PREFIX}:src:`, "").replace(/:(ok|fail)$/, ""));
+      const domain = k.startsWith(`${ANALYTICS_PREFIX}:source:`)
+        ? k.replace(`${ANALYTICS_PREFIX}:source:`, "")
+        : k.replace(`${ANALYTICS_PREFIX}:src:`, "").replace(/:(ok|fail)$/, "");
+      domains.add(domain);
     }
 
     const pipe = redis.pipeline();
     for (const domain of domains) {
       pipe.get(`${ANALYTICS_PREFIX}:src:${domain}:ok`);
       pipe.get(`${ANALYTICS_PREFIX}:src:${domain}:fail`);
+      pipe.hget(`${ANALYTICS_PREFIX}:source:${domain}`, "ok");
+      pipe.hget(`${ANALYTICS_PREFIX}:source:${domain}`, "fail");
     }
     const vals = (await pipe.exec().catch(() => [])) as [Error | null, string | null][];
 
     return Array.from(domains).map((domain, i) => {
-      const ok   = parseInt(String(vals[i * 2]?.[1]     ?? "0"), 10) || 0;
-      const fail = parseInt(String(vals[i * 2 + 1]?.[1] ?? "0"), 10) || 0;
+      const base = i * 4;
+      const ok =
+        (parseInt(String(vals[base]?.[1] ?? "0"), 10) || 0) +
+        (parseInt(String(vals[base + 2]?.[1] ?? "0"), 10) || 0);
+      const fail =
+        (parseInt(String(vals[base + 1]?.[1] ?? "0"), 10) || 0) +
+        (parseInt(String(vals[base + 3]?.[1] ?? "0"), 10) || 0);
       const total = ok + fail;
       const successRate = total > 0 ? ok / total : 0;
       return {
