@@ -40,6 +40,10 @@ function shouldSkipDirect(url: string): boolean {
   return SKIP_DIRECT_DOMAINS.some((d) => url.includes(d));
 }
 
+function isSlowArchiveUrl(url: string): boolean {
+  return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
+}
+
 export async function downloadAndSend(
   bot: TelegramBot,
   chatId: number,
@@ -48,6 +52,12 @@ export async function downloadAndSend(
   token: string,
   _noFollow = false   // BUG-D: يمنع متابعة HTML redirect مرتين (لا حلقة لانهائية)
 ): Promise<DownloadResult> {
+  if (isSlowArchiveUrl(pdfUrl)) {
+    L.warn("download", "Skipping slow archive.org URL", { url: pdfUrl.slice(0, 80) });
+    await recordUrlFailure(pdfUrl);
+    return { ok: false, permanent: true };
+  }
+
   if (await isBlacklisted(pdfUrl)) {
     L.dlFail(pdfUrl, "blacklisted");
     return { ok: false };
