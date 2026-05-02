@@ -1,37 +1,16 @@
 import Redis from "ioredis";
 
 // ══════════════════════════════════════════════
-// REDIS CLIENT — single shared instance
+// REDIS — singleton client
 // ══════════════════════════════════════════════
 
-const REDIS_URL = process.env.REDIS_URL;
+const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
-if (!REDIS_URL) {
-  throw new Error(
-    "❌ REDIS_URL environment variable is required.\n" +
-    "   Example: REDIS_URL=redis://localhost:6379"
-  );
-}
-
-export const redis = new Redis(REDIS_URL, {
+export const redis = new Redis(redisUrl, {
   maxRetriesPerRequest: 3,
-  enableReadyCheck: true,
-  retryStrategy: (times) => {
-    // بعد 20 محاولة (~60 ثانية) → توقف ودع Node يخرج أو يُعيد التشغيل
-    if (times > 20) return null;
-    return Math.min(times * 100, 3000);
-  },
-  lazyConnect: false,
+  enableReadyCheck:     true,
+  lazyConnect:          false,
 });
 
-redis.on("error", (err: Error) => {
-  console.error(`[Redis] ❌ ${err.message}`);
-});
-
-redis.on("connect", () => {
-  console.log("[Redis] ✅ Connected");
-});
-
-redis.on("reconnecting", () => {
-  console.warn("[Redis] 🔄 Reconnecting...");
-});
+redis.on("error",   (err) => console.error("[Redis] error:", err.message));
+redis.on("connect", ()    => console.log("[Redis] connected"));

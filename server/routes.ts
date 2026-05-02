@@ -23,6 +23,10 @@ import { blacklistStats, clearBlacklist }               from "./bot/blacklist.js
 import { startBot, activeWorkerCount }                  from "./bot/index.js";
 import { storage }                                       from "./storage.js";
 import { L }                                             from "./bot/logger.js";
+import { searchAllSources, getSearchCacheResults }       from "./bot/engine.js";
+import { GENRES }                                        from "./bot/random.js";
+import { normalizeArabic }                               from "./bot/text.js";
+import { GENRE_MAP, SUGGESTIONS }                        from "./bot/suggestions.js";
 
 // ── Config ────────────────────────────────────────────────────
 // ADMIN_IDS للـ dashboard auth fallback — يجب أن تطابق سلوك bot/config.ts تماماً:
@@ -91,7 +95,9 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   // يُخدَم من نفس السيرفر → لا مشكلة HTTPS / Mixed Content
   app.get("/dashboard", (_req, res) => {
     try {
-      const __dirname2 = path.dirname(fileURLToPath(import.meta.url));
+      // FIX: import.meta.url مقبول في TypeScript ESM — esbuild يحوّله لـ __filename تلقائياً في CJS
+      // CJS fallback: import.meta.url is empty in bundled CJS
+      const __dirname2 = (typeof import.meta?.url === "string" && import.meta.url) ? path.dirname(fileURLToPath(import.meta.url)) : path.join(process.cwd(), "dist");
       // Check dist/ (production) then server/ (dev)
       const candidates = [
         path.join(__dirname2, "dashboard.html"),
@@ -107,8 +113,28 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     }
   });
 
-  // ── CORS for dashboard — يجب أن يكون قبل startBot ────────
-  // M3 FIX: لا wildcard — fallback للـ localhost بدل "*"
+  // ── CORS للـ mobile app (public endpoints) ───────────────────
+  // Public API يسمح لأي origin — Mobile app من أي domain
+  app.use("/api/search", (_req, res, next) => {
+    res.header("Access-Control-Allow-Origin",  "*");
+    res.header("Access-Control-Allow-Headers", "Content-Type");
+    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
+    next();
+  });
+  app.use("/api/random", (_req, res, next) => {
+    res.header("Access-Control-Allow-Origin",  "*");
+    res.header("Access-Control-Allow-Headers", "Content-Type");
+    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
+    next();
+  });
+  app.use("/api/top-books", (_req, res, next) => {
+    res.header("Access-Control-Allow-Origin",  "*");
+    res.header("Access-Control-Allow-Headers", "Content-Type");
+    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
+    next();
+  });
+
+  // ── CORS for dashboard ────────────────────────────────────
   app.use("/api/admin", (req, res, next) => {
     const origin = process.env.DASHBOARD_ORIGIN || "http://localhost:5000";
     res.header("Access-Control-Allow-Origin",  origin);
@@ -259,6 +285,378 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     ok(res, trace);
   }));
 
+  // ── /random genre stats (للـ dashboard) ──────────────────────
+  // يقرأ ZREVRANGE stats:random:genres من Redis
+  app.get("/api/admin/stats/random-genres", auth, wrap(async (_req, res) => {
+    try {
+      const raw: string[] = await (redis as any).zrevrange("stats:random:genres", 0, -1, "WITHSCORES");
+      const genres: {genre:string;count:number}[] = [];
+      for (let i = 0; i < raw.length; i += 2) {
+        genres.push({ genre: String(raw[i]), count: parseInt(String(raw[i + 1]), 10) || 0 });
+      }
+      ok(res, genres);
+    } catch { ok(res, []); }
+  }));
+
+  // ─────────────────────────────────────────────────────────────
+  // DB QUERIES — direct PostgreSQL reads for the dashboard
+  // ─────────────────────────────────────────────────────────────
+  // Used by Users tab (existing UI calls users/all)
+  app.get("/api/admin/users/all", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "200", 10);
+    const rawOffset = parseInt(req.query.offset as string || "0", 10);
+    const limit = isNaN(rawLimit) ? 200 : Math.min(500, Math.max(1, rawLimit));
+    const offset = isNaN(rawOffset) ? 0 : Math.max(0, rawOffset);
+    const result = await storage.getAllUsersWithDetails(limit, offset);
+    ok(res, result);
+  }));
+
+  app.get("/api/admin/db/users", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "50", 10);
+    const rawOffset = parseInt(req.query.offset as string || "0", 10);
+    const limit = isNaN(rawLimit) ? 50 : Math.min(200, Math.max(1, rawLimit));
+    const offset = isNaN(rawOffset) ? 0 : Math.max(0, rawOffset);
+    const result = await storage.getAllUsersWithDetails(limit, offset);
+    ok(res, result);
+  }));
+
+  app.get("/api/admin/db/top-users", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "20", 10);
+    const limit = isNaN(rawLimit) ? 20 : Math.min(100, Math.max(1, rawLimit));
+    ok(res, await storage.getTopUsers(limit));
+  }));
+
+  app.get("/api/admin/db/recent-searches", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "50", 10);
+    const limit = isNaN(rawLimit) ? 50 : Math.min(200, Math.max(1, rawLimit));
+    ok(res, await storage.getRecentSearches(limit));
+  }));
+
+  app.get("/api/admin/db/cached-books", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "100", 10);
+    const limit = isNaN(rawLimit) ? 100 : Math.min(500, Math.max(1, rawLimit));
+    try {
+      const { db } = await import("./storage.js");
+      const { cachedBooks } = await import("../shared/schema.js");
+      const { desc } = await import("drizzle-orm");
+      const rows = await db.select().from(cachedBooks).orderBy(desc(cachedBooks.timesServed)).limit(limit);
+      ok(res, rows);
+    } catch (err) {
+      L.error("admin", "cached-books query failed", { err: String(err).slice(0, 200) });
+      ok(res, []);
+    }
+  }));
+
+  app.get("/api/admin/db/user/:id", auth, wrap(async (req, res) => {
+    const id = req.params.id;
+    try {
+      const history = await storage.getUserSearchHistory(id, 50);
+      const limit = await storage.getDailyDownloadCount(id);
+      ok(res, { telegramId: id, history, todayDownloads: limit });
+    } catch (err) {
+      ok(res, { telegramId: id, history: [], todayDownloads: 0 });
+    }
+  }));
+
+  // Full user profile (drilldown) — used by UserModal
+  app.get("/api/admin/db/user/:id/full", auth, wrap(async (req, res) => {
+    const id = req.params.id;
+    try {
+      const { db } = await import("./storage.js");
+      const { users, searchLogs } = await import("../shared/schema.js");
+      const { eq, desc, sql } = await import("drizzle-orm");
+
+      const [userRow] = await db.select().from(users).where(eq(users.telegramId, id)).limit(1);
+      const recentSearches = await db.select().from(searchLogs)
+        .where(eq(searchLogs.telegramUserId, id))
+        .orderBy(desc(searchLogs.createdAt))
+        .limit(50);
+      const daily = await db.select({
+        day: sql<string>`TO_CHAR(${searchLogs.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`,
+        searches: sql<number>`COUNT(*)::int`,
+        downloads: sql<number>`COUNT(*) FILTER (WHERE ${searchLogs.pdfSent} = true)::int`,
+        success: sql<number>`COUNT(*) FILTER (WHERE ${searchLogs.bookFound} = true)::int`,
+      }).from(searchLogs)
+        .where(eq(searchLogs.telegramUserId, id))
+        .groupBy(sql`TO_CHAR(${searchLogs.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`)
+        .orderBy(sql`TO_CHAR(${searchLogs.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD') DESC`)
+        .limit(30);
+
+      const [premiumStatus, bannedStatus, todayDownloads] = await Promise.all([
+        isPremium(id).catch(() => false),
+        (redis.sismember("banned_users", id).catch(() => 0)).then(v => !!v),
+        storage.getDailyDownloadCount(id).catch(() => 0),
+      ]);
+
+      ok(res, {
+        user: userRow || { telegramId: id, firstName: null, username: null, totalSearches: 0, totalDownloads: 0, createdAt: null },
+        recentSearches,
+        daily: daily.reverse(),
+        premium: premiumStatus,
+        banned: bannedStatus,
+        todayDownloads,
+      });
+    } catch (err) {
+      L.error("admin", "user/full failed", { id, err: String(err).slice(0, 200) });
+      ok(res, { user: null, recentSearches: [], daily: [], premium: false, banned: false, todayDownloads: 0 });
+    }
+  }));
+
+  // Failed searches — top queries that didn't find anything
+  app.get("/api/admin/db/failed-searches", auth, wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "100", 10);
+    const limit = isNaN(rawLimit) ? 100 : Math.min(500, Math.max(1, rawLimit));
+    try {
+      const { db } = await import("./storage.js");
+      const { searchLogs } = await import("../shared/schema.js");
+      const { eq, sql } = await import("drizzle-orm");
+      const rows = await db.select({
+        query: searchLogs.query,
+        times: sql<number>`COUNT(*)::int`,
+        users: sql<number>`COUNT(DISTINCT ${searchLogs.telegramUserId})::int`,
+        lastTry: sql<string>`MAX(${searchLogs.createdAt})`,
+      }).from(searchLogs)
+        .where(eq(searchLogs.bookFound, false))
+        .groupBy(searchLogs.query)
+        .orderBy(sql`COUNT(*) DESC`)
+        .limit(limit);
+      ok(res, rows);
+    } catch (err) {
+      L.error("admin", "failed-searches query failed", { err: String(err).slice(0, 200) });
+      ok(res, []);
+    }
+  }));
+
+  // Hour-of-day × day-of-week heatmap
+  app.get("/api/admin/db/hourly-heatmap", auth, wrap(async (_req, res) => {
+    try {
+      const { db } = await import("./storage.js");
+      const { searchLogs } = await import("../shared/schema.js");
+      const { sql } = await import("drizzle-orm");
+      const rows = await db.select({
+        dow: sql<number>`EXTRACT(DOW FROM ${searchLogs.createdAt})::int`,
+        hour: sql<number>`EXTRACT(HOUR FROM ${searchLogs.createdAt})::int`,
+        count: sql<number>`COUNT(*)::int`,
+      }).from(searchLogs).groupBy(sql`EXTRACT(DOW FROM ${searchLogs.createdAt}), EXTRACT(HOUR FROM ${searchLogs.createdAt})`);
+      // Build 7×24 matrix
+      const matrix: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+      let max = 0;
+      for (const r of rows) {
+        const d = Number(r.dow), h = Number(r.hour), c = Number(r.count);
+        if (d >= 0 && d < 7 && h >= 0 && h < 24) {
+          matrix[d][h] = c;
+          if (c > max) max = c;
+        }
+      }
+      ok(res, { matrix, max });
+    } catch (err) {
+      L.error("admin", "heatmap query failed", { err: String(err).slice(0, 200) });
+      ok(res, { matrix: Array.from({ length: 7 }, () => Array(24).fill(0)), max: 0 });
+    }
+  }));
+
+  // ── source toggle (تفعيل/إيقاف مصدر من الـ dashboard) ────────
+  app.post("/api/admin/sources/:domain/toggle", auth, wrap(async (req, res) => {
+    const { domain } = req.params;
+    const { action }  = req.body as { action: "enable" | "disable" };
+    const key = `src:off:${domain}`;
+    if (action === "disable") {
+      await redis.set(key, "1");
+      L.adminAction("dashboard", `source disabled: ${domain}`);
+    } else {
+      await redis.del(key);
+      L.adminAction("dashboard", `source enabled: ${domain}`);
+    }
+    ok(res, { domain, enabled: action === "enable" });
+  }));
+
+  // ── broadcast (بث جماعي من الـ dashboard) ────────────────────
+  app.post("/api/admin/broadcast", auth, wrap(async (req, res) => {
+    const { message, parse_mode } = req.body as { message: string; parse_mode?: string };
+    if (!message?.trim()) { res.status(400).json({ ok: false, error: "message required" }); return; }
+    // نُشغِّل البث عبر event — bot/admin.ts يتولى الإرسال
+    (process.emit as any)("dashboard:broadcast", { message, parse_mode: parse_mode || "Markdown" });
+    L.adminAction("dashboard", `broadcast sent: ${message.slice(0, 50)}`);
+    ok(res, { queued: true });
+  }));
+
+  // ── user info ─────────────────────────────────────────────────
+  app.get("/api/admin/users/:id/info", auth, wrap(async (req, res) => {
+    const { id } = req.params;
+    const [prem, limit, dlCount, banned] = await Promise.all([
+      isPremium(id),
+      getUserDailyLimit(id),
+      storage.getDailyDownloadCount(id).catch(() => 0),
+      (redis.sismember("banned_users", id).catch(() => 0)).then(v => !!v),
+    ]);
+    ok(res, { id, premium: prem, dailyLimit: limit, todayDownloads: dlCount, banned });
+  }));
+
+  // ═══════════════════════════════════════════════════════════
+  //  PUBLIC API — للـ Mobile App
+  //  لا يحتاج auth — مفتوح لأي client
+  // ═══════════════════════════════════════════════════════════
+
+  // ── GET /api/search?q={bookName} ──────────────────────────
+  // يبحث في 13+ مصدر عربي ويُعيد أفضل نتيجة
+  app.get("/api/search", wrap(async (req, res) => {
+    const q = ((req.query.q as string) || "").trim();
+    if (!q || q.length < 2) {
+      return fail(res, "query too short", 400);
+    }
+    if (q.length > 200) {
+      return fail(res, "query too long", 400);
+    }
+
+    try {
+      // 1. جرّب الكاش أولاً
+      const cached = await getSearchCacheResults(q).catch(() => []);
+      if (cached.length > 0) {
+        const best = cached[0];
+        return ok(res, {
+          title:   best.title,
+          author:  extractAuthor(best.title),
+          pdfUrl:  best.directPdfUrl || best.url,
+          source:  best.source?.name || best.source?.domain || "مصدر عربي",
+          emoji:   best.source?.emoji || "📚",
+          sizeMB:  null,
+          cached:  true,
+        });
+      }
+
+      // 2. بحث حقيقي في المصادر
+      const results = await searchAllSources(q);
+      if (!results || results.length === 0) {
+        // أعد اقتراحات مشابهة
+        const suggestions = getSuggestionsFor(q);
+        return ok(res, {
+          found:       false,
+          suggestions,
+          tips:        [],
+        });
+      }
+
+      // أعد أفضل نتيجة
+      const best = results[0];
+      return ok(res, {
+        title:   best.title,
+        author:  extractAuthor(best.title),
+        pdfUrl:  best.directPdfUrl || best.url,
+        source:  best.source?.name || best.source?.domain || "مصدر عربي",
+        emoji:   best.source?.emoji || "📚",
+        sizeMB:  null,
+        cached:  false,
+        found:   true,
+      });
+    } catch (e) {
+      L.error("api", "search error", { q: q.slice(0, 50), err: String(e).slice(0, 100) });
+      return fail(res, "search failed", 500);
+    }
+  }));
+
+  // ── GET /api/random?genre={genre} ────────────────────────
+  // يُعيد كتاباً عشوائياً من النوع المطلوب
+  app.get("/api/random", wrap(async (req, res) => {
+    const genreId = ((req.query.genre as string) || "").trim().toLowerCase();
+
+    // ابحث عن النوع المطلوب
+    let genre = GENRES.find(g => g.id === genreId);
+    if (!genre && genreId) {
+      // جرّب بالاسم العربي
+      genre = GENRES.find(g =>
+        normalizeArabic(g.label).includes(normalizeArabic(genreId)) ||
+        normalizeArabic(genreId).includes(normalizeArabic(g.label))
+      );
+    }
+    // لو ما لقيناش → اختر نوع عشوائي
+    if (!genre) {
+      genre = GENRES[Math.floor(Math.random() * GENRES.length)];
+    }
+
+    // اختر كتاباً عشوائياً من النوع
+    const books = genre.books || [];
+    if (!books.length) return fail(res, "no books for genre", 404);
+
+    const book = books[Math.floor(Math.random() * books.length)];
+
+    return ok(res, {
+      title:   book,
+      author:  extractAuthor(book),
+      genre:   genre.label,
+      genreId: genre.id,
+      emoji:   genre.emoji || "📚",
+    });
+  }));
+
+  // ── GET /api/top-books?limit=10 ──────────────────────────
+  // أكثر الكتب طلباً — بدون auth
+  app.get("/api/top-books", wrap(async (req, res) => {
+    const rawLimit = parseInt(req.query.limit as string || "10", 10);
+    const limit = isNaN(rawLimit) ? 10 : Math.min(50, Math.max(1, rawLimit));
+    const books = await getTopBooks(limit).catch(() => []);
+    return ok(res, books);
+  }));
+
+  // ── GET /api/genres ──────────────────────────────────────
+  // قائمة الأنواع المتاحة للـ random
+  app.get("/api/genres", (_req, res) => {
+    ok(res, GENRES.map(g => ({
+      id:    g.id,
+      label: g.label,
+      emoji: g.emoji,
+      count: (g.books || []).length,
+    })));
+  });
+
+  // ── POST /api/broadcast (من dashboard) ──────────────────
+  // listener للـ broadcast event
+  process.on("dashboard:broadcast" as any, async ({ message, parse_mode }: { message: string; parse_mode: string }) => {
+    try {
+      const allIds = await storage.getAllUserIds().catch(() => [] as string[]);
+      L.info("broadcast", `Sending to ${allIds.length} users`);
+      let sent = 0, failed = 0;
+      for (const userId of allIds) {
+        try {
+          // استخدم botInstance من index.ts عبر global
+          const botGlobal = (global as any).__botInstance;
+          if (botGlobal) {
+            await botGlobal.sendMessage(Number(userId), message, { parse_mode });
+            sent++;
+          }
+          // rate limit: 30 رسالة/ثانية لـ Telegram API
+          if (sent % 30 === 0) await new Promise(r => setTimeout(r, 1000));
+        } catch { failed++; }
+      }
+      L.info("broadcast", `Done: ${sent} sent, ${failed} failed`);
+    } catch (e) {
+      L.error("broadcast", "broadcast error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+}
+
+// ── Helpers للـ public API ────────────────────────────────────
+
+/** يستخرج اسم المؤلف من "العنوان — المؤلف" */
+function extractAuthor(title: string): string {
+  const sep = title.includes(" — ") ? " — " : title.includes(" - ") ? " - " : null;
+  if (sep) {
+    const parts = title.split(sep);
+    if (parts.length >= 2) return parts[parts.length - 1].trim();
+  }
+  return "";
+}
+
+/** يُعيد اقتراحات مشابهة للكتاب غير الموجود */
+function getSuggestionsFor(bookName: string): string[] {
+  const norm = normalizeArabic(bookName);
+  for (const [keys, books] of Object.entries(GENRE_MAP)) {
+    if (keys.split("|").some(k => norm.includes(normalizeArabic(k)) || normalizeArabic(k).includes(norm))) {
+      return books.slice(0, 3);
+    }
+  }
+  // fallback: 3 كتب عشوائية من SUGGESTIONS
+  return SUGGESTIONS.sort(() => 0.5 - Math.random()).slice(0, 3);
 }
 
 // ── System info helper ────────────────────────────────────────

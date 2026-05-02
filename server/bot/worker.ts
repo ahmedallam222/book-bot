@@ -36,7 +36,7 @@ export function initWorkers(bot: TelegramBot): void {
   // الحل: نُشغّل الاسترداد أولاً بـ async IIFE ثم نُطلق العمال بعده
   (async () => {
     try {
-      await recoverStuckJobs(bot);
+      await recoverStuckJobs();
     } catch (e) {
       L.error("worker", "recoverStuckJobs error", { err: String(e).slice(0, 100) });
     }
@@ -68,7 +68,12 @@ async function runWorker(bot: TelegramBot, id: number): Promise<void> {
       continue;
     }
 
-    if (!job) continue; // BRPOP timeout → حاول مجدداً
+    if (!job) {
+      // lpop non-blocking — لو الطابور فاضي ننتظر قبل إعادة المحاولة
+      // بدون sleep هنا: tight loop يضرب Redis بـ ~1000 req/sec لكل worker
+      await sleep(500);
+      continue;
+    }
 
     _active++;
     L.queueProcess(job.id, job.userId, job.bookName);
@@ -101,9 +106,10 @@ async function runWorker(bot: TelegramBot, id: number): Promise<void> {
         isTimeout,
       });
 
-      const wentToDLQ = await failJob(job, err.slice(0, 100));
-      if (wentToDLQ) {
-        // وصل للـ DLQ — أشعر المستخدم (failJob لم يُشعره)
+      // failJob تُعيد: true = أُعيدت للطابور (retry)، false = ذهبت للـ DLQ
+      const sentToRetry = await failJob(job);
+      if (!sentToRetry) {
+        // وصل للـ DLQ فعلاً — أشعر المستخدم (failJob لم يُشعره)
         await bot.sendMessage(
           job.chatId,
           `❌ *لم أتمكن من إيجاد "${job.bookName.slice(0, 40)}"*\n\nحاول مرة أخرى لاحقاً.`,

@@ -4,9 +4,9 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>خلاصة الكتب — لوحة الإدارة</title>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Noto+Kufi+Arabic:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -35,7 +35,7 @@ button{cursor:pointer;font-family:'Noto Kufi Arabic',sans-serif}
 // ══════════════════════════════════════════════
 // CONFIG — يُقرأ تلقائياً من نفس السيرفر
 // ══════════════════════════════════════════════
-const ADMIN_ID = "5469997406";
+const ADMIN_ID = "8f499d422f14bba46186b53ca489acbb";
 const API_BASE = "";   // نفس الـ origin دائماً — لا mixed content
 const REFRESH  = 30000;
 
@@ -99,19 +99,78 @@ async function apiAct(method,path,body){
   await apiFetch(path,{method,body:body?JSON.stringify(body):undefined});
   return true;
 }
+function _norm(d){
+  if(!d) return d;
+  // total: API returns {searches,downloads,users}; UI wants {totalSearches,totalDownloads}
+  if(d.total){
+    d.total.totalSearches  = d.total.totalSearches  ?? d.total.searches  ?? 0;
+    d.total.totalDownloads = d.total.totalDownloads ?? d.total.downloads ?? 0;
+  }
+  // today: derive missing fields
+  if(d.today){
+    d.today.success      = d.today.success      ?? d.today.found        ?? 0;
+    d.today.fail         = d.today.fail         ?? Math.max(0,(d.today.searches||0)-(d.today.success||0));
+    d.today.cacheHits    = d.today.cacheHits    ?? d.today.cache_hits    ?? 0;
+    d.today.cacheRate    = d.today.cacheRate    ?? (d.today.searches>0?((d.today.cacheHits/d.today.searches)*100).toFixed(1)+"%":"0%");
+    d.today.successRate  = d.today.successRate  ?? (d.today.searches>0?((d.today.success/d.today.searches)*100).toFixed(1)+"%":"0%");
+    d.today.activeUsers  = d.today.activeUsers  ?? d.today.users         ?? 0;
+    d.today.avgMs        = d.today.avgMs        ?? d.today.avg_ms        ?? 0;
+  }
+  // weekly: API returns object {date: {...}}; UI wants array [{date,...}]
+  if(d.weekly && !Array.isArray(d.weekly)){
+    d.weekly = Object.entries(d.weekly).map(([date,v])=>({
+      date: date.slice(5),
+      searches: v.searches||0,
+      downloads: v.downloads||0,
+      success: v.found??v.success??0,
+      fail: Math.max(0,(v.searches||0)-(v.found??v.success??0)),
+      cacheHits: v.cacheHits||v.cache_hits||0,
+      activeUsers: v.activeUsers||v.users||0,
+      avgMs: v.avgMs||v.avg_ms||0,
+    })).sort((a,b)=>a.date.localeCompare(b.date));
+  }
+  return d;
+}
 async function loadOv(){
   const d=await apiFetch("overview");
-  if(d) return d;
+  if(d) return _norm(d);
   return {today:MOCK.today,total:MOCK.total,queue:MOCK.queue,premium:MOCK.premium,
           banned:MOCK.banned,blacklist:MOCK.blacklist,system:MOCK.system,weekly:MOCK.weekly};
 }
-async function loadBooks()  { return (await apiFetch("stats/top-books?limit=15")) ?? MOCK.topBooks; }
+async function loadBooks()  {
+  const r = await apiFetch("stats/top-books?limit=15");
+  if(!r) return MOCK.topBooks;
+  // API returns [{book,count}]; UI wants [{title,count}]
+  return r.map(x=>({title: x.title ?? x.book ?? "—", count: x.count||0}));
+}
 async function loadSrc()    { return (await apiFetch("stats/sources"))            ?? MOCK.sources; }
 async function loadDLQ()    { return (await apiFetch("queue/dlq?limit=30"))        ?? MOCK.dlqJobs; }
 async function loadPrem()   { return (await apiFetch("users/premium"))             ?? MOCK.premiumUsers; }
 async function loadBanned() { return (await apiFetch("users/banned"))              ?? MOCK.bannedUsers; }
 async function loadFunnel() { return (await apiFetch("telemetry/funnel"))           ?? null; }
 async function loadTraces() { return (await apiFetch("telemetry/traces?limit=30"))  ?? []; }
+
+// ══════════════════════════════════════════════
+// CSV Export
+// ══════════════════════════════════════════════
+function exportCSV(filename, rows, columns){
+  if(!rows?.length){alert("لا توجد بيانات للتصدير");return;}
+  const header = columns.map(c=>`"${c.label.replace(/"/g,'""')}"`).join(",");
+  const body = rows.map(r=>columns.map(c=>{
+    let v = typeof c.get==="function" ? c.get(r) : r[c.key];
+    if(v==null) v="";
+    if(typeof v==="object") v=JSON.stringify(v);
+    v=String(v).replace(/"/g,'""');
+    return `"${v}"`;
+  }).join(",")).join("\n");
+  const csv = "\uFEFF"+header+"\n"+body;  // BOM for Excel UTF-8
+  const blob = new Blob([csv],{type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${filename}-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 // ══════════════════════════════════════════════
 // TOKEN SHORTCUTS
@@ -124,11 +183,28 @@ const T={
   text:"#e6edf3",textMid:"#adbac7",muted:"#636e7b",dim:"#2d333b",
 };
 
+// Guard: لو Recharts مش محمّل، نعمل stub فارغ عشان الداشبورد ميكسرش
+const _R = (typeof Recharts !== 'undefined') ? Recharts : {};
+const CHARTS_OK = typeof Recharts !== 'undefined';
 const {
   AreaChart,Area,LineChart,Line,BarChart,Bar,RadialBarChart,RadialBar,
   XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer,Cell
-} = Recharts;
+} = _R;
 const {useState,useEffect,useCallback,useRef,createElement:h} = React;
+
+// ── ErrorBoundary — يحمي Analytics من crash لو Recharts فشل ──
+class ChartErrorBoundary extends React.Component {
+  constructor(props){super(props);this.state={err:false};}
+  static getDerivedStateFromError(){return{err:true};}
+  render(){
+    if(this.state.err||!CHARTS_OK) return this.props.fallback||null;
+    return this.props.children;
+  }
+}
+
+// ── SafeChart — wrapper آمن حول أي مكون Recharts ──
+const SafeChart=({fallback,children})=>
+  h(ChartErrorBoundary,{fallback:fallback||h("div",{style:{color:T.muted,fontSize:12,padding:12}},"⚠️ تعذّر تحميل الرسم البياني")},children);
 
 // ══════════════════════════════════════════════
 // ATOMS
@@ -199,7 +275,7 @@ function KPI({icon,label,value,sub,color=T.gold,trend}){
       h("span",{style:{fontSize:24,lineHeight:1,marginTop:4}},icon),
       h("div",{style:{flex:1}},
         h("div",{style:{fontSize:11,color:T.muted,marginBottom:5,fontWeight:500}},label),
-        h("div",{className:"mono",style:{fontSize:26,fontWeight:700,color,lineHeight:1}},value||"—"),
+        h("div",{className:"mono",style:{fontSize:26,fontWeight:700,color,lineHeight:1}},value??"—"),
         sub&&h("div",{style:{fontSize:11,color:T.muted,marginTop:5}},sub),
         trend!=null&&h("div",{style:{fontSize:11,marginTop:4,color:trend>0?T.green:trend<0?T.red:T.muted}},
           trend>0?"↑":trend<0?"↓":"→"," ",Math.abs(trend),"%")
@@ -216,7 +292,7 @@ function OverviewTab({ov}){
   if(!ov) return h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}},
     Array(12).fill(0).map((_,i)=>h(Card,{key:i},h(Sk,{h:70}))));
   const {today,total,queue,premium,banned,system}=ov;
-  const sr=today.downloads>0?((today.success/today.downloads)*100).toFixed(1):"0";
+  const sr=today.searches>0?((today.success/today.searches)*100).toFixed(1):"0";
   const kpis=[
     {icon:"🔍",label:"بحث اليوم",value:today.searches.toLocaleString(),color:T.blue,sub:`إجمالي: ${total.totalSearches.toLocaleString()}`},
     {icon:"📥",label:"تحميل اليوم",value:today.downloads.toLocaleString(),color:T.gold,sub:`إجمالي: ${total.totalDownloads.toLocaleString()}`,trend:8},
@@ -240,33 +316,35 @@ function OverviewTab({ov}){
   );
 }
 
-function AnalyticsTab({weekly}){
+function AnalyticsTab({weekly,heatmap}){
   if(!weekly?.length) return h(Card,null,h(Sk,{h:260}));
   const data=weekly.map(d=>({...d,
-    "نجاح٪":d.downloads>0?+((d.success/d.downloads)*100).toFixed(1):0,
-    "كاش٪":d.success>0?+((d.cacheHits/d.success)*100).toFixed(1):0,
+    "نجاح٪":d.searches>0?+((d.success/d.searches)*100).toFixed(1):0,
+    "كاش٪":d.searches>0?+((d.cacheHits/d.searches)*100).toFixed(1):0,
   }));
   return h("div",{className:"fade-up",style:{display:"flex",flexDirection:"column",gap:16}},
     h(Card,null,
       h(SH,{icon:"📈",title:"الحركة اليومية — آخر 7 أيام"}),
-      h(ResponsiveContainer,{width:"100%",height:220},
-        h(AreaChart,{data,margin:{top:4,right:4,left:-24,bottom:0}},
-          h("defs",null,
-            ["gB","gG","gGr","gP"].map((id,i)=>
-              h("linearGradient",{key:id,id,x1:"0",y1:"0",x2:"0",y2:"1"},
-                h("stop",{offset:"5%",stopColor:[T.blue,T.gold,T.green,T.purple][i],stopOpacity:.35}),
-                h("stop",{offset:"95%",stopColor:[T.blue,T.gold,T.green,T.purple][i],stopOpacity:0})
+      h(SafeChart,{fallback:h("div",{style:{color:T.muted,fontSize:12,padding:8}},"⚠️ تعذّر تحميل المخطط — تحقق من اتصال الإنترنت أو أعد تحميل الصفحة")},
+        h(ResponsiveContainer,{width:"100%",height:220},
+          h(AreaChart,{data,margin:{top:4,right:4,left:-24,bottom:0}},
+            h("defs",null,
+              ["gB","gG","gGr","gP"].map((id,i)=>
+                h("linearGradient",{key:id,id,x1:"0",y1:"0",x2:"0",y2:"1"},
+                  h("stop",{offset:"5%",stopColor:[T.blue,T.gold,T.green,T.purple][i],stopOpacity:.35}),
+                  h("stop",{offset:"95%",stopColor:[T.blue,T.gold,T.green,T.purple][i],stopOpacity:0})
+                )
               )
-            )
-          ),
-          h(CartesianGrid,{strokeDasharray:"3 3",stroke:T.border}),
-          h(XAxis,{dataKey:"date",tick:{fontSize:11,fill:T.muted},stroke:T.border}),
-          h(YAxis,{tick:{fontSize:10,fill:T.muted},stroke:T.border}),
-          h(Tooltip,{content:h(CT)}),
-          h(Area,{type:"monotone",dataKey:"searches",name:"بحث",stroke:T.blue,fill:"url(#gB)",strokeWidth:2}),
-          h(Area,{type:"monotone",dataKey:"downloads",name:"تحميل",stroke:T.gold,fill:"url(#gG)",strokeWidth:2}),
-          h(Area,{type:"monotone",dataKey:"success",name:"نجاح",stroke:T.green,fill:"url(#gGr)",strokeWidth:2}),
-          h(Area,{type:"monotone",dataKey:"cacheHits",name:"كاش",stroke:T.purple,fill:"url(#gP)",strokeWidth:2})
+            ),
+            h(CartesianGrid,{strokeDasharray:"3 3",stroke:T.border}),
+            h(XAxis,{dataKey:"date",tick:{fontSize:11,fill:T.muted},stroke:T.border}),
+            h(YAxis,{tick:{fontSize:10,fill:T.muted},stroke:T.border}),
+            h(Tooltip,{content:h(CT)}),
+            h(Area,{type:"monotone",dataKey:"searches",name:"بحث",stroke:T.blue,fill:"url(#gB)",strokeWidth:2}),
+            h(Area,{type:"monotone",dataKey:"downloads",name:"تحميل",stroke:T.gold,fill:"url(#gG)",strokeWidth:2}),
+            h(Area,{type:"monotone",dataKey:"success",name:"نجاح",stroke:T.green,fill:"url(#gGr)",strokeWidth:2}),
+            h(Area,{type:"monotone",dataKey:"cacheHits",name:"كاش",stroke:T.purple,fill:"url(#gP)",strokeWidth:2})
+          )
         )
       ),
       h("div",{style:{display:"flex",gap:16,marginTop:8,flexWrap:"wrap"}},
@@ -288,8 +366,8 @@ function AnalyticsTab({weekly}){
             )
           )),
           h("tbody",null,weekly.map((d,i)=>{
-            const sr2=d.downloads>0?((d.success/d.downloads)*100).toFixed(1):"0";
-            const cr=d.success>0?((d.cacheHits/d.success)*100).toFixed(1):"0";
+            const sr2=d.searches>0?((d.success/d.searches)*100).toFixed(1):"0";
+            const cr=d.searches>0?((d.cacheHits/d.searches)*100).toFixed(1):"0";
             return h("tr",{key:i,style:{borderBottom:`1px solid ${T.border}20`}},
               h("td",{className:"mono",style:{color:T.muted,fontSize:12}},d.date),
               h("td",{className:"mono",style:{color:T.blue,fontWeight:600}},d.searches),
@@ -304,8 +382,21 @@ function AnalyticsTab({weekly}){
             );
           }))
         )
+      ),
+      h("div",{style:{marginTop:10,display:"flex",justifyContent:"flex-end"}},
+        h(Btn,{variant:"ghost",onClick:()=>exportCSV("daily-stats",weekly,[
+          {key:"date",label:"التاريخ"},
+          {key:"searches",label:"بحث"},
+          {key:"downloads",label:"تحميل"},
+          {key:"success",label:"نجاح"},
+          {key:"fail",label:"فشل"},
+          {key:"cacheHits",label:"كاش"},
+          {key:"activeUsers",label:"مستخدمون"},
+          {key:"avgMs",label:"ms"},
+        ])},"📥 تصدير CSV")
       )
-    )
+    ),
+    h(Heatmap,{data:heatmap})
   );
 }
 
@@ -335,14 +426,16 @@ function BooksTab({books}){
     ),
     h(Card,null,
       h(SH,{icon:"📊",title:"توزيع الطلبات"}),
-      h(ResponsiveContainer,{width:"100%",height:320},
-        h(BarChart,{data:barData,layout:"vertical",margin:{top:0,right:30,left:0,bottom:0}},
-          h(CartesianGrid,{strokeDasharray:"3 3",stroke:T.border,horizontal:false}),
-          h(XAxis,{type:"number",tick:{fontSize:10,fill:T.muted},stroke:T.border}),
-          h(YAxis,{dataKey:"name",type:"category",tick:{fontSize:10,fill:T.textMid},stroke:T.border,width:80}),
-          h(Tooltip,{content:h(CT)}),
-          h(Bar,{dataKey:"طلبات",radius:[0,6,6,0]},
-            barData.map((_,i)=>h(Cell,{key:i,fill:i===0?T.gold:i===1?T.goldMid:i===2?"#b87333":T.dim}))
+      h(SafeChart,null,
+        h(ResponsiveContainer,{width:"100%",height:320},
+          h(BarChart,{data:barData,layout:"vertical",margin:{top:0,right:30,left:0,bottom:0}},
+            h(CartesianGrid,{strokeDasharray:"3 3",stroke:T.border,horizontal:false}),
+            h(XAxis,{type:"number",tick:{fontSize:10,fill:T.muted},stroke:T.border}),
+            h(YAxis,{dataKey:"name",type:"category",tick:{fontSize:10,fill:T.textMid},stroke:T.border,width:80}),
+            h(Tooltip,{content:h(CT)}),
+            h(Bar,{dataKey:"طلبات",radius:[0,6,6,0]},
+              barData.map((_,i)=>h(Cell,{key:i,fill:i===0?T.gold:i===1?T.goldMid:i===2?"#b87333":T.dim}))
+            )
           )
         )
       )
@@ -422,10 +515,11 @@ function QueueTab({queue,dlq,onToast,onRefresh}){
   );
 }
 
-function UsersTab({prem,banned,onToast,onRefresh}){
+function UsersTab({prem,banned,allUsers,onToast,onRefresh,onUserClick}){
   const [tab,setTab]=useState("manage");
   const [uid,setUid]=useState("");
   const [lim,setLim]=useState("");
+  const [search,setSearch]=useState("");
   const SubBtn=({id,label})=>h("button",{onClick:()=>setTab(id),style:{
     background:tab===id?T.goldDim+"40":"transparent",border:`1px solid ${tab===id?T.gold:T.border}`,
     color:tab===id?T.gold:T.muted,padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:tab===id?600:400}},label);
@@ -443,10 +537,17 @@ function UsersTab({prem,banned,onToast,onRefresh}){
     const msgs={grantPrem:"✅ منح تميز",revokePrem:"✅ إلغاء تميز",ban:"🚫 تم الحظر",unban:"✅ رفع الحظر",setLim:`✅ حد: ${lim}`,resetLim:"✅ إعادة"};
     onToast(msgs[type]);onRefresh();
   };
+  // فلتر بحث المستخدمين
+  const filteredUsers=(allUsers?.users||[]).filter(u=>{
+    if(!search.trim())return true;
+    const q=search.toLowerCase();
+    return (u.telegramId||"").includes(q)||(u.firstName||"").toLowerCase().includes(q)||(u.username||"").toLowerCase().includes(q);
+  });
   return h("div",{className:"fade-up"},
     h(Card,null,
       h("div",{style:{display:"flex",gap:8,marginBottom:20,flexWrap:"wrap"}},
         h(SubBtn,{id:"manage",label:"⚙️ إدارة يدوية"}),
+        h(SubBtn,{id:"all",label:`👥 كل المستخدمين (${allUsers?.total??"-"})`}),
         h(SubBtn,{id:"premium",label:`⭐ مميزون (${prem?.length||0})`}),
         h(SubBtn,{id:"banned",label:`🚫 محظورون (${banned?.length||0})`})
       ),
@@ -467,6 +568,54 @@ function UsersTab({prem,banned,onToast,onRefresh}){
           h("input",{value:lim,onChange:e=>setLim(e.target.value),placeholder:"عدد الكتب (0=بلا حد)",style:{direction:"ltr",maxWidth:220}}),
           h(Btn,{variant:"gold",onClick:()=>act("setLim")},"💾 حفظ"),
           h(Btn,{variant:"ghost",onClick:()=>act("resetLim")},"♻️ إعادة")
+        )
+      ),
+      tab==="all"&&h("div",null,
+        // شريط بحث
+        h("div",{style:{marginBottom:14}},
+          h("input",{value:search,onChange:e=>setSearch(e.target.value),
+            placeholder:"🔍 ابحث باسم أو username أو ID...",
+            style:{width:"100%",maxWidth:380,direction:"rtl"}})
+        ),
+        !allUsers&&h(Sk,{h:200}),
+        allUsers&&h("div",null,
+          h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}},
+            h("div",{style:{fontSize:11,color:T.muted}},
+              `إجمالي: ${allUsers.total} مستخدم — يُعرض: ${filteredUsers.length}`
+            ),
+            h(Btn,{variant:"ghost",onClick:()=>exportCSV("users",allUsers.users||[],[
+              {key:"firstName",label:"الاسم"},
+              {key:"username",label:"Username"},
+              {key:"telegramId",label:"Telegram ID"},
+              {key:"totalSearches",label:"عدد البحث"},
+              {key:"totalDownloads",label:"عدد التحميل"},
+              {key:"createdAt",label:"تاريخ الانضمام"},
+            ])},"📥 تصدير CSV")
+          ),
+          h("div",{style:{fontSize:10,color:T.muted,marginBottom:8,opacity:.7}},"💡 اضغط على أي مستخدم لرؤية تفاصيله"),
+          h("div",{style:{overflowX:"auto"}},
+            h("table",null,
+              h("thead",null,h("tr",{style:{borderBottom:`2px solid ${T.border}`}},
+                ["الاسم","Username","Telegram ID","بحث","تحميل","تاريخ الانضمام"].map(hd=>
+                  h("th",{key:hd,style:{color:T.muted,fontWeight:500,fontSize:11,paddingBottom:10,whiteSpace:"nowrap",textAlign:"right"}},hd)
+                )
+              )),
+              h("tbody",null,filteredUsers.map((u,i)=>
+                h("tr",{key:i,onClick:()=>onUserClick&&onUserClick(u.telegramId),style:{borderBottom:`1px solid ${T.border}20`,cursor:"pointer",transition:"background 0.15s"},
+                  onMouseEnter:e=>e.currentTarget.style.background=T.card,
+                  onMouseLeave:e=>e.currentTarget.style.background="transparent"},
+                  h("td",{style:{fontWeight:500,fontSize:13}},u.firstName||h("span",{style:{color:T.dim}},"—")),
+                  h("td",{style:{color:T.muted,fontSize:12}},u.username?`@${u.username}`:h("span",{style:{color:T.dim}},"—")),
+                  h("td",{className:"mono",style:{color:T.textMid,fontSize:11}},u.telegramId),
+                  h("td",{className:"mono",style:{color:T.blue,fontWeight:600}},u.totalSearches||0),
+                  h("td",{className:"mono",style:{color:T.gold,fontWeight:600}},u.totalDownloads||0),
+                  h("td",{className:"mono",style:{color:T.muted,fontSize:11}},
+                    u.createdAt?new Date(u.createdAt).toLocaleDateString("ar-EG"):"-"
+                  )
+                )
+              ))
+            )
+          )
         )
       ),
       tab==="premium"&&h("div",{style:{maxHeight:360,overflowY:"auto",display:"flex",flexDirection:"column",gap:6}},
@@ -678,12 +827,320 @@ const TABS=[
   {id:"overview",icon:"🏠",label:"نظرة عامة"},
   {id:"analytics",icon:"📊",label:"التحليلات"},
   {id:"books",icon:"📚",label:"الكتب"},
+  {id:"failed",icon:"❌",label:"فشل البحث"},
+  {id:"cache",icon:"💾",label:"مكتبة الكاش"},
+  {id:"recent",icon:"🕐",label:"آخر الطلبات"},
   {id:"sources",icon:"🔌",label:"المصادر"},
   {id:"queue",icon:"🔄",label:"الطابور"},
   {id:"users",icon:"👥",label:"المستخدمون"},
   {id:"system",icon:"💻",label:"النظام"},
   {id:"telemetry",icon:"📡",label:"Telemetry"},
 ];
+
+// ── Cached Books Tab ──────────────────────────────────────────
+function CacheTab({books}){
+  const [search,setSearch]=useState("");
+  if(!books) return h(Card,null,h(Sk,{h:300}));
+  const filtered=books.filter(b=>!search.trim()||
+    (b.bookName||b.bookQuery||"").toLowerCase().includes(search.toLowerCase()));
+  const totalServed=books.reduce((s,b)=>s+(b.timesServed||0),0);
+  return h("div",{className:"fade-up"},
+    h(Card,null,
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:8}},
+        h(SH,{icon:"💾",title:`مكتبة الكاش — ${books.length} كتاب · ${totalServed} مرة استخدام`}),
+        h(Btn,{variant:"ghost",onClick:()=>exportCSV("cached-books",books,[
+          {key:"bookName",label:"اسم الكتاب"},
+          {key:"bookQuery",label:"الاستعلام"},
+          {key:"sourceUrl",label:"المصدر"},
+          {key:"timesServed",label:"مرات الاستخدام"},
+          {key:"createdAt",label:"تاريخ الإضافة"},
+        ])},"📥 تصدير CSV")
+      ),
+      h("div",{style:{marginBottom:12}},
+        h("input",{value:search,onChange:e=>setSearch(e.target.value),
+          placeholder:"🔍 ابحث في الكاش...",style:{width:"100%",maxWidth:380,direction:"rtl"}})
+      ),
+      h("div",{style:{fontSize:11,color:T.muted,marginBottom:10}},`يُعرض: ${filtered.length}`),
+      h("div",{style:{overflowX:"auto"}},
+        h("table",null,
+          h("thead",null,h("tr",{style:{borderBottom:`2px solid ${T.border}`}},
+            ["#","اسم الكتاب","المصدر","عدد مرات الاستخدام","تاريخ الإضافة"].map(hd=>
+              h("th",{key:hd,style:{color:T.muted,fontWeight:500,fontSize:11,paddingBottom:10,whiteSpace:"nowrap",textAlign:"right"}},hd))
+          )),
+          h("tbody",null,filtered.map((b,i)=>{
+            let domain="—";
+            if(b.sourceUrl){try{domain=new URL(b.sourceUrl).hostname.replace(/^www\./,"");}catch{}}
+            return h("tr",{key:b.id||i,style:{borderBottom:`1px solid ${T.border}20`}},
+              h("td",{className:"mono",style:{color:T.dim,fontSize:11}},i+1),
+              h("td",{style:{fontSize:13,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},b.bookName||b.bookQuery||"—"),
+              h("td",{style:{color:T.textMid,fontSize:11}},
+                b.sourceUrl?h("a",{href:b.sourceUrl,target:"_blank",rel:"noopener",style:{color:T.blue,textDecoration:"none"}},domain):"—"
+              ),
+              h("td",{className:"mono",style:{color:b.timesServed>0?T.gold:T.muted,fontWeight:600}},b.timesServed||0),
+              h("td",{className:"mono",style:{color:T.muted,fontSize:11}},
+                b.createdAt?new Date(b.createdAt).toLocaleDateString("ar-EG"):"—")
+            );
+          }))
+        )
+      )
+    )
+  );
+}
+
+// ── Recent Searches Tab ────────────────────────────────────────
+function RecentTab({searches}){
+  const [filter,setFilter]=useState("all");
+  if(!searches) return h(Card,null,h(Sk,{h:300}));
+  const filtered=searches.filter(s=>{
+    if(filter==="success")return s.bookFound===true;
+    if(filter==="failed")return s.bookFound===false;
+    if(filter==="downloaded")return s.pdfSent===true;
+    return true;
+  });
+  const total=searches.length;
+  const ok=searches.filter(s=>s.bookFound===true).length;
+  const dl=searches.filter(s=>s.pdfSent===true).length;
+  const FilterBtn=({id,label,count})=>h("button",{onClick:()=>setFilter(id),style:{
+    background:filter===id?T.goldDim+"40":"transparent",border:`1px solid ${filter===id?T.gold:T.border}`,
+    color:filter===id?T.gold:T.muted,padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:filter===id?600:400}},
+    `${label} (${count})`);
+  return h("div",{className:"fade-up"},
+    h(Card,null,
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:8}},
+        h(SH,{icon:"🕐",title:`آخر الطلبات — ${total} طلب`}),
+        h(Btn,{variant:"ghost",onClick:()=>exportCSV("recent-searches",searches,[
+          {key:"createdAt",label:"الوقت"},
+          {key:"userName",label:"المستخدم"},
+          {key:"telegramUserId",label:"Telegram ID"},
+          {key:"query",label:"الاستعلام"},
+          {key:"resultCount",label:"النتائج"},
+          {key:"bookFound",label:"وُجد"},
+          {key:"pdfSent",label:"اتسلّم"},
+        ])},"📥 تصدير CSV")
+      ),
+      h("div",{style:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}},
+        h(FilterBtn,{id:"all",label:"الكل",count:total}),
+        h(FilterBtn,{id:"success",label:"✅ نجاح",count:ok}),
+        h(FilterBtn,{id:"failed",label:"❌ فشل",count:total-ok}),
+        h(FilterBtn,{id:"downloaded",label:"📥 تم الإرسال",count:dl})
+      ),
+      h("div",{style:{overflowX:"auto"}},
+        h("table",null,
+          h("thead",null,h("tr",{style:{borderBottom:`2px solid ${T.border}`}},
+            ["#","الوقت","المستخدم","الطلب","نتائج","الحالة"].map(hd=>
+              h("th",{key:hd,style:{color:T.muted,fontWeight:500,fontSize:11,paddingBottom:10,whiteSpace:"nowrap",textAlign:"right"}},hd))
+          )),
+          h("tbody",null,filtered.slice(0,100).map((s,i)=>{
+            const ago=s.createdAt?Math.floor((Date.now()-new Date(s.createdAt).getTime())/60000):0;
+            const agoStr=ago<60?`${ago}د`:ago<1440?`${Math.floor(ago/60)}س`:`${Math.floor(ago/1440)}ي`;
+            return h("tr",{key:s.id||i,style:{borderBottom:`1px solid ${T.border}20`}},
+              h("td",{className:"mono",style:{color:T.dim,fontSize:11}},i+1),
+              h("td",{className:"mono",style:{color:T.muted,fontSize:11}},agoStr),
+              h("td",{style:{fontSize:12,color:T.textMid}},s.userName||h("span",{className:"mono",style:{color:T.dim,fontSize:10}},s.telegramUserId||"—")),
+              h("td",{style:{fontSize:12,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},s.query||"—"),
+              h("td",{className:"mono",style:{color:T.muted,fontSize:11}},s.resultCount||0),
+              h("td",null,
+                s.pdfSent?h("span",{style:{color:T.gold,fontSize:11,fontWeight:600}},"📥 تم الإرسال"):
+                s.bookFound?h("span",{style:{color:T.green,fontSize:11,fontWeight:600}},"✅ وُجد"):
+                h("span",{style:{color:T.red,fontSize:11,fontWeight:600}},"❌ فشل"))
+            );
+          }))
+        )
+      )
+    )
+  );
+}
+
+// ── Failed Searches Tab ────────────────────────────────────────
+function FailedTab({failed}){
+  const [search,setSearch]=useState("");
+  if(!failed) return h(Card,null,h(Sk,{h:300}));
+  const filtered=failed.filter(f=>!search.trim()||(f.query||"").toLowerCase().includes(search.toLowerCase()));
+  const totalHits=failed.reduce((s,f)=>s+(f.times||0),0);
+  return h("div",{className:"fade-up"},
+    h(Card,null,
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:8}},
+        h(SH,{icon:"❌",title:`أكتر الطلبات الفاشلة — ${failed.length} استعلام مختلف · ${totalHits} محاولة`}),
+        h(Btn,{variant:"ghost",onClick:()=>exportCSV("failed-searches",failed,[
+          {key:"query",label:"الاستعلام"},
+          {key:"times",label:"عدد المحاولات"},
+          {key:"users",label:"عدد المستخدمين"},
+          {key:"lastTry",label:"آخر محاولة",get:r=>r.lastTry?new Date(r.lastTry).toISOString():""}
+        ])},"📥 تصدير CSV")
+      ),
+      h("div",{style:{fontSize:11,color:T.textMid,marginBottom:14,padding:"8px 12px",background:T.redDim+"33",borderRadius:8,borderRight:`3px solid ${T.red}`}},
+        "💡 الكتب اللي ناس طلبتها وفشل البوت يلاقيها — فرصة تضيف مصادر جديدة أو تحسّن البحث"),
+      h("div",{style:{marginBottom:12}},
+        h("input",{value:search,onChange:e=>setSearch(e.target.value),
+          placeholder:"🔍 ابحث في الطلبات الفاشلة...",style:{width:"100%",maxWidth:380,direction:"rtl"}})
+      ),
+      h("div",{style:{overflowX:"auto"}},
+        h("table",null,
+          h("thead",null,h("tr",{style:{borderBottom:`2px solid ${T.border}`}},
+            ["#","الاستعلام","عدد المحاولات","مستخدمين","آخر محاولة"].map(hd=>
+              h("th",{key:hd,style:{color:T.muted,fontWeight:500,fontSize:11,paddingBottom:10,whiteSpace:"nowrap",textAlign:"right"}},hd))
+          )),
+          h("tbody",null,filtered.slice(0,200).map((f,i)=>{
+            const ago=f.lastTry?Math.floor((Date.now()-new Date(f.lastTry).getTime())/3600000):0;
+            const agoStr=ago<1?"أقل من ساعة":ago<24?`${ago} ساعة`:`${Math.floor(ago/24)} يوم`;
+            return h("tr",{key:i,style:{borderBottom:`1px solid ${T.border}20`}},
+              h("td",{className:"mono",style:{color:T.dim,fontSize:11}},i+1),
+              h("td",{style:{fontSize:13,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},f.query||"—"),
+              h("td",{className:"mono",style:{color:f.times>=3?T.red:T.orange,fontWeight:700}},f.times),
+              h("td",{className:"mono",style:{color:T.muted}},f.users),
+              h("td",{className:"mono",style:{color:T.muted,fontSize:11}},agoStr)
+            );
+          }))
+        )
+      )
+    )
+  );
+}
+
+// ── Heatmap (hour × day-of-week) ───────────────────────────────
+function Heatmap({data}){
+  if(!data) return h(Card,null,h(Sk,{h:240}));
+  const days=["أحد","اثنين","ثلاثاء","أربعاء","خميس","جمعة","سبت"];
+  const max=data.max||1;
+  const cellColor=(v)=>{
+    if(!v) return T.dim;
+    const intensity=v/max;
+    // gold gradient
+    const alpha=Math.max(0.15,intensity);
+    return `rgba(212,168,67,${alpha.toFixed(2)})`;
+  };
+  return h(Card,null,
+    h(SH,{icon:"🔥",title:"خريطة النشاط — يوم الأسبوع × ساعة (UTC)"}),
+    h("div",{style:{overflowX:"auto"}},
+      h("table",{style:{borderSpacing:2,borderCollapse:"separate",fontSize:10}},
+        h("thead",null,h("tr",null,
+          h("th",{style:{padding:"4px 6px",color:T.muted,fontWeight:500}}," "),
+          ...Array.from({length:24},(_,h2)=>h("th",{key:h2,style:{padding:"4px 2px",color:T.muted,fontSize:9,fontWeight:500,textAlign:"center",minWidth:18}},h2))
+        )),
+        h("tbody",null,days.map((dn,d)=>
+          h("tr",{key:d},
+            h("td",{style:{padding:"3px 8px",color:T.muted,fontWeight:500,whiteSpace:"nowrap",fontSize:11}},dn),
+            ...Array.from({length:24},(_,h2)=>{
+              const v=data.matrix?.[d]?.[h2]||0;
+              return h("td",{key:h2,title:`${dn} ${h2}:00 → ${v} بحث`,style:{
+                background:cellColor(v),width:18,height:22,borderRadius:3,
+                textAlign:"center",color:v>max*0.5?T.bg:T.muted,fontSize:9,fontWeight:600,cursor:"default"
+              }},v||"")
+            })
+          )
+        ))
+      )
+    ),
+    h("div",{style:{display:"flex",alignItems:"center",gap:8,marginTop:10,fontSize:11,color:T.muted,justifyContent:"flex-end"}},
+      h("span",null,"أقل"),
+      ...[0.15,0.35,0.55,0.75,1].map((a,i)=>h("span",{key:i,style:{width:18,height:14,background:`rgba(212,168,67,${a})`,borderRadius:2}})),
+      h("span",null,"أكثر")
+    )
+  );
+}
+
+// ── User Drilldown Modal ───────────────────────────────────────
+function UserModal({userId,onClose,onAction}){
+  const [data,setData]=useState(null);
+  useEffect(()=>{
+    if(!userId) return;
+    apiFetch(`db/user/${userId}/full`).then(d=>setData(d)).catch(()=>setData({user:null}));
+  },[userId]);
+  if(!userId) return null;
+  const close=(e)=>{ if(e.target===e.currentTarget) onClose(); };
+  return h("div",{onClick:close,style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+    h("div",{style:{background:T.surface,border:`1px solid ${T.border}`,borderRadius:14,maxWidth:720,width:"100%",maxHeight:"90vh",overflow:"auto",padding:20,position:"relative"}},
+      h("button",{onClick:onClose,style:{position:"absolute",left:14,top:14,background:"transparent",border:`1px solid ${T.border}`,color:T.muted,width:32,height:32,borderRadius:8,fontSize:14,cursor:"pointer"}},"✕"),
+      !data&&h(Sk,{h:300}),
+      data&&!data.user&&h("div",{style:{textAlign:"center",padding:30,color:T.muted}},"المستخدم غير موجود"),
+      data&&data.user&&(()=>{
+        const u=data.user;
+        const sr=u.totalSearches>0?((u.totalDownloads/u.totalSearches)*100).toFixed(1):"0";
+        const last7=(data.daily||[]).slice(-7);
+        return h("div",null,
+          // Header
+          h("div",{style:{display:"flex",alignItems:"flex-start",gap:14,marginBottom:18}},
+            h("div",{style:{width:60,height:60,borderRadius:"50%",background:`linear-gradient(135deg,${T.gold},${T.goldDim})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:T.bg}},
+              (u.firstName||"?").charAt(0).toUpperCase()),
+            h("div",{style:{flex:1}},
+              h("div",{style:{fontSize:18,fontWeight:700,color:T.text,marginBottom:2}},u.firstName||"بدون اسم"),
+              h("div",{style:{fontSize:13,color:T.muted,marginBottom:4}},u.username?`@${u.username}`:"—"),
+              h("div",{className:"mono",style:{fontSize:11,color:T.dim}},`Telegram ID: ${u.telegramId}`),
+              h("div",{style:{display:"flex",gap:6,marginTop:6}},
+                data.premium&&h("span",{style:{fontSize:10,padding:"2px 8px",background:T.goldDim+"60",color:T.gold,borderRadius:6,fontWeight:600}},"⭐ مميز"),
+                data.banned&&h("span",{style:{fontSize:10,padding:"2px 8px",background:T.redDim+"60",color:T.red,borderRadius:6,fontWeight:600}},"🚫 محظور")
+              )
+            )
+          ),
+          // KPIs
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:18}},
+            [
+              {label:"إجمالي البحث",value:u.totalSearches,color:T.blue},
+              {label:"إجمالي التحميل",value:u.totalDownloads,color:T.gold},
+              {label:"نسبة التحميل",value:sr+"%",color:+sr>=70?T.green:+sr>=40?T.orange:T.red},
+              {label:"تحميلات اليوم",value:data.todayDownloads||0,color:T.purple},
+            ].map((k,i)=>h("div",{key:i,style:{background:T.card,border:`1px solid ${T.border}`,padding:"10px 12px",borderRadius:10}},
+              h("div",{style:{fontSize:10,color:T.muted,marginBottom:3}},k.label),
+              h("div",{className:"mono",style:{fontSize:18,fontWeight:700,color:k.color}},k.value)
+            ))
+          ),
+          // Daily chart
+          last7.length>0&&h("div",{style:{marginBottom:18}},
+            h("div",{style:{fontSize:12,color:T.muted,marginBottom:8,fontWeight:600}},`نشاط آخر ${last7.length} يوم`),
+            h(SafeChart,{fallback:h("div",{style:{color:T.muted,fontSize:11}},"⚠️ تعذّر تحميل المخطط")},
+              h(ResponsiveContainer,{width:"100%",height:140},
+                h(AreaChart,{data:last7,margin:{top:4,right:4,left:-24,bottom:0}},
+                  h(CartesianGrid,{strokeDasharray:"3 3",stroke:T.border}),
+                  h(XAxis,{dataKey:"day",tick:{fontSize:10,fill:T.muted},stroke:T.border,tickFormatter:d=>d?.slice(5)||""}),
+                  h(YAxis,{tick:{fontSize:9,fill:T.muted},stroke:T.border}),
+                  h(Tooltip,{content:h(CT)}),
+                  h(Area,{type:"monotone",dataKey:"searches",name:"بحث",stroke:T.blue,fill:T.blue+"33",strokeWidth:2}),
+                  h(Area,{type:"monotone",dataKey:"downloads",name:"تحميل",stroke:T.gold,fill:T.gold+"33",strokeWidth:2})
+                )
+              )
+            )
+          ),
+          // Quick actions
+          h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.border}`}},
+            h(Btn,{variant:data.premium?"ghost":"gold",onClick:()=>onAction(data.premium?"revokePrem":"grantPrem",u.telegramId)},
+              data.premium?"❌ إلغاء التميز":"⭐ منح تميز"),
+            h(Btn,{variant:data.banned?"success":"danger",onClick:()=>onAction(data.banned?"unban":"ban",u.telegramId)},
+              data.banned?"✅ رفع الحظر":"🚫 حظر")
+          ),
+          // Recent searches
+          h("div",null,
+            h("div",{style:{fontSize:12,color:T.muted,marginBottom:8,fontWeight:600,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+              h("span",null,`آخر ${(data.recentSearches||[]).length} بحث`),
+              data.recentSearches?.length>0&&h(Btn,{variant:"ghost",onClick:()=>exportCSV(`user-${u.telegramId}-searches`,data.recentSearches,[
+                {key:"createdAt",label:"الوقت"},
+                {key:"query",label:"الاستعلام"},
+                {key:"bookFound",label:"وُجد"},
+                {key:"pdfSent",label:"اتسلّم"},
+                {key:"resultCount",label:"عدد النتائج"},
+              ])},"📥 CSV")
+            ),
+            h("div",{style:{maxHeight:280,overflowY:"auto",border:`1px solid ${T.border}`,borderRadius:8}},
+              h("table",{style:{width:"100%"}},
+                h("tbody",null,(data.recentSearches||[]).map((s,i)=>{
+                  const ago=s.createdAt?Math.floor((Date.now()-new Date(s.createdAt).getTime())/60000):0;
+                  const agoStr=ago<60?`${ago}د`:ago<1440?`${Math.floor(ago/60)}س`:`${Math.floor(ago/1440)}ي`;
+                  return h("tr",{key:s.id||i,style:{borderBottom:`1px solid ${T.border}30`}},
+                    h("td",{className:"mono",style:{color:T.muted,fontSize:10,padding:"6px 10px",whiteSpace:"nowrap"}},agoStr),
+                    h("td",{style:{fontSize:12,padding:"6px 4px",color:T.text,maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},s.query),
+                    h("td",{style:{padding:"6px 10px",textAlign:"left"}},
+                      s.pdfSent?h("span",{style:{color:T.gold,fontSize:11}},"📥"):
+                      s.bookFound?h("span",{style:{color:T.green,fontSize:11}},"✅"):
+                      h("span",{style:{color:T.red,fontSize:11}},"❌"))
+                  );
+                }))
+              )
+            )
+          )
+        );
+      })()
+    )
+  );
+}
 
 function App(){
   const [tab,setTab]=useState("overview");
@@ -693,6 +1150,12 @@ function App(){
   const [dlq,setDlq]=useState([]);
   const [prem,setPrem]=useState([]);
   const [banned,setBanned]=useState([]);
+  const [allUsers,setAllUsers]=useState(null);   // {users:[],total:0}
+  const [cacheBooks,setCacheBooks]=useState(null);
+  const [recent,setRecent]=useState(null);
+  const [failed,setFailed]=useState(null);
+  const [heatmap,setHeatmap]=useState(null);
+  const [drillId,setDrillId]=useState(null);
   const [ts,setTs]=useState(Date.now());
   const [toast,setToast]=useState(null);
   const [sidebar,setSidebar]=useState(true);
@@ -726,6 +1189,24 @@ function App(){
       if(rf.status==="fulfilled")setFunnel(rf.value);
     }
 
+    // ── All users: فقط لما users tab مفتوح ──
+    if(tabRef.current==="users"){
+      const r=await apiFetch("users/all?limit=200").catch(()=>null);
+      if(r)setAllUsers(r);
+    }
+
+    // ── Cached books: فقط لما cache tab مفتوح ──
+    if(tabRef.current==="cache"){
+      const r=await apiFetch("db/cached-books?limit=300").catch(()=>null);
+      if(r)setCacheBooks(r);
+    }
+
+    // ── Recent searches: فقط لما recent tab مفتوح ──
+    if(tabRef.current==="recent"){
+      const r=await apiFetch("db/recent-searches?limit=100").catch(()=>null);
+      if(r)setRecent(r);
+    }
+
     setIsMock(_mock);
     setTs(Date.now());
   },[]);
@@ -738,6 +1219,22 @@ function App(){
         if(rt.status==="fulfilled")setTraces(rt.value);
         if(rf.status==="fulfilled")setFunnel(rf.value);
       });
+    }
+    // لما يفتح users tab لأول مرة، اجلب كل المستخدمين فوراً
+    if(tab==="users"&&prevTabRef.current!=="users"){
+      apiFetch("users/all?limit=200").then(r=>{if(r)setAllUsers(r);}).catch(()=>{});
+    }
+    if(tab==="cache"&&prevTabRef.current!=="cache"){
+      apiFetch("db/cached-books?limit=300").then(r=>{if(r)setCacheBooks(r);}).catch(()=>{});
+    }
+    if(tab==="recent"&&prevTabRef.current!=="recent"){
+      apiFetch("db/recent-searches?limit=100").then(r=>{if(r)setRecent(r);}).catch(()=>{});
+    }
+    if(tab==="failed"&&prevTabRef.current!=="failed"){
+      apiFetch("db/failed-searches?limit=200").then(r=>{if(r)setFailed(r);}).catch(()=>{});
+    }
+    if(tab==="analytics"&&prevTabRef.current!=="analytics"&&!heatmap){
+      apiFetch("db/hourly-heatmap").then(r=>{if(r)setHeatmap(r);}).catch(()=>{});
     }
     prevTabRef.current=tab;
   },[tab]);
@@ -821,16 +1318,32 @@ function App(){
       // Content
       h("div",{style:{flex:1,overflowY:"auto",padding:"22px 18px"}},
         tab==="overview"  &&h(OverviewTab,{ov}),
-        tab==="analytics" &&h(AnalyticsTab,{weekly:ov?.weekly||[]}),
+        tab==="analytics" &&h(AnalyticsTab,{weekly:ov?.weekly||[],heatmap}),
         tab==="books"     &&h(BooksTab,{books}),
+        tab==="failed"    &&h(FailedTab,{failed}),
+        tab==="cache"     &&h(CacheTab,{books:cacheBooks}),
+        tab==="recent"    &&h(RecentTab,{searches:recent}),
         tab==="sources"   &&h(SourcesTab,{sources}),
         tab==="queue"     &&h(QueueTab,{queue:ov?.queue,dlq,onToast:showToast,onRefresh:loadAll}),
-        tab==="users"     &&h(UsersTab,{prem,banned,onToast:showToast,onRefresh:loadAll}),
+        tab==="users"     &&h(UsersTab,{prem,banned,allUsers,onToast:showToast,onRefresh:loadAll,onUserClick:setDrillId}),
         tab==="system"    &&h(SystemTab,{system:ov?.system,maintenance,onToggleMaint:handleToggleMaint,onClearBL:handleClearBL}),
         tab==="telemetry" &&h(TelemetryTab,{funnel,traces})
       )
     ),
-    toast&&h(Toast,{msg:toast.msg,type:toast.type,onDone:()=>setToast(null)})
+    toast&&h(Toast,{msg:toast.msg,type:toast.type,onDone:()=>setToast(null)}),
+    drillId&&h(UserModal,{userId:drillId,onClose:()=>setDrillId(null),onAction:async(type,id2)=>{
+      const m={
+        grantPrem:()=>apiAct("POST",`users/${id2}/premium`,{enable:true}),
+        revokePrem:()=>apiAct("POST",`users/${id2}/premium`,{enable:false}),
+        ban:()=>apiAct("POST",`users/${id2}/ban`),
+        unban:()=>apiAct("DELETE",`users/${id2}/ban`),
+      };
+      try{ await m[type]?.(); }catch(e){}
+      const msgs={grantPrem:"⭐ تم منح التميز",revokePrem:"❌ تم إلغاء التميز",ban:"🚫 تم الحظر",unban:"✅ تم رفع الحظر"};
+      showToast(msgs[type]||"تم");
+      setDrillId(null);
+      loadAll();
+    }})
   );
 }
 
