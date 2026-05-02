@@ -1,3 +1,8 @@
+---
+name: testing-book-bot
+description: Test the Telegram book-bot production runtime, source-health analytics, source auto-disable behavior, and deployment health safely.
+---
+
 # Testing book-bot production runtime
 
 ## When to use
@@ -9,7 +14,7 @@ Use this skill when testing the Telegram book-bot production deployment for sear
 - `FIRECRAWL_API_KEY` — needed for local/dev Firecrawl-backed searches if running the bot outside production.
 - `AWS_UBUNTU_SSH_PRIVATE_KEY` or an equivalent SSH key provisioned at `$HOME/.ssh/devin_aws_ubuntu_key` — needed to access the production Ubuntu server.
 
-Do not print production `.env` values. Production runtime secrets live in `/home/ubuntu/book-bot/.env` on the server.
+Do not print production `.env` values. Production runtime secrets live in `/home/ubuntu/book-bot/.env` on the server. For admin API probes, read `DASHBOARD_SECRET` from inside the already-running bot container and use it only as an `Authorization: Bearer ...` header; never echo the value.
 
 ## Production environment
 
@@ -51,15 +56,16 @@ docker compose exec -T bot sh -lc 'ps -o comm= | grep -c "^node$" || true; ps -o
 
 Expected: count is `1`, and the process table shows `node dist/index.cjs` under `/sbin/tini -- node dist/index.cjs`.
 
-2. Confirm container/server health:
+2. Confirm container/server health and healthcheck utilities:
 
 ```bash
 cd /home/ubuntu/book-bot
 docker compose ps bot
+docker compose exec -T bot sh -lc 'command -v pgrep; command -v wget; ps -o comm= | grep -c "^node$" || true; ps -o pid,ppid,comm,args'
 docker compose exec -T bot node -e 'const http=require("http");http.get("http://127.0.0.1:5000/api/health",r=>{let b="";r.on("data",c=>b+=c);r.on("end",()=>{console.log(r.statusCode,b);process.exit(r.statusCode===200&&JSON.parse(b).ok===true?0:1)})}).on("error",e=>{console.error(e.message);process.exit(1)})'
 ```
 
-Expected: Docker status is `healthy`; `/api/health` returns HTTP 200 with `ok: true`.
+Expected: Docker status is `healthy`; `pgrep` and `wget` exist; `/api/health` returns HTTP 200 with `ok: true`.
 
 3. Verify Arabic UX/source-health strings from deployed source without importing the app. Strip Arabic tashkeel/combining marks before exact phrase checks because production copy may include diacritics such as `تحميلًا`/`مضمونًا`.
 
@@ -80,14 +86,30 @@ Expected phrases include:
 ```bash
 cd /home/ubuntu/book-bot
 TEST_DOMAIN='devin-test-source.invalid'
-docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" >/dev/null
+docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" "stats:src:${TEST_DOMAIN}:ok" "stats:src:${TEST_DOMAIN}:fail" >/dev/null
 docker compose exec -T redis redis-cli hset "stats:source:${TEST_DOMAIN}" ok 0 fail 8 >/dev/null
-docker compose exec -T bot sh -lc 'node -e "const http=require(\"http\");const domain=\"devin-test-source.invalid\";const secret=process.env.DASHBOARD_SECRET;http.get({hostname:\"127.0.0.1\",port:5000,path:\"/api/admin/stats/sources\",headers:{Authorization:\"Bearer \"+secret}},res=>{let body=\"\";res.on(\"data\",c=>body+=c);res.on(\"end\",()=>{const parsed=JSON.parse(body);const row=parsed.data.find(s=>s.domain===domain);console.log(res.statusCode, JSON.stringify(row));process.exit(res.statusCode===200&&parsed.ok===true&&row&&row.ok===0&&row.fail===8&&row.rate===\"0%\"&&row.autoDisabled===true?0:1)})}).on(\"error\",e=>{console.error(e.message);process.exit(1)})"'
-docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" >/dev/null
+docker compose exec -T bot sh -lc 'node - <<"NODE"
+const http = require("http");
+const domain = "devin-test-source.invalid";
+const secret = process.env.DASHBOARD_SECRET;
+if (!secret) { console.error("DASHBOARD_SECRET_MISSING"); process.exit(2); }
+http.get({ hostname: "127.0.0.1", port: 5000, path: "/api/admin/stats/sources", headers: { Authorization: "Bearer " + secret } }, (res) => {
+  let body = "";
+  res.on("data", (chunk) => body += chunk);
+  res.on("end", () => {
+    const parsed = JSON.parse(body);
+    const rows = parsed.data.filter((s) => s.domain === domain);
+    console.log(res.statusCode, JSON.stringify(rows));
+    const row = rows[0];
+    process.exit(res.statusCode === 200 && parsed.ok === true && rows.length === 1 && row.ok === 0 && row.fail === 8 && row.total === 8 && row.rate === "0%" && row.autoDisabled === true ? 0 : 1);
+  });
+}).on("error", (err) => { console.error(err.message); process.exit(1); });
+NODE'
+docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" "stats:src:${TEST_DOMAIN}:ok" "stats:src:${TEST_DOMAIN}:fail" >/dev/null
 docker compose exec -T redis redis-cli exists "stats:source:${TEST_DOMAIN}"
 ```
 
-Expected: API returns the isolated row with `ok: 0`, `fail: 8`, `rate: "0%"`, `autoDisabled: true`; cleanup `EXISTS` returns `0`.
+Expected: API returns the isolated row with `ok: 0`, `fail: 8`, `total: 8`, `rate: "0%"`, `autoDisabled: true`; cleanup `EXISTS` returns `0`.
 
 5. Check recent logs after testing:
 
@@ -102,3 +124,5 @@ Expected: no matches after test recovery. Historical 409 lines may exist if a pr
 ## Reporting limitations
 
 If no logged-in Telegram Web/test-chat session is available, explicitly mark literal chat UI testing as untested. Ask Ahmed to send messages while logs are monitored, or provide a test Telegram session, if full chat UI proof is required.
+
+For shell/API-only testing, do not record the desktop. Attach command-output evidence and a test report instead.
