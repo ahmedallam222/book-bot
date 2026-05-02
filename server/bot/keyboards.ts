@@ -24,17 +24,23 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
   return {
     inline_keyboard: [
       [
-        { text: "🔍  ابحث عن كتاب",    callback_data: "new_search"  },
+        { text: "🔍  ابحث عن كتاب",      callback_data: "new_search"   },
+        { text: "🎲  كتاب مفاجأة",        callback_data: "rg:any"       },
       ],
       [
-        { text: "📊  إحصائياتي",        callback_data: "my_stats"    },
-        { text: "📚  سجل كتبي",         callback_data: "my_history"  },
+        { text: "📊  إحصائياتي",          callback_data: "my_stats"     },
+        { text: "📚  سجل كتبي",           callback_data: "my_history"   },
       ],
       [
-        { text: "🏆  الأكثر تحميلاً",   callback_data: "top_books"   },
+        { text: "🏆  الأكثر تحميلاً",     callback_data: "top_books"    },
+        { text: "📅  أفضل الأسبوع",       callback_data: "weekly_refresh"},
       ],
       [
-        { text: "❓  مساعدة",            callback_data: "help"        },
+        { text: "🔖  قائمة أمنياتي",      callback_data: "wishlist_view" },
+        { text: "❓  مساعدة",              callback_data: "help"         },
+      ],
+      [
+        { text: "⭐  ترقية للـ Premium",   callback_data: "premium_buy"  },
       ],
     ],
   };
@@ -50,6 +56,7 @@ export function kbAfterSuccess(
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
       { text: "🔍  كتاب آخر",      callback_data: "new_search"  },
+      { text: "🔖  احفظ للاحقاً",  callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
     [
       { text: "🔁  أعد الإرسال",   callback_data: safeCb(`retry:${retryK}`) },
@@ -61,7 +68,10 @@ export function kbAfterSuccess(
     rows[1].push({ text: "⚠️  ملف خاطئ؟", callback_data: safeCb(`bad_file:${fbKey}`) });
   }
 
-  rows.push([{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }]);
+  rows.push([
+    { text: "🎲  كتاب مفاجأة",        callback_data: "rg:any"     },
+    { text: "🏠  القائمة الرئيسية",   callback_data: "main_menu"  },
+  ]);
   return { inline_keyboard: rows };
 }
 
@@ -91,7 +101,10 @@ export function kbAfterFail(
     { text: "🔄  أعد المحاولة",    callback_data: safeCb(`retry:${retryK}`) },
     { text: "🔍  بحث جديد",        callback_data: "new_search"               },
   ]);
-  rows.push([{ text: "🏠  القائمة", callback_data: "main_menu" }]);
+  rows.push([
+    { text: "🎲  كتاب مفاجأة",     callback_data: "rg:any"     },
+    { text: "🏠  القائمة",          callback_data: "main_menu"  },
+  ]);
   return { inline_keyboard: rows };
 }
 
@@ -103,6 +116,10 @@ export function kbNoResults(bookName: string): TelegramBot.InlineKeyboardMarkup 
       [
         { text: "🔄  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
         { text: "🔍  بحث جديد",      callback_data: "new_search"               },
+      ],
+      [
+        { text: "🔖  احفظ لأمنياتي", callback_data: safeCb(`wishlist_add:${retryK}`) },
+        { text: "🎲  كتاب مفاجأة",   callback_data: "rg:any"       },
       ],
       [
         { text: "🏠  القائمة",        callback_data: "main_menu"    },

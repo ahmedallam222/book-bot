@@ -2,7 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import { getQueueStats } from "./queue.js";
-import { activeWorkerCount } from "./worker.js";
+import { activeWorkerCount } from "./index.js";
 import { getTempStats } from "./tempFiles.js";
 import { getDailyStats, getTotalStats, getTopBooks, getSourceStats, getWeeklyStats, getFunnelStats } from "./analytics.js";
 import { escMd } from "./text.js";
@@ -123,7 +123,7 @@ export async function sendAnalyticsPanel(bot: TelegramBot, chatId: number): Prom
   let topStr = "_لا بيانات بعد_";
   if (topBooks.length > 0) {
     topStr = topBooks.map((b, i) =>
-      `${medals[i] || `${i + 1}.`} ${escMd(b.title.slice(0, 45))} *(${b.count})*`
+      `${medals[i] || `${i + 1}.`} ${escMd(b.book.slice(0, 45))} *(${b.count})*`
     ).join("\n");
   }
 
@@ -183,11 +183,16 @@ export async function sendWeeklyStats(bot: TelegramBot, chatId: number): Promise
 
   let msg = `📈 *آخر 7 أيام*\n━━━━━━━━━━━━━━━━━\n\n`;
 
-  for (const d of week) {
-    const isToday = d.date === new Date().toISOString().slice(0, 10);
-    const label   = isToday ? `*${d.date} (اليوم)*` : d.date;
-    const b       = bar(d.success, Math.max(d.downloads, 1), 8);
-    msg += `${label}\n🔍 ${d.searches} | 📥 ${d.downloads} | ✅ ${d.success} | \`${b}\` ${d.successRate}\n\n`;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const [date, stats] of Object.entries(week)) {
+    const isToday    = date === today;
+    const label      = isToday ? `*${date} (اليوم)*` : date;
+    const searches   = Number(stats.searches   ?? 0);
+    const downloads  = Number(stats.downloads  ?? 0);
+    const success    = Number(stats.success    ?? 0);
+    const rate       = downloads > 0 ? `${Math.round((success / downloads) * 100)}%` : "—";
+    const b          = bar(success, Math.max(downloads, 1), 8);
+    msg += `${label}\n🔍 ${searches} | 📥 ${downloads} | ✅ ${success} | \`${b}\` ${rate}\n\n`;
   }
 
   await bot.sendMessage(chatId, msg, {
