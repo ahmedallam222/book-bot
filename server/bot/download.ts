@@ -4,7 +4,10 @@ import * as path from "path";
 import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
 import TelegramBot from "node-telegram-bot-api";
-import { UA, MAX_PDF_SIZE, TEMP_DIR, TIMEOUT_DOWNLOAD, TIMEOUT_TELEGRAM, TIMEOUT_UPLOAD } from "./config.js";
+import {
+  UA, MAX_PDF_SIZE, TEMP_DIR,
+  TIMEOUT_DOWNLOAD, TIMEOUT_TELEGRAM, TIMEOUT_UPLOAD,
+} from "./config.js";
 import { L } from "./logger.js";
 import { isBlacklisted, recordUrlFailure, recordUrlSuccess } from "./blacklist.js";
 import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
@@ -13,27 +16,39 @@ import { validatePdfContent } from "./pdfValidator.js";
 import type { DownloadResult } from "./types.js";
 
 // ══════════════════════════════════════════════
-// DOWNLOAD & SEND — Stream pipeline + Logging
+// SKIP_DIRECT_DOMAINS
+// كل موقع هنا → السيرفر يحمّله محلياً أولاً
+// لأن Telegram يفشل في fetch الـ PDF مباشرة منهم
 // ══════════════════════════════════════════════
-
-/**
- * Domains التي تحجب Telegram من تنزيل ملفاتها مباشرة.
- * Telegram يحاول fetch الـ URL من سيرفراته — هذه الـ domains ترفضه
- * أو ترجع HTML بدل PDF.
- * الحل: تخطي محاولة Telegram المباشرة والنزول محلياً فوراً.
- */
 const SKIP_DIRECT_DOMAINS = [
-  // مواقع تحجب Telegram من تنزيل ملفاتها مباشرة
+  // ══ archive.org ══════════════════════════════
+  "archive.org/download",
+  "archive.org/compress",
+
+  // ══ مكتبات إسلامية ═══════════════════════════
   "dl.waqfeya.net",
+  "waqfeya.net",
+
+  // ══ مكتبات عربية — مطابق sources.ts ══════════
+  "noor-book.com",
+  "hindawi.org",
+  "al-maktaba.org",
   "books-library.net",
-  "1lib.sk",
-  "annas-archive.org",
-  "libgen.is", "libgen.rs", "libgen.st",
-  "library.lol",
-  "z-lib.org", "z-lib.bo",
-  // مصادر جديدة — تستخدم redirect أو session cookies
-  "ktab.cc",
-  "al-mostafa.com",
+  "foulabook.com",
+  "kotobati.com",
+  "novbook.net",
+  "arabic-book.net",
+  "ktabpdf.com",
+  "kutub-pdf.net",
+  "kutubm.com",
+  "kutub.info",
+  "kutubdl.site",
+
+  // ══ domains إضافية من .env بدون إعادة deploy ══
+  ...(process.env.SKIP_DOMAINS_EXTRA || "")
+    .split(",")
+    .map((d) => d.trim())
+    .filter(Boolean),
 ];
 
 function shouldSkipDirect(url: string): boolean {
@@ -44,18 +59,143 @@ function isSlowArchiveUrl(url: string): boolean {
   return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
 }
 
+// ══════════════════════════════════════════════
+// PRE-VALIDATE
+// يفحص 5 bytes فقط — هل الـ URL يُقدّم PDF حقيقي؟
+// fail-open: أي خطأ شبكي → true (جرّب الإرسال)
+// false فقط لو magic bytes مش %PDF-
+// ══════════════════════════════════════════════
+async function preValidatePdfUrl(pdfUrl: string): Promise<boolean> {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const r = await fetch(pdfUrl, {
+      headers: {
+        "User-Agent": UA,
+        "Range":      "bytes=0-4",
+        "Accept":     "application/pdf,*/*",
+      },
+      signal:   ctrl.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+
+    if (!r.ok || !r.body) return true;
+
+    const ct = r.headers.get("content-type") || "";
+    if (ct.includes("html")) return true;
+
+    const reader = r.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (total < 5) {
+        const { done, value } = await reader.read();
+        if (done || !value) break;
+        chunks.push(value);
+        total += value.length;
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+
+    const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    if (buf.length < 5) return true;
+
+    if (buf.slice(0, 5).toString("ascii") !== "%PDF-") {
+      L.warn("download", "preValidate: not a PDF (bad magic) — skipping", {
+        url: pdfUrl.slice(0, 80),
+      });
+      return false;
+    }
+
+    return true;
+  } catch (e: any) {
+    clearTimeout(timer);
+    const err = String(e?.message || e);
+    if (!err.includes("abort")) {
+      L.warn("download", `preValidate error — fail-open: ${err.slice(0, 80)}`);
+    }
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ══════════════════════════════════════════════
+// ARCHIVE.ORG RESOLVER
+// يُحوِّل /details/ID → رابط PDF مباشر عبر metadata API
+// ══════════════════════════════════════════════
+async function expandArchiveOrgUrl(url: string): Promise<string | null> {
+  const m = url.match(/archive\.org\/details\/([^/?#]+)/);
+  if (!m) return null;
+
+  const identifier = m[1];
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+
+  try {
+    const r = await fetch(`https://archive.org/metadata/${identifier}`, {
+      headers: { "User-Agent": UA },
+      signal:  ctrl.signal,
+    });
+    clearTimeout(timer);
+
+    if (!r.ok) return null;
+
+    const data = await r.json() as {
+      files?: { name: string; format?: string; size?: string }[];
+    };
+    const files = data.files ?? [];
+
+    const PREFERRED_FORMATS = ["Text PDF", "Additional Text PDF"];
+    let pdfFile = files.find((f) => PREFERRED_FORMATS.includes(f.format ?? ""));
+    if (!pdfFile) {
+      pdfFile = files.find((f) => f.name.toLowerCase().endsWith(".pdf"));
+    }
+    if (!pdfFile) return null;
+
+    const directUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(pdfFile.name)}`;
+    L.info("download", "Resolved archive.org details → direct PDF", {
+      identifier,
+      file:   pdfFile.name.slice(0, 60),
+      format: pdfFile.format ?? "unknown",
+    });
+    return directUrl;
+  } catch (e) {
+    clearTimeout(timer);
+    L.warn("download", `expandArchiveOrgUrl error: ${String(e).slice(0, 80)}`);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════
+// MAIN — downloadAndSend
+// ══════════════════════════════════════════════
 export async function downloadAndSend(
-  bot: TelegramBot,
-  chatId: number,
-  pdfUrl: string,
+  bot:      TelegramBot,
+  chatId:   number,
+  pdfUrl:   string,
   bookName: string,
-  token: string,
-  _noFollow = false   // BUG-D: يمنع متابعة HTML redirect مرتين (لا حلقة لانهائية)
+  token:    string,
+  _noFollow = false
 ): Promise<DownloadResult> {
   if (isSlowArchiveUrl(pdfUrl)) {
     L.warn("download", "Skipping slow archive.org URL", { url: pdfUrl.slice(0, 80) });
     await recordUrlFailure(pdfUrl);
     return { ok: false, permanent: true };
+  }
+
+  // ── archive.org/details/ → رابط مباشر ────────
+  if (pdfUrl.includes("archive.org/details/")) {
+    const expanded = await expandArchiveOrgUrl(pdfUrl);
+    if (expanded) {
+      pdfUrl = expanded;
+    } else {
+      L.warn("download", "Could not resolve archive.org details — will try as-is", {
+        url: pdfUrl.slice(0, 80),
+      });
+    }
   }
 
   if (await isBlacklisted(pdfUrl)) {
@@ -66,9 +206,18 @@ export async function downloadAndSend(
   L.dlStart(pdfUrl, bookName);
   const t0 = Date.now();
 
-  // ── محاولة 1: URL مباشر لـ Telegram ──────────
-  // نتخطاها لـ domains معروفة بحجب Telegram
+  // ══════════════════════════════════════════════
+  // محاولة 1: URL مباشر لـ Telegram
+  // ══════════════════════════════════════════════
   if (!shouldSkipDirect(pdfUrl)) {
+    const preValid = await preValidatePdfUrl(pdfUrl);
+    if (!preValid) {
+      L.warn("download", "preValidate: not a PDF — skipping permanently", {
+        url: pdfUrl.slice(0, 80),
+      });
+      return { ok: false, permanent: true };
+    }
+
     try {
       const ctrl  = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), TIMEOUT_TELEGRAM);
@@ -81,7 +230,9 @@ export async function downloadAndSend(
           body: JSON.stringify({
             chat_id:    chatId,
             document:   pdfUrl,
-            caption:    `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`,
+            caption:    `📚 *${escMd(bookName)}*
+
+✅ من خلاصة الكتب`,
             parse_mode: "Markdown",
           }),
         });
@@ -96,27 +247,32 @@ export async function downloadAndSend(
           : "?";
         L.dlDirect(bookName, sizeMB);
         await recordUrlSuccess(pdfUrl);
-        return { ok: true, fileId: d.result?.document?.file_id, sizeMB, sendMode: "direct" };
+        return {
+          ok: true,
+          fileId:   d.result?.document?.file_id,
+          sizeMB,
+          sendMode: "direct",
+        };
       }
 
-      // خطأ 4xx — إذا كان "failed to get HTTP URL content" جرّب محلياً بدل الاستسلام
       if (d.error_code && d.error_code >= 400 && d.error_code < 500) {
         const desc: string = d.description || "";
-        if (
+        const isRetryable =
           desc.includes("failed to get HTTP URL content") ||
           desc.includes("Wrong URL") ||
-          desc.includes("file must be non-empty")
-        ) {
-          L.warn("download", "Telegram direct blocked, trying local", {
-            code: d.error_code, desc: desc.slice(0, 80),
-          });
-          // نكمل للمحاولة المحلية
-        } else {
-          // خطأ دائم حقيقي (file too large, etc.)
+          desc.includes("file must be non-empty");
+
+        if (!isRetryable) {
           L.dlFail(pdfUrl, `Telegram error ${d.error_code}: ${desc}`);
           await recordUrlFailure(pdfUrl);
           return { ok: false, permanent: true };
         }
+
+        L.warn("download", "Telegram direct blocked — falling back to local", {
+          code: d.error_code,
+          desc: desc.slice(0, 80),
+        });
+        // نكمل للمحاولة المحلية
       }
     } catch (e: any) {
       const err = String(e?.message || e);
@@ -133,24 +289,24 @@ export async function downloadAndSend(
     });
   }
 
-  // ── محاولة 2: تحميل محلي بـ stream pipeline ──
+  // ══════════════════════════════════════════════
+  // محاولة 2: تحميل محلي بـ stream pipeline
+  // ══════════════════════════════════════════════
   ensureTempDir();
   const tempPath = path.join(
     TEMP_DIR,
     `${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`
   );
 
-  const ctrl      = new AbortController();
-  // C2 FIX: timer يُعرَّف خارج try/finally لضمان clearTimeout دائماً
-  // النمط السابق: clearTimeout() في كل مسار return منفصل → يُفوَّت في outer catch
-  // النمط الصحيح: finally يضمن التنظيف بغض النظر عن أي مسار خروج
-  const timer     = setTimeout(() => ctrl.abort(), TIMEOUT_DOWNLOAD);
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_DOWNLOAD);
 
   try {
     const r = await fetch(pdfUrl, {
       headers: {
-        "User-Agent": UA,
-        Accept: "application/pdf,*/*",
+        "User-Agent":      UA,
+        "Accept":          "application/pdf,*/*",
+        "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
       },
       signal:   ctrl.signal,
       redirect: "follow",
@@ -163,36 +319,28 @@ export async function downloadAndSend(
     }
 
     const ct = r.headers.get("content-type") || "";
+
+    // ── HTML response → ابحث عن رابط PDF داخله ─
     if (ct.includes("html")) {
-      // BUG-D FIX: الكود القديم يفشل فوراً عند أي HTML response.
-      // المشكلة: كثير من مواقع الكتب العربية تُعيد صفحة HTML تحتوي على رابط PDF
-      //   (مثل صفحة تحميل مباشرة أو صفحة redirect إلى PDF)
-      // الحل: نقرأ أول 6KB من HTML، نبحث عن رابط .pdf مباشر
-      //   إذا وجدناه، نُعيد المحاولة بالرابط الجديد مباشرةً (مرة واحدة فقط — _noFollow يمنع التكرار)
-      //   إذا لم نجد، نفشل كالمعتاد
       if (!_noFollow) {
         try {
           const htmlPeek = (await r.text().catch(() => "")).slice(0, 6000);
           const pdfInPage =
-            // href مع .pdf
             htmlPeek.match(/href=["']([^"']+\.pdf(?:[?#][^"']*)?)/i)?.[1] ??
-            // URL عادي مع .pdf
             htmlPeek.match(/(https?:\/\/[^\s"'<>]+\.pdf(?:[?#][^\s"'<>]*)?)/i)?.[1];
 
           if (pdfInPage) {
-            // أكمل رابطاً نسبياً
             let fullPdfUrl = pdfInPage;
             if (!fullPdfUrl.startsWith("http")) {
               try { fullPdfUrl = new URL(fullPdfUrl, pdfUrl).href; } catch {}
             }
             if (fullPdfUrl.startsWith("http") && fullPdfUrl !== pdfUrl) {
-              L.info("download", "Extracted PDF URL from HTML page — following", {
-                original: pdfUrl.slice(0, 60), found: fullPdfUrl.slice(0, 80),
+              L.info("download", "Extracted PDF URL from HTML — following", {
+                original: pdfUrl.slice(0, 60),
+                found:    fullPdfUrl.slice(0, 80),
               });
-              safeDeleteTemp(tempPath); // احذف الملف المؤقت الفارغ
-              clearTimeout(timer);      // أوقف الـ timer قبل الـ recursive call
-              // _noFollow=true يمنع متابعة HTML مرة ثانية
-              // ملاحظة: clearTimeout هنا صحيح — finally الخارجي يستدعيه مجدداً لكن clearTimeout(id) idempotent آمن
+              safeDeleteTemp(tempPath);
+              clearTimeout(timer);
               return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true);
             }
           }
@@ -204,7 +352,7 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
-    // Stream pipeline مع size limiter — ctrl.signal لا يزال نشطاً يحمي الـ stream
+    // ── Stream pipeline مع size limiter ──────────
     let totalBytes = 0;
     const sizeLimiter = new Transform({
       transform(chunk: Buffer, _enc, done) {
@@ -235,7 +383,7 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
-    // تحقق من الملف
+    // ── تحقق من الملف ────────────────────────────
     if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size < 1024) {
       L.dlFail(pdfUrl, "temp file too small or missing");
       safeDeleteTemp(tempPath);
@@ -243,16 +391,15 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
-    // BUG FIX: كان يستخدم fs.openSync/readSync/closeSync — يُعطّل event loop + fd leak إذا throw
-    // الحل: fs/promises مع try/finally يضمن إغلاق fd في كل الحالات
+    // فحص magic bytes عبر fs/promises
     let magic: Buffer;
     {
       const magicBuf = Buffer.alloc(10);
-      const fhMagic  = await fsPromises.open(tempPath, "r");
+      const fh       = await fsPromises.open(tempPath, "r");
       try {
-        await fhMagic.read(magicBuf, 0, 10, 0);
+        await fh.read(magicBuf, 0, 10, 0);
       } finally {
-        await fhMagic.close();
+        await fh.close();
       }
       magic = magicBuf;
     }
@@ -264,9 +411,7 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
-    // ── تحقق من محتوى الـ PDF (anti false-positive) ──────
-    // نتحقق أن الملف المُحمَّل هو فعلاً الكتاب المطلوب
-    // قبل رفعه لـ Telegram — نمنع false positives
+    // ── validatePdfContent — تحقق من المحتوى ─────
     const validation = await validatePdfContent(tempPath, bookName, pdfUrl);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
@@ -278,29 +423,19 @@ export async function downloadAndSend(
         mistral:   validation.mistralUsed,
       });
       safeDeleteTemp(tempPath);
-      // ملاحظة: لا نستدعي recordUrlFailure هنا
-      // لأن الـ URL نجح في تقديم PDF صالح — المشكلة في المحتوى وليس الـ URL
-      // recordUrlFailure مخصص لـ URLs التي تفشل في تقديم ملف PDF أصلاً
       return { ok: false, rejectedContent: true };
     }
 
-    let fname = "";
-    try { fname = decodeURIComponent(pdfUrl.split("/").pop()?.split("?")[0] || ""); } catch {}
-    if (!fname.toLowerCase().endsWith(".pdf")) {
-      fname = `${bookName.replace(/[/\\:*?"<>|]/g, "_")}.pdf`;
-    }
+    // ── اسم الملف ─────────────────────────────────
+    const cleanBookName = bookName
+      .replace(/[/\\:*?"<>|]/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 80);
+    const fname = `${cleanBookName || "book"}.pdf`;
 
-    // ── إرسال الملف لـ Telegram ───────────────────
-    // finally يضمن حذف الملف في كل الحالات:
-    //   ✅ نجح الإرسال       → حُذف
-    //   ✅ فشل بـ exception  → حُذف
-    //   ✅ انتهى JOB_TIMEOUT → حُذف فوراً (لا ينتظر sendDocument)
-    //
-    // FIX — timer leak: لو sendDocument نجح قبل 120s، كان الـ timer يفضل معلّق
-    // الحل: نحتفظ بـ uploadTimerId ونُلغيه بعد نجاح sendDocument
-    //
-    // FIX — UPLOAD_TIMEOUT ≠ URL failure: التأخير من Telegram وليس من الـ URL
-    // لذا لا نستدعي recordUrlFailure عند UPLOAD_TIMEOUT بل نرجع { ok: false } فقط
+    // ── إرسال لـ Telegram ─────────────────────────
     let sent: TelegramBot.Message;
     let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
     try {
@@ -308,35 +443,40 @@ export async function downloadAndSend(
         bot.sendDocument(
           chatId,
           tempPath,
-          { caption: `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`, parse_mode: "Markdown" },
+          {
+            caption:    `📚 *${escMd(bookName)}*
+
+✅ من خلاصة الكتب`,
+            parse_mode: "Markdown",
+          },
           { filename: fname, contentType: "application/pdf" }
         ),
         new Promise<never>((_, rej) => {
-          uploadTimerId = setTimeout(() => rej(new Error("UPLOAD_TIMEOUT")), TIMEOUT_UPLOAD);
+          uploadTimerId = setTimeout(
+            () => rej(new Error("UPLOAD_TIMEOUT")),
+            TIMEOUT_UPLOAD
+          );
         }),
       ]);
     } finally {
-      // BUG FIX: uploadTimerId يجب إلغاؤه في finally وليس فقط عند النجاح.
-      // إذا sendDocument رمى خطأ غير UPLOAD_TIMEOUT، الـ timer يظل يعمل
-      // ويُطلق reject على Promise مُستقرة → UnhandledPromiseRejection.
       if (uploadTimerId !== null) clearTimeout(uploadTimerId);
-      // يُشغَّل دائماً — الملف لن يبقى على السيرفر بعد محاولة الإرسال
       safeDeleteTemp(tempPath);
     }
 
     const sizeMB = (totalBytes / 1024 / 1024).toFixed(1);
-    const ms     = Date.now() - t0;
-    L.dlLocal(bookName, sizeMB, ms);
+    L.dlLocal(bookName, sizeMB, Date.now() - t0);
     await recordUrlSuccess(pdfUrl);
 
-    return { ok: true, fileId: sent.document?.file_id, sizeMB, sendMode: "local" };
+    return {
+      ok:       true,
+      fileId:   sent.document?.file_id,
+      sizeMB,
+      sendMode: "local",
+    };
+
   } catch (e: any) {
     const err = String(e?.message || e);
     if (err.includes("UPLOAD_TIMEOUT")) {
-      // Telegram بطيء في استقبال الملف — ليس خطأ الـ URL → لا نُسجّله كفشل
-      // BUG FIX: كان يفوّت safeDeleteTemp عند UPLOAD_TIMEOUT → ملف مؤقت يبقى على الديسك
-      // الـ finally الداخلي (في try sendDocument) يُشغَّل دائماً، لكن لو الـ race ربح
-      // timeoutPromise فإن finally الخارجي هو المسؤول عن التنظيف
       safeDeleteTemp(tempPath);
       L.dlTimeout(pdfUrl, Date.now() - t0);
     } else if (err.includes("abort") || err.includes("timeout")) {
@@ -350,7 +490,6 @@ export async function downloadAndSend(
     }
     return { ok: false };
   } finally {
-    // C2 FIX: يُشغَّل دائماً — سواء نجح أو فشل أو throw — لا timer leak
     clearTimeout(timer);
   }
 }

@@ -4,7 +4,12 @@ import { type Server } from "http";
 import viteConfig from "../vite.config";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";  // ← بدل nanoid (غير مثبّتة)
+
+// FIX: import.meta.dirname غير موجود في Node 20 (أُضيف في Node 21.2)
+// الحل: نستخدم fileURLToPath(import.meta.url) المتاحة في Node 18+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const viteLogger = createLogger();
 
@@ -33,7 +38,7 @@ export async function setupVite(server: Server, app: Express) {
     const url = req.originalUrl;
     try {
       const clientTemplate = path.resolve(
-        import.meta.dirname, "..", "client", "index.html"
+        __dirname, "..", "client", "index.html"
       );
       let template = await fs.promises.readFile(clientTemplate, "utf-8");
       template = template.replace(
