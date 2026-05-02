@@ -185,7 +185,8 @@ export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatchResul
 
   const toCheck: string[] = [];
   for (let i = 0; i < urls.length; i++) {
-    const isBlack = blChecks[i].status === "fulfilled" && blChecks[i].value;
+    const check = blChecks[i];
+    const isBlack = check.status === "fulfilled" && check.value;
     if (isBlack) {
       stats.blacklisted++;
       L.debug("verify", `Blacklisted: ${urls[i].slice(0, 60)}`);

@@ -1,5 +1,10 @@
 import { redis } from "./redis.js";
-import { ANALYTICS_PREFIX, ANALYTICS_TTL } from "./config.js";
+import {
+  ANALYTICS_PREFIX,
+  ANALYTICS_TTL,
+  SOURCE_AUTO_DISABLE_MAX_RATE,
+  SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
+} from "./config.js";
 import { L } from "./logger.js";
 
 // ══════════════════════════════════════════════
@@ -34,10 +39,13 @@ export interface TopBook {
 }
 
 export interface SourceStat {
-  domain: string;
-  ok:     number;
-  fail:   number;
-  rate:   string;
+  domain:       string;
+  ok:           number;
+  fail:         number;
+  total:        number;
+  successRate:  number;
+  rate:         string;
+  autoDisabled: boolean;
 }
 
 export interface FunnelEntry {
@@ -101,6 +109,21 @@ export async function trackDownload(
     pipe.expire(k, ANALYTICS_TTL);
   }
   await pipe.exec().catch(() => {});
+}
+
+export async function trackSourceAttempt(domain: string, ok: boolean): Promise<void> {
+  const dc = domain.replace(/^www\./, "").replace(/[^a-z0-9.-]/gi, "");
+  if (!dc) return;
+
+  const k = ok
+    ? `${ANALYTICS_PREFIX}:src:${dc}:ok`
+    : `${ANALYTICS_PREFIX}:src:${dc}:fail`;
+
+  await redis.pipeline()
+    .incr(k)
+    .expire(k, ANALYTICS_TTL)
+    .exec()
+    .catch(() => {});
 }
 
 export async function trackFunnel(entry: FunnelEntry): Promise<void> {
@@ -203,25 +226,55 @@ export async function getTopBooks(limit = 10, date?: string): Promise<TopBook[]>
 export async function getSourceStats(): Promise<SourceStat[]> {
   try {
     let cursor = "0";
-    const okKeys: string[] = [];
+    const keys = new Set<string>();
     do {
       const [next, found] = await redis.scan(cursor, "MATCH", `${ANALYTICS_PREFIX}:src:*:ok`, "COUNT", 100);
-      cursor = next; okKeys.push(...found);
+      cursor = next;
+      found.forEach((k) => keys.add(k));
     } while (cursor !== "0");
-    if (okKeys.length === 0) return [];
+
+    cursor = "0";
+    do {
+      const [next, found] = await redis.scan(cursor, "MATCH", `${ANALYTICS_PREFIX}:src:*:fail`, "COUNT", 100);
+      cursor = next;
+      found.forEach((k) => keys.add(k));
+    } while (cursor !== "0");
+    if (keys.size === 0) return [];
+
+    const domains = new Set<string>();
+    for (const k of keys) {
+      domains.add(k.replace(`${ANALYTICS_PREFIX}:src:`, "").replace(/:(ok|fail)$/, ""));
+    }
 
     const pipe = redis.pipeline();
-    for (const k of okKeys) { pipe.get(k); pipe.get(k.replace(/:ok$/, ":fail")); }
+    for (const domain of domains) {
+      pipe.get(`${ANALYTICS_PREFIX}:src:${domain}:ok`);
+      pipe.get(`${ANALYTICS_PREFIX}:src:${domain}:fail`);
+    }
     const vals = (await pipe.exec().catch(() => [])) as [Error | null, string | null][];
 
-    return okKeys.map((k, i) => {
-      const domain = k.replace(`${ANALYTICS_PREFIX}:src:`, "").replace(/:ok$/, "");
+    return Array.from(domains).map((domain, i) => {
       const ok   = parseInt(String(vals[i * 2]?.[1]     ?? "0"), 10) || 0;
       const fail = parseInt(String(vals[i * 2 + 1]?.[1] ?? "0"), 10) || 0;
       const total = ok + fail;
-      return { domain, ok, fail, rate: total > 0 ? `${Math.round((ok / total) * 100)}%` : "0%" };
+      const successRate = total > 0 ? ok / total : 0;
+      return {
+        domain,
+        ok,
+        fail,
+        total,
+        successRate,
+        rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
+        autoDisabled: total >= SOURCE_AUTO_DISABLE_MIN_ATTEMPTS &&
+          successRate <= SOURCE_AUTO_DISABLE_MAX_RATE,
+      };
     }).sort((a, b) => (b.ok + b.fail) - (a.ok + a.fail));
   } catch { return []; }
+}
+
+export async function getAutoDisabledSourceDomains(): Promise<Set<string>> {
+  const stats = await getSourceStats();
+  return new Set(stats.filter((s) => s.autoDisabled).map((s) => s.domain));
 }
 
 export async function getWeeklyStats(): Promise<DailyStats[]> {
