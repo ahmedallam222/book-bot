@@ -15,7 +15,7 @@ import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, buildFailMessage } fr
 import { getUserDailyLimit, getUserNote } from "./userSettings.js";
 import { redis } from "./redis.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel } from "./analytics.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
@@ -488,6 +488,9 @@ async function performFullSearch(
       if (!result.ok && !result.permanent && !result.rejectedContent) {
         await sleep(500); // M4 FIX: 500ms كافٍ للـ back-off — 2000ms كانت تعطّل الـ worker
         result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token);
+      }
+      if (!result.ok) {
+        trackSourceAttempt(dlDomain, false).catch(() => {});
       }
       if (result.ok) {
         sent          = true;

@@ -1,6 +1,7 @@
 import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES, INTL_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
+import { getAutoDisabledSourceDomains } from "./analytics.js";
 import { normalizeArabic, normalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
@@ -451,8 +452,13 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     SOURCES.map(() => [null, null])
   )) as [Error | null, string | null][];
 
+  const autoDisabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
+
   const enabledDomains = new Set(
-    SOURCES.filter((_, i) => (offFlags[i] as any)?.[1] !== "1").map((s) => s.domain)
+    SOURCES
+      .filter((_, i) => (offFlags[i] as any)?.[1] !== "1")
+      .filter((s) => !autoDisabledDomains.has(s.domain))
+      .map((s) => s.domain)
   );
 
   const activeArabicDomains = ARABIC_SOURCES

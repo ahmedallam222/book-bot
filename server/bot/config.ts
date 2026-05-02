@@ -151,6 +151,14 @@ export const TRUSTED_PDF_DOMAINS = [
  */
 export const UNRELIABLE_DOMAINS: string[] = ["archive.org", "ia800"];
 
+export const SOURCE_AUTO_DISABLE_MIN_ATTEMPTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_MIN_ATTEMPTS || "8",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_MAX_RATE || "0.15",
+);
+
 // ── Firecrawl Alert ─────────────────────────
 /** Redis key يُضبط لما quota Firecrawl تنتهي — يراقبه alertWatcher */
 export const FC_QUOTA_EXCEEDED_KEY = "alert:fc:quota";
