@@ -13,6 +13,7 @@ import { isBlacklisted, recordUrlFailure, recordUrlSuccess } from "./blacklist.j
 import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
 import { escMd } from "./text.js";
 import { validatePdfContent } from "./pdfValidator.js";
+import { downloadNoorBookPdf } from "./noorBookResolver.js";
 import type { DownloadResult } from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -170,6 +171,50 @@ async function expandArchiveOrgUrl(url: string): Promise<string | null> {
 }
 
 // ══════════════════════════════════════════════
+// FOULABOOK RESOLVER
+// foulabook.com/<lang>/book/<slug>  هو landing page بـ HTML.
+// الـ PDF الفعلي بيتقدّم من /book/downloading/<id>
+// (Content-Type: application/pdf, content-disposition: attachment).
+// نفتح الـ landing page مرة واحدة ونستخرج الـ id.
+// ══════════════════════════════════════════════
+async function expandFoulabookUrl(url: string): Promise<string | null> {
+  if (!/foulabook\.com\/[a-z]{2}\/book\//i.test(url)) return null;
+
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent":      UA,
+        "Accept":          "text/html,application/xhtml+xml",
+        "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
+      },
+      signal:   ctrl.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+
+    if (!r.ok) return null;
+
+    const html = (await r.text().catch(() => "")).slice(0, 200_000);
+    const m = html.match(/foulabook\.com\/book\/downloading\/(\d+)/i);
+    if (!m) return null;
+
+    const directUrl = `https://foulabook.com/book/downloading/${m[1]}`;
+    L.info("download", "Resolved foulabook landing → direct PDF", {
+      landing: url.slice(0, 80),
+      id:      m[1],
+    });
+    return directUrl;
+  } catch (e) {
+    clearTimeout(timer);
+    L.warn("download", `expandFoulabookUrl error: ${String(e).slice(0, 80)}`);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════
 // MAIN — downloadAndSend
 // ══════════════════════════════════════════════
 export async function downloadAndSend(
@@ -186,6 +231,11 @@ export async function downloadAndSend(
     return { ok: false, permanent: true };
   }
 
+  // عند تحويل الـ landing page لرابط داخلي بدون اسم الكتاب،
+  // نحتفظ بالأصل ليصل لـ validatePdfContent كـ URL hint للـ Mistral
+  // (الـ landing فيه slug الكتاب — مفيد للتحقق من التطابق)
+  const originalUrl = pdfUrl;
+
   // ── archive.org/details/ → رابط مباشر ────────
   if (pdfUrl.includes("archive.org/details/")) {
     const expanded = await expandArchiveOrgUrl(pdfUrl);
@@ -198,9 +248,29 @@ export async function downloadAndSend(
     }
   }
 
+  // ── foulabook.com/<lang>/book/ → /book/downloading/<id> ──
+  if (/foulabook\.com\/[a-z]{2}\/book\//i.test(pdfUrl)) {
+    const expanded = await expandFoulabookUrl(pdfUrl);
+    if (expanded) {
+      pdfUrl = expanded;
+    } else {
+      L.warn("download", "Could not resolve foulabook landing — will try as-is", {
+        url: pdfUrl.slice(0, 80),
+      });
+    }
+  }
+
   if (await isBlacklisted(pdfUrl)) {
     L.dlFail(pdfUrl, "blacklisted");
     return { ok: false };
+  }
+
+  // ── noor-book.com → Playwright (CF + JS-driven download) ──
+  // الموقع محمي بطبقتين CF + بروتوكول tokens داخلي. لا HTTP-only path
+  // ممكن يحمّل الـ PDF — لازم browser session كامل.
+  // noorBookDownload بتحمّل لـ tempPath ثم بنكمل بنفس validate + sendDocument.
+  if (/(?:^|\.)noor-book\.com\//i.test(pdfUrl)) {
+    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl);
   }
 
   L.dlStart(pdfUrl, bookName);
@@ -412,7 +482,10 @@ export async function downloadAndSend(
     }
 
     // ── validatePdfContent — تحقق من المحتوى ─────
-    const validation = await validatePdfContent(tempPath, bookName, pdfUrl);
+    // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
+    // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
+    // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
@@ -492,4 +565,135 @@ export async function downloadAndSend(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ══════════════════════════════════════════════
+// NOOR-BOOK SPECIAL FLOW
+// downloadNoorBookPdf بتشغّل headless chromium، تتعدّى CF،
+// تستخرج /book/internal_download URL وتمسك ملف الـ PDF.
+// بعد ما الـ PDF موجود محلياً، نكمل بنفس validate + send.
+// ══════════════════════════════════════════════
+async function noorBookDownloadAndSend(
+  bot:         TelegramBot,
+  chatId:      number,
+  pdfUrl:      string,
+  bookName:    string,
+  _token:      string,
+  originalUrl: string,
+): Promise<DownloadResult> {
+  L.dlStart(pdfUrl, bookName);
+  const t0 = Date.now();
+
+  ensureTempDir();
+  const tempPath = path.join(
+    TEMP_DIR,
+    `${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`,
+  );
+
+  const result = await downloadNoorBookPdf(pdfUrl, tempPath);
+  if (!result.ok) {
+    L.dlFail(pdfUrl, `noor-book: ${result.error?.slice(0, 80) ?? "unknown"}`);
+    safeDeleteTemp(tempPath);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  }
+
+  // ── magic bytes ──────────────────────────────
+  try {
+    if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size < 1024) {
+      L.dlFail(pdfUrl, "noor-book: temp file too small or missing");
+      safeDeleteTemp(tempPath);
+      await recordUrlFailure(pdfUrl);
+      return { ok: false };
+    }
+
+    const magicBuf = Buffer.alloc(10);
+    const fh = await fsPromises.open(tempPath, "r");
+    try {
+      await fh.read(magicBuf, 0, 10, 0);
+    } finally {
+      await fh.close();
+    }
+
+    if (!magicBuf.includes(Buffer.from("%PDF"))) {
+      L.dlFail(pdfUrl, "noor-book: no PDF signature in file");
+      safeDeleteTemp(tempPath);
+      await recordUrlFailure(pdfUrl);
+      return { ok: false };
+    }
+  } catch (e: any) {
+    L.dlFail(pdfUrl, `noor-book: magic check failed: ${String(e).slice(0, 80)}`);
+    safeDeleteTemp(tempPath);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  }
+
+  // ── content validation ───────────────────────
+  // originalUrl فيه slug الكتاب — مفيد لـ Mistral
+  const validation = await validatePdfContent(tempPath, bookName, originalUrl);
+  if (!validation.accepted) {
+    L.warn("download", "noor-book PDF rejected — content mismatch", {
+      book:      bookName.slice(0, 50),
+      url:       pdfUrl.slice(0, 80),
+      score:     validation.score.toFixed(2),
+      metaTitle: validation.metaTitle.slice(0, 60) || "(empty)",
+      event:     validation.event,
+      mistral:   validation.mistralUsed,
+    });
+    safeDeleteTemp(tempPath);
+    return { ok: false, rejectedContent: true };
+  }
+
+  // ── sendDocument ─────────────────────────────
+  const cleanBookName = bookName
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 80);
+  const fname = `${cleanBookName || "book"}.pdf`;
+  const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
+
+  let sent: TelegramBot.Message;
+  let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+  try {
+    sent = await Promise.race([
+      bot.sendDocument(
+        chatId,
+        tempPath,
+        {
+          caption:    `📚 *${escMd(bookName)}*
+
+✅ من خلاصة الكتب`,
+          parse_mode: "Markdown",
+        },
+        { filename: fname, contentType: "application/pdf" },
+      ),
+      new Promise<never>((_, rej) => {
+        uploadTimerId = setTimeout(
+          () => rej(new Error("UPLOAD_TIMEOUT")),
+          TIMEOUT_UPLOAD,
+        );
+      }),
+    ]);
+  } catch (e: any) {
+    safeDeleteTemp(tempPath);
+    L.dlFail(pdfUrl, `noor-book upload: ${String(e?.message || e).slice(0, 80)}`);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  } finally {
+    if (uploadTimerId !== null) clearTimeout(uploadTimerId);
+    safeDeleteTemp(tempPath);
+  }
+
+  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+  L.dlLocal(bookName, sizeMB, Date.now() - t0);
+  await recordUrlSuccess(pdfUrl);
+
+  return {
+    ok:       true,
+    fileId:   sent.document?.file_id,
+    sizeMB,
+    sendMode: "local",
+  };
 }
