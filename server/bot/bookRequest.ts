@@ -446,7 +446,7 @@ async function performFullSearch(
         // (2) أداء المصدر التاريخي — 0 لـ 1، وزن 30%
         const sourceRate = srcRateMap.get(domain) ?? 0.5;
         // (3) عقوبة المواقع غير الموثوقة — وزن 20%
-        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? 0 : 1;
+        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? -1 : 1;
         return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
       };
       return scoreUrl(b) - scoreUrl(a);

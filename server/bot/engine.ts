@@ -125,6 +125,10 @@ const CATALOG_ACCESS_PATTERNS = [
   /نبذة عن|وصف الكتاب|مراجعة|ملخص|تفاصيل الكتاب|بوابة الناشرين|الناشرين والمؤلفين/i,
 ];
 
+function isSlowDomain(url: string): boolean {
+  return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
+}
+
 // ══════════════════════════════════════════════
 // Unified Search — call واحدة لمجموعة domains
 //
@@ -498,6 +502,7 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // ── إزالة المكررات ────────────────────────────
   const seenUrls = new Set<string>();
   const unique   = filtered.filter((r) => {
+    if (isSlowDomain(r.directPdfUrl || r.url)) return false;
     const key = r.directPdfUrl || r.url;
     if (seenUrls.has(key)) return false;
     seenUrls.add(key);
