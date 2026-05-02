@@ -54,10 +54,18 @@ function localCleanBookName(input: string): string | null {
   let cleaned = input.trim();
   let changed = false;
 
-  for (const pattern of NOISE_PREFIXES) {
-    const before = cleaned;
-    cleaned = cleaned.replace(pattern, "").trim();
-    if (cleaned !== before) { changed = true; break; }
+  let prefixChanged = true;
+  while (prefixChanged) {
+    prefixChanged = false;
+    for (const pattern of NOISE_PREFIXES) {
+      const before = cleaned;
+      cleaned = cleaned.replace(pattern, "").trim();
+      if (cleaned !== before) {
+        changed = true;
+        prefixChanged = true;
+        break;
+      }
+    }
   }
 
   for (const pattern of NOISE_SUFFIXES) {
