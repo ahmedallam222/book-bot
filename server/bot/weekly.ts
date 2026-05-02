@@ -1,153 +1,90 @@
 import TelegramBot from "node-telegram-bot-api";
-import { redis } from "./redis.js";
-import { L } from "./logger.js";
-import { ADMIN_IDS } from "./config.js";
-import { getWeeklyStats, getTopBooks } from "./analytics.js";
-import { escMd } from "./text.js";
-import { storage } from "../storage.js";
+import { redis }    from "./redis.js";
+import { L }        from "./logger.js";
+import { escMd }    from "./text.js";
 
 // ══════════════════════════════════════════════
-// WEEKLY REPORT — تقرير أسبوعي
+// WEEKLY — أفضل كتب الأسبوع
 // ══════════════════════════════════════════════
 
-const WEEKLY_SENT_KEY = "weekly:last_sent";
+const WEEKLY_CACHE_KEY = "weekly:top:cache";
+const WEEKLY_CACHE_TTL = 3600; // 1h
 
-function bar(filled: number, total = 10): string {
-  const f = Math.max(0, Math.min(total, Math.round(filled)));
-  return "▰".repeat(f) + "▱".repeat(total - f);
-}
+async function getWeeklyTopBooks(limit = 10): Promise<{ book: string; count: number }[]> {
+  try {
+    // FIX-WEEKLY: استخدام zrangebyscore مع REV بطريقة متوافقة مع ioredis v4+
+    // zrevrange هو الأكثر توافقاً عبر إصدارات Redis المختلفة
+    // نستخدمه مباشرةً بدل الـ triple-fallback المعقّد
+    const raw = await (redis as any).zrevrange(
+      "stats:top_books", 0, limit - 1, "WITHSCORES"
+    ) as string[];
 
-// ── Build weekly message ───────────────────────
+    if (!Array.isArray(raw) || raw.length === 0) return [];
 
-async function buildWeeklyMessage(isAdminView = false): Promise<string> {
-  const [week, topBooks, globalStats] = await Promise.all([
-    getWeeklyStats(),
-    getTopBooks(5),
-    storage.getStats().catch(() => ({ totalUsers: 0, totalSearches: 0, totalDownloads: 0 })),
-  ]);
-
-  const totalSearches  = week.reduce((s, d) => s + d.searches,  0);
-  const totalDownloads = week.reduce((s, d) => s + d.downloads, 0);
-  const totalSuccess   = week.reduce((s, d) => s + d.success,   0);
-  const totalCache     = week.reduce((s, d) => s + d.cacheHits, 0);
-  const weekRate = totalDownloads > 0
-    ? `${Math.round((totalSuccess / totalDownloads) * 100)}%`
-    : "0%";
-  const cacheRate = totalDownloads > 0
-    ? `${Math.round((totalCache / totalDownloads) * 100)}%`
-    : "0%";
-
-  // ── Header ────────────────────────────────────
-  let msg =
-    `📊 *التقرير الأسبوعي — خلاصة الكتب*\n` +
-    `━━━━━━━━━━━━━━━━━\n\n`;
-
-  // ── خلاصة الأسبوع ────────────────────────────
-  msg +=
-    `*📈 ملخّص الأسبوع:*\n` +
-    `🔍 بحثات: *${totalSearches.toLocaleString()}*\n` +
-    `📥 تحميلات: *${totalDownloads.toLocaleString()}*\n` +
-    `✅ نجاح: *${totalSuccess}* (${weekRate})\n` +
-    `⚡ كاش: *${totalCache}* (${cacheRate})\n\n`;
-
-  // ── جدول يومي ─────────────────────────────────
-  msg += `*📅 يومياً:*\n`;
-  const maxDownload = Math.max(...week.map((d) => d.downloads), 1);
-  for (const d of week) {
-    const isToday = d.date === new Date().toISOString().slice(0, 10);
-    const label   = isToday ? `*${d.date}*` : d.date;
-    const b       = bar((d.downloads / maxDownload) * 10);
-    msg += `${label}: \`${b}\` ${d.downloads}↓ ${d.successRate}\n`;
-  }
-  msg += "\n";
-
-  // ── أكثر الكتب طلباً ──────────────────────────
-  if (topBooks.length > 0) {
-    const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
-    msg += `*📚 أكثر الكتب طلباً:*\n`;
-    for (let i = 0; i < Math.min(topBooks.length, 5); i++) {
-      msg += `${medals[i]} ${escMd(topBooks[i].title.slice(0, 40))} *(${topBooks[i].count})*\n`;
+    const result: { book: string; count: number }[] = [];
+    for (let i = 0; i < raw.length; i += 2) {
+      result.push({ book: raw[i], count: parseInt(raw[i + 1], 10) || 0 });
     }
-    msg += "\n";
+    return result;
+  } catch {
+    return [];
   }
-
-  // ── الإجماليات (للأدمن فقط) ─────────────────
-  if (isAdminView) {
-    msg +=
-      `*🌍 الإجماليات الكلية:*\n` +
-      `👥 المستخدمون: *${globalStats.totalUsers.toLocaleString()}*\n` +
-      `📥 تحميلات كلية: *${globalStats.totalDownloads.toLocaleString()}*\n\n`;
-  }
-
-  msg += `_${new Date().toLocaleDateString("ar-SA", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}_`;
-
-  return msg;
 }
-
-// ── handleWeeklyCommand ───────────────────────
 
 export async function handleWeeklyCommand(
-  bot:      TelegramBot,
-  chatId:   number,
-  userId:   string,
-  isAdmin:  boolean
+  bot:     TelegramBot,
+  chatId:  number,
+  userId:  string,
+  isAdmin: boolean
 ): Promise<void> {
   try {
-    const msg = await buildWeeklyMessage(isAdmin);
+    // Cache
+    let books: { book: string; count: number }[] = [];
+    const cached = await redis.get(WEEKLY_CACHE_KEY).catch(() => null);
+    if (cached) {
+      books = JSON.parse(cached);
+    } else {
+      books = await getWeeklyTopBooks(10);
+      if (books.length > 0) {
+        await redis.setex(WEEKLY_CACHE_KEY, WEEKLY_CACHE_TTL, JSON.stringify(books)).catch(() => {});
+      }
+    }
+
+    if (books.length === 0) {
+      await bot.sendMessage(chatId,
+        `📅 *أفضل الأسبوع*\n\n_لا توجد بيانات كافية بعد — عد لاحقاً!_`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      return;
+    }
+
+    const medals = ["🥇", "🥈", "🥉"];
+    const lines  = books.map((b, i) => {
+      const medal = medals[i] ?? `${i + 1}.`;
+      const count = isAdmin ? ` _(${b.count})_` : "";
+      return `${medal} _${escMd(b.book.slice(0, 55))}_${count}`;
+    });
+
+    const msg =
+      `📅 *أفضل كتب الأسبوع*\n` +
+      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+      lines.join("\n") +
+      `\n\n_اكتب اسم أي كتاب لتحميله فوراً_ 📥`;
+
     await bot.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
-      reply_markup: isAdmin
-        ? {
-            inline_keyboard: [
-              [
-                { text: "🔄 تحديث",  callback_data: "weekly_refresh" },
-                { text: "📤 تصدير",  callback_data: "weekly_export"  },
-              ],
-              [{ text: "◀️ رجوع",   callback_data: "admin_refresh"  }],
-            ],
-          }
-        : {
-            inline_keyboard: [[
-              { text: "🔄 تحديث", callback_data: "weekly_refresh" },
-            ]],
-          },
-    });
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🔄 تحديث", callback_data: "weekly_refresh" },
+          { text: "🏠 القائمة", callback_data: "main_menu" },
+          ...(isAdmin ? [{ text: "📤 تصدير", callback_data: "weekly_export" }] : []),
+        ]],
+      },
+    }).catch(() => {});
+
+    L.debug("weekly", `Sent weekly top books`, { userId, count: books.length });
   } catch (e) {
-    L.error("weekly", `handleWeeklyCommand error`, { err: String(e).slice(0, 100) });
-    await bot.sendMessage(chatId, "❌ خطأ في جلب التقرير الأسبوعي").catch(() => {});
-  }
-}
-
-// ── broadcastWeeklyToAdmins ───────────────────
-
-/**
- * يُرسل تقريراً أسبوعياً لكل الأدمنز.
- * يُشغَّل من index.ts كل جمعة مساءً.
- * يستخدم Redis NX لضمان الإرسال مرة واحدة فقط.
- */
-export async function broadcastWeeklyToAdmins(bot: TelegramBot): Promise<void> {
-  const week = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const lockKey = `${WEEKLY_SENT_KEY}:${week}`;
-
-  // NX: لو المفتاح موجود → سبق الإرسال هذا الأسبوع
-  const locked = await redis.set(lockKey, "1", "EX", 7 * 24 * 3600, "NX").catch(() => null);
-  if (!locked) {
-    L.debug("weekly", `Weekly already sent for ${week} — skipping`);
-    return;
-  }
-
-  L.info("weekly", `Broadcasting weekly report to ${ADMIN_IDS.size} admin(s)`);
-
-  try {
-    const msg = await buildWeeklyMessage(true);
-    const promises = [...ADMIN_IDS].map((adminId) =>
-      bot.sendMessage(Number(adminId), msg, { parse_mode: "Markdown" }).catch((e) =>
-        L.warn("weekly", `Failed to send weekly to admin ${adminId}: ${String(e).slice(0, 80)}`)
-      )
-    );
-    await Promise.allSettled(promises);
-    L.info("weekly", "Weekly broadcast complete");
-  } catch (e) {
-    L.error("weekly", `broadcastWeeklyToAdmins error`, { err: String(e).slice(0, 100) });
+    L.error("weekly", `Error`, { err: String(e).slice(0, 100) });
+    await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
   }
 }

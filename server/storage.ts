@@ -1,4 +1,4 @@
-import { eq, desc, sql, sum, count, and, inArray } from "drizzle-orm";
+import { eq, desc, sql, sum, count, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import {
@@ -6,7 +6,6 @@ import {
   type User, type InsertUser, type SearchLog, type InsertSearchLog,
   type CachedBook, type InsertCachedBook, type DailyLimit, type InsertDailyLimit,
 } from "@shared/schema";
-import { normalizeBookCacheKey } from "./bot/text.js";
 
 // ══════════════════════════════════════════════
 // DB POOL — معدَّل وغير مُعرَّض للـ pool exhaustion
@@ -35,10 +34,6 @@ function normalizeQuery(q: string): string {
   return q.toLowerCase().trim().replace(/\s+/g, " ");
 }
 
-function cacheKeysForQuery(query: string): string[] {
-  return [...new Set([normalizeBookCacheKey(query), normalizeQuery(query)].filter(Boolean))];
-}
-
 // ══════════════════════════════════════════════
 // INTERFACE
 // ══════════════════════════════════════════════
@@ -61,6 +56,7 @@ export interface IStorage {
   canDownload(telegramUserId: string, limit?: number): Promise<boolean>;
   getAllUserIds(): Promise<string[]>;
   getUserSearchHistory(telegramUserId: string, limit?: number): Promise<{ query: string; createdAt: Date | null }[]>;
+  getAllUsersWithDetails(limit?: number, offset?: number): Promise<{ users: User[]; total: number }>;
 }
 
 // ══════════════════════════════════════════════
@@ -131,20 +127,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getCachedBook(query: string): Promise<CachedBook | null> {
-    const keys = cacheKeysForQuery(query);
-    if (keys.length === 0) return null;
+    const normalized = normalizeQuery(query);
     const result = await db
       .select()
       .from(cachedBooks)
-      .where(keys.length === 1
-        ? eq(cachedBooks.bookQueryNormalized, keys[0])
-        : inArray(cachedBooks.bookQueryNormalized, keys))
+      .where(eq(cachedBooks.bookQueryNormalized, normalized))
       .limit(1);
     return result.length > 0 ? result[0] : null;
   }
 
   async cacheBook(data: InsertCachedBook): Promise<CachedBook> {
-    const normalized = normalizeBookCacheKey(data.bookQuery);
+    const normalized = normalizeQuery(data.bookQuery);
     const inserted = await db
       .insert(cachedBooks)
       .values({ ...data, bookQueryNormalized: normalized })
@@ -236,6 +229,21 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(searchLogs.createdAt))
       .limit(limit);
     return result;
+  }
+
+  /**
+   * جميع المستخدمين مع تفاصيلهم — مُرتَّبون بأكثر التحميلات
+   * يدعم pagination عبر limit + offset
+   */
+  async getAllUsersWithDetails(limit = 50, offset = 0): Promise<{ users: User[]; total: number }> {
+    const [rows, countResult] = await Promise.all([
+      db.select().from(users)
+        .orderBy(desc(users.totalDownloads))
+        .limit(limit)
+        .offset(offset),
+      db.select({ total: count() }).from(users),
+    ]);
+    return { users: rows, total: Number(countResult[0]?.total || 0) };
   }
 }
 
