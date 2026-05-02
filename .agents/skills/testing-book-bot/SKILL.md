@@ -1,8 +1,13 @@
+---
+name: testing-book-bot
+description: Test the Telegram book-bot production runtime, source quality, and deterministic backend cache/search behavior.
+---
+
 # Testing book-bot production runtime
 
 ## When to use
 
-Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, or deployment health.
+Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, or smart cached-PDF behavior.
 
 ## Devin Secrets Needed
 
@@ -39,6 +44,23 @@ http.get('http://127.0.0.1:5000/api/health', (res) => {
 }).on('error', (err) => { console.error(err.message); process.exit(1); });
 NODE
 ```
+
+## Local deterministic cache/search tests
+
+For backend-only cache/search/ranking changes, prefer shell-only probes over Telegram UI tests when the behavior is deterministic and does not require real Firecrawl or Telegram delivery.
+
+Useful checks:
+
+```bash
+# Verify smart cache key behavior without secrets.
+npx tsx -e 'import { normalizeBookCacheKey } from "./server/bot/text.ts"; const cases=["أرض زيكولا","ارض زيكولا","تحميل كتاب أرض زيكولا pdf","رواية أرض زيكولا نسخة pdf"]; for (const c of cases) console.log(c,"=>",normalizeBookCacheKey(c));'
+
+# Always verify TypeScript and bundled output.
+npm run typecheck
+npm run build
+```
+
+Expected for smart cached-PDF query matching: Arabic spelling variants and generic request wrappers such as `تحميل كتاب ... pdf` should resolve to the same canonical cache key. If storage cache behavior changes, also verify reads remain backward-compatible with legacy `book_query_normalized` rows.
 
 ## Safe runtime test checklist
 
