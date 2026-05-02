@@ -11,7 +11,7 @@ import * as path from "path";
 
 export type LogLevel    = "DEBUG" | "INFO" | "WARN" | "ERROR";
 export type LogCategory = "search" | "download" | "verify" | "queue" | "worker"
-                        | "cache"  | "admin"    | "bot"    | "rate"  | "system"
+                        | "cache"  | "admin"    | "bot"    | "cmd"   | "rate"  | "system"
                         | "analytics" | "trace" | "alerts" | "server" | "engine" | "firecrawl" | "pdfValidator"
                         // BUG-E FIX: كانت "bookNameParser" و"weekly" مستخدمتَين في ملفاتهما
                         // لكن غير موجودتَين في هذا الـ type → TypeScript error + EMOJI[cat]=undefined
@@ -46,6 +46,7 @@ const EMOJI: Record<LogCategory, string> = {
   cache:     "⚡",
   admin:     "🛠️ ",
   bot:       "🤖",
+  cmd:       "⌨️ ",
   rate:      "🛡️ ",
   system:    "💻",
   analytics: "📊",
