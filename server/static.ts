@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 export function serveStatic(app: Express) {
-  // ESM: __dirname غير موجود، نستخدم import.meta
+  // FIX: import.meta.url مقبول في TypeScript ESM — esbuild يحوّله لـ __filename في CJS bundle
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const distPath  = path.resolve(__dirname, "public");
 
