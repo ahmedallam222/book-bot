@@ -93,6 +93,11 @@ function relevanceWords(text: string): string[] {
     .filter((w) => w.length >= 2 && !RELEVANCE_STOPWORDS.has(w));
 }
 
+export function normalizeBookCacheKey(text: string): string {
+  const words = relevanceWords(text);
+  return words.length > 0 ? words.join(" ") : normalizeForCache(text);
+}
+
 /**
  * urlFilenameRelevance — مدى صلة اسم الملف في الـ URL بالكتاب المطلوب.
  * يُعيد 0 (لا صلة) إلى 1 (تطابق كامل).
