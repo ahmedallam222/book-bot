@@ -230,6 +230,11 @@ export async function downloadAndSend(
     return { ok: false, permanent: true };
   }
 
+  // عند تحويل الـ landing page لرابط داخلي بدون اسم الكتاب،
+  // نحتفظ بالأصل ليصل لـ validatePdfContent كـ URL hint للـ Mistral
+  // (الـ landing فيه slug الكتاب — مفيد للتحقق من التطابق)
+  const originalUrl = pdfUrl;
+
   // ── archive.org/details/ → رابط مباشر ────────
   if (pdfUrl.includes("archive.org/details/")) {
     const expanded = await expandArchiveOrgUrl(pdfUrl);
@@ -468,7 +473,10 @@ export async function downloadAndSend(
     }
 
     // ── validatePdfContent — تحقق من المحتوى ─────
-    const validation = await validatePdfContent(tempPath, bookName, pdfUrl);
+    // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
+    // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
+    // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
