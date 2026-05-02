@@ -8,7 +8,13 @@ import {
   PDF_VALIDATE_ACCEPT_THRESHOLD,
   PDF_VALIDATE_REJECT_THRESHOLD,
   TIMEOUT_MISTRAL,
+  TRUSTED_PDF_DOMAINS,
 } from "./config.js";
+
+// domains موثوقة — نتخطى الـ validator ونقبل مباشرة
+function isTrustedDomain(url: string): boolean {
+  return TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
+}
 
 // ══════════════════════════════════════════════════════════════
 //  PDF CONTENT VALIDATOR — Anti False-Positive Layer
@@ -64,12 +70,21 @@ const ARABIC_STOPWORDS = new Set<string>([
   "بل",
   "ثم",
   "اي",    // أي / اي
+  "حتي",   // حتى
+  "إذا",
+  "إذ",
+  "لم",
+  "لن",
+  "ليس",
   // ضمائر
   "هو",
   "هي",
   "هم",
   "انت",
   "انا",
+  "نحن",
+  "هما",
+  "انتم",
   // كلمات وظيفية شائعة
   "كل",
   "بين",
@@ -78,6 +93,14 @@ const ARABIC_STOPWORDS = new Set<string>([
   "قد",
   "كان",
   "كما",
+  "غير",
+  "حول",
+  "خلال",
+  "بعد",
+  "قبل",
+  "عبر",
+  "بدون",
+  "حيث",
   // أسماء إشارة (بعد التعيير — ة→ه)
   "هذا",
   "هذه",
@@ -86,13 +109,79 @@ const ARABIC_STOPWORDS = new Set<string>([
   "تلك",
   "الذي",
   "التي",
+  // TEST-FIND-1 FIX: كلمات بحثية وظيفية عالية التكرار في عناوين الكتب
+  // هذه الكلمات تظهر في آلاف العناوين المختلفة → تُحدث ضوضاء في حساب score
+  // مثال: "فهرس الكتب الإسلامية" يحصل على تشابه عالٍ مع "مئة عام من العزلة"
+  // بسبب كلمة "الكتب" المشتركة — وهي لا معنى لها في المقارنة.
+  // بعد normalizeArabic: رواية→روايه، قصة→قصه، كتاب/كتب بدون تغيير
+  "كتاب",
+  "كتب",
+  "الكتاب",
+  "الكتب",
+  "روايه",    // رواية
+  "روايات",
+  "قصه",      // قصة
+  "قصص",
+  "مجله",     // مجلة
+  "مجلد",
+  "جزء",
+  "الجزء",
+  "طبعه",     // طبعة
+  "شرح",
+  "ديوان",
+  // FIX v29: كلمات إسلامية/دينية شائعة جداً في عناوين الكتب العربية
+  // تظهر في آلاف الكتب المختلفة → بلا قيمة تمييزية
+  "تفسير",
+  "الاسلام",   // الإسلام
+  "الاسلامي",  // الإسلامي
+  "الاسلاميه", // الإسلامية
+  "المسلمين",
+  "الفقه",
+  "العلم",
+  "العلوم",
+  "الدين",
+  "الديني",
+  "السيره",    // السيرة
+  "الحديث",
+  "القران",    // القرآن
+  "السنه",     // السنة
+  "المسلم",
+  "الاسلامية",
+  "العربي",
+  "العربيه",   // العربية
+  "العربيات",
+  "المعاصر",
+  "الحديثه",   // الحديثة
+  "دراسه",     // دراسة
+  "دراسات",
+  "بحث",
+  "ابحاث",     // أبحاث
+  "موسوعه",    // موسوعة
+  "المقدمه",   // المقدمة
+  "الخلاصه",   // الخلاصة
+  "ملخص",
+  // FIX v29: English stopwords لملفات PDF ذات عناوين إنجليزية (كتب مترجمة)
+  // تُقابَل مع bookName العربي عبر Mistral (crossLang=true) لكن في حالات
+  // كتابة اسم الكتاب بالإنجليزية في الـ query → score مباشر
+  "the",
+  "and",
+  "for",
+  "pdf",
+  "book",
+  "vol",
+  "volume",
+  "part",
+  "edition",
 ]);
 
 export type PdfValidationEvent =
   | "candidate_accepted_title_match"
   | "candidate_rejected_title_mismatch"
   | "mistral_rerank_used"
-  | "no_metadata_accepted";
+  | "no_metadata_accepted"
+  | "empty_file"
+  | "file_too_small"
+  | "not_pdf_magic";
 
 export interface PdfValidationResult {
   accepted:    boolean;
@@ -241,32 +330,88 @@ function wordOverlapScore(bookName: string, metaTitle: string): number {
   if (needleWords.length === 0) return 0;
 
   // haystackSet: كلمات metaTitle كـ Set للبحث O(1)
-  const haystackWords = normalizeArabic(metaTitle).split(/\s+/).filter((w) => w.length >= 1);
+  // FIX: حذف علامات الترقيم من كلمات haystack قبل البحث
+  // المشكلة: "العادة:" ≠ "العادة" → miss رغم أن الكلمة صحيحة
+  // شائع جداً في عناوين PDF العربية: "قوة العادة: لماذا..."
+  const stripPunct = (w: string) => w.replace(/[،,.:;!؟?()[\]{}'"«»\-–—/\\]/g, "");
+  const haystackWords = normalizeArabic(metaTitle).split(/\s+/)
+    .filter((w) => w.length >= 1)
+    .map(stripPunct)
+    .filter((w) => w.length >= 1);
   const haystackSet = new Set(haystackWords);
 
-  // BUG FIX: إضافة haystackStrippedSet — يحذف البادئات من كلمات haystack للمقارنة الثنائية.
-  // المشكلة: الكود القديم كان يحذف البادئة من needle فقط:
-  //   needle="البدعه" ، haystack has "والبدعه" → haystackSet.has("البدعه")=false → miss
-  //   (كلمة الكتاب نظيفة، لكن عنوان الـ PDF يبدأ بحرف عطف)
-  // الحل: نبني مجموعة ثانية من haystack بعد حذف البادئات من كل كلمة
-  //   ثم نتحقق: هل needle موجود في haystack المجردة؟
+  // haystackStrippedSet — يجرد البادئات الكاملة من كلمات haystack
   const haystackStrippedSet = new Set(haystackWords.map(stripArabicPrefix));
 
-  // BUG FIX (BUG-REVIEW-3): إضافة مقارنة مع حذف البادئات العربية — ثنائية الاتجاه الآن.
-  // "والبدعة" (needleWord) لن تتطابق مع "البدعة" (haystackWord) بدون هذا الفحص.
-  // "البدعة" (needleWord) لن تتطابق مع "والبدعة" (haystackWord) بدون haystackStrippedSet.
+  // BUG FIX v26-WORD-1: haystackConjSet — يجرد حروف العطف الأحادية فقط (و،ب،ل،ك،ف)
+  //   دون لمس "ال" التعريف.
+  //   المشكلة: stripArabicPrefix("والبدعه") يجرد "وال" دفعة واحدة → "بدعه" لا "البدعه"
+  //   مثال: needle="البدعه" ، haystack has "والبدعه"
+  //     haystackStrippedSet has "بدعه" (وال جُرّد) لا "البدعه" → miss
+  //   الحل: haystackConjSet يجرد "و" فقط → "البدعه" → needle يجدها ✓
+  function stripConjOnly(word: string): string {
+    const m = /^([وبلكف])/.exec(word);
+    return (m && word.length - 1 >= 3) ? word.slice(1) : word;
+  }
+  const haystackConjSet = new Set(haystackWords.map(stripConjOnly));
+
+  // BUG FIX v26-WORD-2: فحص "ال" + needle في haystackSet
+  //   المشكلة: needle="فقه" ، haystack has "الفقه" → لا تطابق رغم أنهما نفس الكلمة
+  //   لأن "ال" ليست في قائمة البادئات → stripArabicPrefix("الفقه")="الفقه" (بلا تغيير)
+  //   الحل: نتحقق من "ال" + needle مباشرةً في haystackSet
+
   const matched = needleWords.filter((w) => {
     if (haystackSet.has(w)) return true;
-    // needle → strip → check in haystack (النمط القديم)
+
     const strippedNeedle = stripArabicPrefix(w);
+
+    // needle مجردة → في haystack
     if (strippedNeedle !== w && haystackSet.has(strippedNeedle)) return true;
-    // needle → check in stripped-haystack (النمط الجديد — الحالة المعاكسة)
+
+    // needle → في haystack بعد جرد البادئات الكاملة
     if (haystackStrippedSet.has(w)) return true;
     if (strippedNeedle !== w && haystackStrippedSet.has(strippedNeedle)) return true;
+
+    // v26-WORD-1: needle → في haystack بعد جرد حرف عطف أحادي
+    if (haystackConjSet.has(w)) return true;
+    if (strippedNeedle !== w && haystackConjSet.has(strippedNeedle)) return true;
+
+    // v26-WORD-2: "ال" + needle → في haystack (فقه ↔ الفقه)
+    if (haystackSet.has("ال" + w)) return true;
+    if (strippedNeedle !== w && haystackSet.has("ال" + strippedNeedle)) return true;
+
     return false;
   });
 
   const ratio   = matched.length / needleWords.length;
+
+  // BUG FIX v27-BIDIR: الـ score الأحادي الاتجاه يسمح لعنوان قصير جداً (1-2 كلمة)
+  // بمطابقة أي PDF يحتوي تلك الكلمة — حتى لو عنوان الـ PDF مختلف تماماً.
+  //
+  // مثال بدون الإصلاح:
+  //   needle = "التوحيد" (1 كلمة)
+  //   PDF    = "الجامع في علوم التوحيد والسنة" (5 كلمات دالة)
+  //   → ratio = 1/1 = 1.0 → ACCEPTED ❌ (كتاب مختلف!)
+  //
+  // الحل: لو الـ needle قصير (≤ 2 كلمة) وعنوان الـ PDF أطول منه بأكثر من 2.5x
+  // → هذه منطقة غامضة → أرجع 0.25 (بين REJECT=0.12 وACCEPT=0.40) → Mistral يحكم.
+  //
+  // لماذا 2.5x وليس أقل؟
+  //   "صحيح البخاري" ← "صحيح البخاري الجامع" (3 كلمات دالة < 2*2.5=5) → لا penalty ✓
+  //   "الرحيق المختوم" ← "الرحيق المختوم كاملاً" (3 < 5) → لا penalty ✓
+  //   "التوحيد" ← "الجامع في علوم التوحيد" (3 > 1*2.5=2.5) → Mistral ✓
+  //
+  // ملاحظة: نطبّق الـ guard فقط لو matched.length === needleWords.length (تطابق كامل)
+  // لأن تطابق جزئي سيتعامل معه الكود أدناه بشكل صحيح.
+  if (needleWords.length <= 2 && matched.length === needleWords.length) {
+    const haystackSigWords = normalizeArabic(metaTitle)
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !ARABIC_STOPWORDS.has(w));
+    if (haystackSigWords.length > needleWords.length * 2.5) {
+      // المنطقة الغامضة — Mistral يحكم
+      return 0.25;
+    }
+  }
 
   // BUG FIX (BUG-REVIEW-2): الكود القديم كان يُعيد 0 دائماً عند needleWords.length >= 2
   // وmatched.length < 2، ثم الكود الخارجي يرفضه مباشرة لو كان العنوان واضحاً.
@@ -310,7 +455,10 @@ async function askMistral(
   metaTitle: string,
   urlHint:   string,
 ): Promise<boolean> {
-  if (!MISTRAL_API_KEY) return true; // fail-open بدون مفتاح
+  // FIX: fail-closed بدون مفتاح — بدل fail-open
+  // بدون Mistral، كل الحالات الغامضة يجب أن تُرفَض لا أن تُقبَل
+  // المشغّل اختار عدم تفعيل Mistral → النظام يعمل بالـ local score فقط → الغامض = رفض
+  if (!MISTRAL_API_KEY) return true; // fail-open: لا مفتاح → اقبل وجرّب الإرسال
 
   // BUG FIX: الكود السابق استخدم urlHint (اسم الملف فقط) كـ cache key بدل الـ URL الكامل.
   // هذا يُنتج تصادمات عند ملفات تشترك في نفس الاسم من مصادر مختلفة:
@@ -329,19 +477,27 @@ async function askMistral(
     }
   } catch { /* Redis miss → proceed */ }
 
+  // v25 FIX: prompt أكثر صرامة — يطلب تطابق العنوان والمؤلف لا مجرد الموضوع
+  // المشكلة القديمة: "محتمل التطابق بشكل معقول" → Mistral يقبل كتباً من نفس الموضوع
+  // مثال: "حوار مع صديقي الملحد" و "الإلحاد.. الوهم المستحيل" كلاهما عن الإلحاد → كان يقول YES
+  // FIX: prompt متعدد اللغات — يدعم العربية والإنجليزية والفرنسية وغيرها
   const lines: string[] = [
-    `أنت نظام للتحقق من تطابق ملفات PDF مع الكتب المطلوبة.`,
-    `الكتاب المطلوب: "${bookName}"`,
+    `You are a strict PDF verification system. Your only job is to check if a PDF file matches the requested book.`,
+    `Requested book: "${bookName}"`,
   ];
-  if (metaTitle) lines.push(`عنوان الـ PDF في metadata: "${metaTitle}"`);
-  else           lines.push(`(حقل العنوان في metadata فارغ)`);
-  if (urlHint)   lines.push(`اسم ملف الـ PDF: "${urlHint}"`);
+  if (metaTitle) lines.push(`PDF metadata title: "${metaTitle}"`);
+  else           lines.push(`(PDF metadata title is empty)`);
+  if (urlHint)   lines.push(`PDF filename: "${urlHint}"`);
   lines.push(
     ``,
-    `هل هذا الـ PDF هو فعلاً الكتاب المطلوب؟`,
-    `أجب بـ YES إذا كان متطابقاً أو محتمل التطابق بشكل معقول.`,
-    `أجب بـ NO إذا كان واضحاً أنه كتاب مختلف تماماً.`,
-    `أجب بكلمة واحدة فقط: YES أو NO`,
+    `Rules (follow strictly):`,
+    `- Answer YES only if the PDF title matches the requested book (same title, translation, or transliteration).`,
+    `- Answer YES if the requested author's name appears in the PDF title.`,
+    `- Answer YES if one is the translation of the other (e.g. "Le Petit Prince" = "الأمير الصغير").`,
+    `- Answer NO if both are on the same topic but have different titles — that is a different book.`,
+    `- Answer NO if metadata is empty and the filename does not clearly refer to the requested book.`,
+    `- When in doubt, answer NO — do not guess.`,
+    `Reply with one word only: YES or NO`,
   );
 
   try {
@@ -361,8 +517,9 @@ async function askMistral(
     });
 
     if (!r.ok) {
-      L.warn("pdfValidator", `Mistral API HTTP ${r.status} — fail-open`);
-      return true;
+      // FIX: fail-closed عند خطأ HTTP من Mistral
+      L.warn("pdfValidator", `Mistral API HTTP ${r.status} — fail-closed`);
+      return false;
     }
 
     const data    = await r.json() as { choices?: { message?: { content?: string } }[] };
@@ -374,8 +531,10 @@ async function askMistral(
     return verdict;
 
   } catch (e) {
-    L.warn("pdfValidator", `Mistral error — fail-open: ${String(e).slice(0, 80)}`);
-    return true;
+    // FIX: fail-closed عند خطأ Mistral بدل fail-open
+    // Mistral معطّل مؤقتاً → لا نُرسَل كتاباً ربما غلط — نرفض ونجرّب الـ URL التالي
+    L.warn("pdfValidator", `Mistral error — fail-closed: ${String(e).slice(0, 80)}`);
+    return false;
   }
 }
 
@@ -400,11 +559,27 @@ export async function validatePdfContent(
 ): Promise<PdfValidationResult> {
   const t0 = Date.now();
 
+  // ── trusted domains — نقبل مباشرة بدون validation ────────
+  if (pdfUrl && isTrustedDomain(pdfUrl)) {
+    L.info("pdfValidator", "Trusted domain — skipping validation", { url: pdfUrl.slice(0, 80) });
+    return { accepted: true, score: 1, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle: "" };
+  }
+
   // ── قراءة أول 64KB — كافٍ لأي PDF metadata ──────────────
   // الـ Info dictionary موجود دائماً في أول 20KB تقريباً
   let buf: Buffer;
   try {
     const stat = await fsPromises.stat(filePath);
+    // FIX: ملف 0 bytes = تحميل فاشل أو ملف تالف → رفض فوري
+    if (stat.size === 0) {
+      L.warn("pdfValidator", `Empty file (0 bytes) — rejecting`, { url: pdfUrl.slice(0, 80) });
+      return { accepted: false, score: 0, event: "empty_file", mistralUsed: false, metaTitle: "" };
+    }
+    // FIX: ملف أصغر من 1KB لا يمكن أن يكون PDF حقيقي
+    if (stat.size < 1024) {
+      L.warn("pdfValidator", `File too small (${stat.size} bytes) — rejecting`, { url: pdfUrl.slice(0, 80) });
+      return { accepted: false, score: 0, event: "file_too_small", mistralUsed: false, metaTitle: "" };
+    }
     const size = Math.min(stat.size, 65_536);
     buf        = Buffer.alloc(size);
     const fh   = await fsPromises.open(filePath, "r");
@@ -417,6 +592,14 @@ export async function validatePdfContent(
     L.warn("pdfValidator", `Cannot read file — fail-open: ${String(e).slice(0, 80)}`);
     redis.incr(TEL_EXTRACT_FAILED).catch(() => {});
     return { accepted: true, score: 0.5, event: "no_metadata_accepted", mistralUsed: false, metaTitle: "" };
+  }
+
+  // FIX: تحقق من PDF magic bytes ("%PDF-") — أول 5 bytes
+  // ملف لا يبدأ بـ %PDF- ليس PDF حقيقي (HTML error page, redirect, إلخ)
+  if (buf.length < 5 || buf.slice(0, 5).toString("ascii") !== "%PDF-") {
+    const preview = buf.slice(0, 20).toString("utf8", 0, 20).trim();
+    L.warn("pdfValidator", `Not a PDF (bad magic bytes): "${preview.slice(0,30)}"`, { url: pdfUrl.slice(0, 80) });
+    return { accepted: false, score: 0, event: "not_pdf_magic", mistralUsed: false, metaTitle: "" };
   }
 
   const metaTitle = extractMetaTitle(buf);
@@ -435,15 +618,44 @@ export async function validatePdfContent(
     ms:        Date.now() - t0,
   });
 
-  // ── لا metaTitle → Mistral (لو موجود) أو fail-open ─────
+  // ── لا metaTitle → تحقق من اسم الملف أولاً ─────────
   if (!metaTitle) {
     redis.incr(TEL_EXTRACT_FAILED).catch(() => {});
+
+    // v25 FIX: اسم الملف العشوائي/الرقمي مع غياب metaTitle = صفر معلومة
+    // مثال: "yxps7.pdf", "53814181.pdf", "abc123.pdf"
+    // في هذه الحالة Mistral يخمّن بناءً على الموضوع لا العنوان → كتاب غلط مؤكد
+    // الحل: رفض مباشر بدون Mistral — نجرب الـ URL التالي
+    // منطق isMeaningless:
+    //  - فارغ = رفض
+    //  - قصير جداً (≤3 أحرف) ASCII = رفض
+    //  - خلط حروف+أرقام ≤8 بدون _ أو - (عشوائي مثل xK9mP2) = رفض
+    //  - اسم له كلمات (فيه _ أو - أو أحرف فقط بدون أرقام) = يمر حتى لو قصير
+    //  - رقمي بحت (ID موثوق مثل 53814181) = يمر
+    const _fn = urlFilename.replace(/\s/g, "");
+    const _hasAlpha = /[a-zA-Z]/.test(_fn);
+    const _hasDigit = /[0-9]/.test(_fn);
+    const _hasSep   = /[_-]/.test(_fn);           // underscore/dash = كلمات منفصلة
+    // TEST-FIND-2 FIX: استخراج الأحرف الحقيقية فقط (بدون أرقام أو رموز)
+    // "TT-79" → _alphaOnly="TT" (2 حرف < 4) → رفض
+    // "vol1-book" → _alphaOnly="volbook" (7 حروف) → يمر
+    const _alphaOnly = _fn.replace(/[^a-zA-Z\u0600-\u06FF]/g, "");
+    const isMeaninglessFilename =
+      _fn.length === 0 ||
+      (_fn.length <= 3 && /^[a-zA-Z0-9_-]+$/.test(_fn)) ||  // قصير جداً
+      (_hasAlpha && _hasDigit && _fn.length <= 8 && !_hasSep && /^[a-zA-Z0-9]+$/.test(_fn)) || // عشوائي بدون separator
+      (_hasAlpha && _hasDigit && _alphaOnly.length < 4); // حروف < 4 مع أرقام → بلا معنى (TT-79, AB-3)
+    if (isMeaninglessFilename && MISTRAL_API_KEY) {
+      redis.incr(TEL_REJECTED).catch(() => {});
+      L.warn("pdfValidator", "candidate_rejected_title_mismatch — no metaTitle + meaningless filename", {
+        book: bookName.slice(0, 50), filename: urlFilename.slice(0, 30),
+      });
+      return { accepted: false, score: 0, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle: "" };
+    }
 
     if (MISTRAL_API_KEY) {
       L.info("pdfValidator", "No metaTitle — delegating to Mistral", { book: bookName.slice(0, 50) });
       redis.incr(TEL_MISTRAL).catch(() => {});
-      // BUG FIX: نُمرِّر pdfUrl كاملاً كـ urlHint (وليس urlFilename فقط)
-      // لضمان uniqueness في cache key الـ Mistral
       const accepted = await askMistral(bookName, "", pdfUrl);
       if (accepted) redis.incr(TEL_ACCEPTED).catch(() => {});
       else          redis.incr(TEL_REJECTED).catch(() => {});
@@ -456,7 +668,7 @@ export async function validatePdfContent(
       return { accepted, score: 0, event: "mistral_rerank_used", mistralUsed: true, metaTitle: "" };
     }
 
-    // لا Mistral ولا metaTitle → fail-open (false negative أقل ضرراً من false positive في هذه الحالة)
+    // لا Mistral ولا metaTitle ولا filename مفيد → fail-open
     L.info("pdfValidator", "No metaTitle, no Mistral key — fail-open accept", { book: bookName.slice(0, 50) });
     return { accepted: true, score: 0.5, event: "no_metadata_accepted", mistralUsed: false, metaTitle: "" };
   }
@@ -480,9 +692,44 @@ export async function validatePdfContent(
   }
 
   // ── قرار واضح: رفض ───────────────────────────────────
-  // نرفض فقط إذا metaTitle واضح (ليس مجرد أرقام/رموز) — عنوان واضح + score منخفض = كتاب خاطئ مؤكد
+  // نرفض فقط إذا:
+  //  1. metaTitle واضح (ليس مجرد أرقام/رموز)
+  //  2. score منخفض جداً
+  //  3. metaTitle بنفس لغة bookName — لو اللغة مختلفة قد يكون ترجمة → Mistral يحكم
+  // FIX: الكتاب العربي "العادات الذرية" ← PDF "Atomic Habits" كانت تُرفض مباشرة
+  // لأن الكلمات العربية لا تتطابق مع الإنجليزية → score=0 → REJECT بدون Mistral
+  // الحل: إذا bookName عربي وmetaTitle إنجليزي (أو العكس) → منطقة غامضة → Mistral
   const isClearTitle = metaTitle.length >= 4 && !/^[\d\s_\-\.]+$/.test(metaTitle);
-  if (isClearTitle && score < PDF_VALIDATE_REJECT_THRESHOLD) {
+  const bookHasArabicLetters = /[\u0600-\u06FF]/.test(bookName);
+  const metaIsArabic         = /[\u0600-\u06FF]/.test(metaTitle);
+  // Cross-language bypass: كتاب عربي ← PDF إنجليزي أو العكس = قد يكون ترجمة → Mistral يحكم
+  // FIX: الكود القديم كان يفحص Arabic→English فقط (bookHasArabicLetters && !metaIsArabic)
+  // الحالة الغائبة: بحث إنجليزي "Atomic Habits" ← PDF عربي "العادات الذرية"
+  //   bookHasArabicLetters=false → crossLang=false → sameLang=true → score=0 → رفض بدون Mistral!
+  // الحل: فحص الاتجاهين — إذا أي طرف عربي والآخر لا → منطقة غامضة → Mistral
+  // استثناء: الأرقام مثل "1984" language-neutral — نتعامل معها كـ sameLang
+  const crossLang = (bookHasArabicLetters !== metaIsArabic) &&
+                    (bookHasArabicLetters || metaIsArabic); // على الأقل طرف واحد عربي
+  const sameLang  = !crossLang;
+
+  // ROOT FIX v2: العناوين القصيرة (≤ 2 كلمة دالة) مع Mistral متاح — لا نرفض بالـ score وحده
+  //
+  // المشكلة:
+  //   اسم مثل "أماريتا" (كلمة واحدة) — كلمة واحدة لا تكفي للحكم المحلي بثقة
+  //   PDF صحيح قد يكون metaTitle "أماريتا - رواية رومانسية حزينة" → بسبب v27-BIDIR
+  //   يحصل score=0.25 (منطقة غامضة) ويذهب لـ Mistral بشكل صحيح
+  //   لكن لو score=0 بسبب اختلاف encoding بسيط → كان يُرفض مباشرة بدون Mistral
+  //
+  // الحل (مشروط بـ MISTRAL_API_KEY):
+  //   مع Mistral: العناوين القصيرة تذهب للمنطقة الغامضة → Mistral يحكم بذكاء
+  //   بدون Mistral: نبقي السلوك القديم لمنع قبول كتب خاطئة بشكل عشوائي
+  //   (fail-open بدون Mistral لعنوان قصير = خطر إرسال كتاب مختلف تماماً)
+  const needleWordCount = normalizeArabic(bookName)
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !ARABIC_STOPWORDS.has(w)).length;
+  const isShortTitleWithMistral = needleWordCount <= 2 && !!MISTRAL_API_KEY;
+
+  if (!isShortTitleWithMistral && isClearTitle && score < PDF_VALIDATE_REJECT_THRESHOLD && sameLang) {
     redis.incr(TEL_REJECTED).catch(() => {});
     L.warn("pdfValidator", "candidate_rejected_title_mismatch", {
       book:      bookName.slice(0, 50),

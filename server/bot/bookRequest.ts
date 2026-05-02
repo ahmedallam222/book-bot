@@ -4,20 +4,22 @@ import { L } from "./logger.js";
 import { enqueue } from "./queue.js";
 import { isBanned, isAdmin, setLastBook } from "./guards.js";
 import { isRateLimited, isSearchRateLimited, RATE_LIMIT_MAX, SEARCH_RATE_MAX } from "./rateLimit.js";
-import { normalizeForCache, escMd, urlFilenameRelevance } from "./text.js";
+import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, buildResetTime } from "./text.js";
 import { searchWithFuzzyFallback } from "./fuzzy.js";
-import { invalidateRecentSearchesCache } from "./engine.js";
+import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification } from "./ui.js";
-import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, buildFailMessage } from "./keyboards.js";
-import { getUserDailyLimit, getUserNote } from "./userSettings.js";
+import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
+import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS } from "./config.js";
 import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
+
+// buildResetTime مستوردة من text.ts
 
 // ══════════════════════════════════════════════
 // ENTRY POINT — Guards → Enqueue
@@ -80,11 +82,13 @@ export async function handleBookRequest(
       isSearchRateLimited(userId),
     ]);
     if (rateLimited) {
-      await bot.sendMessage(chatId, buildRateLimitMsg(RATE_LIMIT_MAX), { parse_mode: "Markdown" }).catch(() => {});
+      // BUG-5 FIX: كانت رسالة rate limit تُرسَل بدون أزرار — المستخدم يقرأ الرسالة ولا يعرف ماذا يفعل
+      // الإضافة: كبورد القائمة الرئيسية لتسهيل التنقل بعد انتهاء حالة الـ rate limit
+      await bot.sendMessage(chatId, buildRateLimitMsg(RATE_LIMIT_MAX), { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
       return;
     }
     if (searchRateLimited) {
-      await bot.sendMessage(chatId, buildRateLimitMsg(SEARCH_RATE_MAX), { parse_mode: "Markdown" }).catch(() => {});
+      await bot.sendMessage(chatId, buildRateLimitMsg(SEARCH_RATE_MAX), { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
       return;
     }
   }
@@ -104,19 +108,10 @@ export async function handleBookRequest(
   let dlCount = 0;
   try { dlCount = await storage.getDailyDownloadCount(userId); } catch {}
 
-  // BUG FIX: dailyLimit=0 يعني "غير محدود" (من userSettings) — لا يجب أن يُحجب المستخدم
-  // قبل: dlCount(0) >= dailyLimit(0) → true → يُحجب فوراً
-  // الحل: فحص dailyLimit > 0 أولاً — 0 = unlimited → تجاوز الفحص كلياً
   if (dailyLimit > 0 && dlCount >= dailyLimit && !isAdmin(userId)) {
-    const now      = new Date();
-    const midnight = new Date(now); midnight.setHours(24, 0, 0, 0);
-    const diffMs   = midnight.getTime() - now.getTime();
-    const diffH    = Math.floor(diffMs / 3_600_000);
-    const diffM    = Math.floor((diffMs % 3_600_000) / 60_000);
-    const reset    = diffH > 0 ? `${diffH}س ${diffM}د` : `${diffM} دقيقة`;
     await bot.sendMessage(
       chatId,
-      buildDailyLimit(dlCount, dailyLimit, reset),
+      buildDailyLimit(dlCount, dailyLimit, buildResetTime(), isPrem),
       { parse_mode: "Markdown", reply_markup: kbMain() }
     );
     return;
@@ -143,7 +138,10 @@ export async function handleBookRequest(
   await bot.sendMessage(
     chatId,
     buildQueueAccepted(bookName, pos, isHighPriority),
-    { parse_mode: "Markdown" }
+    // BUG-4 FIX: كان يُرسَل بدون reply_markup → المستخدم لا يرى أزرار الإلغاء/الحالة inline
+    // kbQueued معرَّفة في keyboards.ts منذ البداية لكن لم تكن تُستخدَم أبداً هنا
+    // الآن: المستخدم يرى زر "إلغاء طلبي" و"حالة الطابور" مباشرة تحت رسالة القبول
+    { parse_mode: "Markdown", reply_markup: kbQueued(pos) }
   ).catch(() => {});
 
   L.info("queue", `Request accepted`, { userId, book: bookName.slice(0, 50), priority, pos: result.position });
@@ -172,15 +170,19 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
   trace.phase("request_started", { book: bookName.slice(0, 50), priority: job.priority });
 
   // دمج getUserDailyLimit + getDailyDownloadCount في Promise.all — توفير serial round-trip
-  const [dailyLimit, dlCountRaw] = await Promise.all([
+  const [dailyLimit, dlCountRaw, isPrem] = await Promise.all([
     getUserDailyLimit(userId),
     storage.getDailyDownloadCount(userId).catch(() => 0),
+    isPremium(userId).catch(() => false),
   ]);
   const dlCount = dlCountRaw;
 
-  // BUG FIX: نفس الإصلاح — dailyLimit=0 = unlimited
   if (dailyLimit > 0 && dlCount >= dailyLimit && !isAdmin(userId)) {
-    await bot.sendMessage(chatId, `📵 *وصلت للحد اليومي.* (${dailyLimit} كتب)`, { parse_mode: "Markdown" }).catch(() => {});
+    await bot.sendMessage(
+      chatId,
+      buildDailyLimit(dlCount, dailyLimit, buildResetTime(), isPrem),
+      { parse_mode: "Markdown", reply_markup: kbMain() }
+    ).catch(() => {});
     return;
   }
 
@@ -205,22 +207,21 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
   storage.getOrCreateUser(userId).catch(() => {});
 
   try {
-    const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, t0, trace);
+    const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
       await deleteMsg(token, chatId, msgId);
       await trace.finish("sent_from_cache");
-      // cache hit يُعدّ في الـ funnel كـ send_success بدون verify steps
       trackFunnelOnce(job.id, {
         searchFound:   true,
         verifyChecked: 0,
         verifyValid:   0,
-        sendMode:      "direct", // file_id → مثل direct
+        sendMode:      "direct",
         sendSuccess:   true,
       });
       await sendAnnouncement(bot, chatId, userId);
       return;
     }
-    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, t0, trace, job.id);
+    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id);
     await sendAnnouncement(bot, chatId, userId);
   } catch (e) {
     L.error("worker", `processBookRequest error`, { userId, book: bookName.slice(0, 50), err: String(e).slice(0, 200) });
@@ -250,7 +251,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
 async function serveFromCache(
   bot: TelegramBot, chatId: number, userId: string, bookName: string,
   token: string, userName: string | null | undefined,
-  dlCount: number, dailyLimit: number, t0: number,
+  dlCount: number, dailyLimit: number, isPrem: boolean, t0: number,
   trace: RequestTrace
 ): Promise<boolean> {
   // BUG-7 FIX: await A || await B ينتظر A كاملاً قبل B — نُشغّل الاثنين بالتوازي
@@ -284,7 +285,7 @@ async function serveFromCache(
       setLastBook(userId, bookName);
       warmRelatedCache(bookName).catch(() => {});
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
-      await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true);
+      await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
       return true;
     } catch {
       L.warn("cache", `file_id expired for "${bookName}", trying sourceUrl`);
@@ -314,7 +315,7 @@ async function serveFromCache(
         setLastBook(userId, bookName);
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
-        await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true);
+        await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
         return true;
       }
     } catch (e) {
@@ -334,13 +335,34 @@ async function serveFromCache(
 async function performFullSearch(
   bot: TelegramBot, chatId: number, userId: string, bookName: string,
   token: string, userName: string | null | undefined,
-  msgId: number, dlCount: number, dailyLimit: number, t0: number,
+  msgId: number, dlCount: number, dailyLimit: number, isPrem: boolean, t0: number,
   trace: RequestTrace,
   jobId: string
 ): Promise<void> {
-  await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip()));
+  await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
 
-  const { results, usedFuzzy } = await searchWithFuzzyFallback(bookName);
+  const { results: rawResults, usedFuzzy } = await searchWithFuzzyFallback(bookName);
+
+  // ── Auto-retry بالاستعلام المنظف ──────────────
+  // لو المستخدم كتب "تحميل رواية X pdf" → نجرب "X" تلقائياً
+  let results = rawResults;
+  let cleanedQuery = bookName;
+  if (results.length === 0) {
+    const q = cleanSearchQuery(bookName);
+    if (q !== bookName && q.length >= 2) {
+      cleanedQuery = q;
+      const { results: retryResults } = await searchWithFuzzyFallback(q);
+      if (retryResults.length > 0) {
+        results = retryResults;
+        L.info("bot", `Auto-retry with cleaned query succeeded`, {
+          original: bookName.slice(0, 50),
+          cleaned: q.slice(0, 50),
+          results: retryResults.length,
+        });
+        await editMsg(token, chatId, msgId, buildProgress(2, q, `💡 جربت: _"${escMd(q)}"_`));
+      }
+    }
+  }
   trace.phase("search_done", {
     results:   results.length,
     usedFuzzy: usedFuzzy || false,
@@ -362,7 +384,7 @@ async function performFullSearch(
   if (usedFuzzy)
     await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب نتيجة"));
 
-  await editMsg(token, chatId, msgId, buildProgress(3, bookName, `📄 وجدت *${results.length}* نتيجة\n\n${tip()}`));
+  await editMsg(token, chatId, msgId, buildProgress(3, bookName, `📄 وجدت *${results.length}* نتيجة\n\n${tip(isPrem)}`));
 
   const allPdfUrls: string[] = [];
   const pageUrlFallbacks: string[] = [];
@@ -393,7 +415,7 @@ async function performFullSearch(
   // findValidPdfUrls تفلتر الـ blacklist داخلياً — لا داعي لفحص مسبق
   const uniquePdfs = [...allPdfUrls]; // already deduped via seenPdfUrls
 
-  await editMsg(token, chatId, msgId, buildProgress(4, bookName, tip()));
+  await editMsg(token, chatId, msgId, buildProgress(4, bookName, tip(isPrem)));
 
   const verifyBatch = await findValidPdfUrls(uniquePdfs);
   let validUrls = verifyBatch.urls;
@@ -452,6 +474,8 @@ async function performFullSearch(
       return scoreUrl(b) - scoreUrl(a);
     });
 
+    // الحماية في pdfValidator — يقرأ metaTitle من PDF بعد التحميل
+
     // تحذير في الـ logs إذا أفضل رابط متبقٍّ له صلة منخفضة جداً بالكتاب
     const bestFilenameScore = urlFilenameRelevance(bookName, validUrls[0]);
     if (bestFilenameScore < 0.15) {
@@ -463,7 +487,7 @@ async function performFullSearch(
     }
   }
 
-  await editMsg(token, chatId, msgId, buildProgress(5, bookName, tip()));
+  await editMsg(token, chatId, msgId, buildProgress(5, bookName, tip(isPrem)));
 
   const chatActionInterval = setInterval(() => {
     bot.sendChatAction(chatId, "upload_document").catch(() => {});
@@ -551,7 +575,7 @@ async function performFullSearch(
     // BUG-R4 FIX: sentFilenameScore مُحسَب بالفعل في الحلقة أعلاه — لا نُعيد الحساب
     const isSuspectFile = sentFilenameScore < 0.05;
 
-    await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile);
+    await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
     // Telemetry + Funnel
     const dlOutcome: import("./telemetry.js").RequestOutcome =
       sentSendMode === "direct" ? "sent_direct" : "sent_local";
@@ -585,13 +609,10 @@ async function performFullSearch(
 
 async function sendSuccessMessage(
   bot: TelegramBot, chatId: number, dlCount: number, limit: number,
-  bookName: string, sourceUrl: string, sizeMB?: string, fromCache = false, isSuspect = false
+  bookName: string, sourceUrl: string, sizeMB?: string, fromCache = false,
+  _isSuspect = false, isPrem = false
 ): Promise<void> {
-  let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache);
-  // FIX-WRONG-FILE: إذا الملف مشبوه → أضف تحذيراً واضحاً للمستخدم
-  if (isSuspect) {
-    msg += `\n\n⚠️ _تحذير: اسم الملف لا يطابق اسم الكتاب — قد يكون الملف خاطئاً._\n_استخدم زر "ملف خاطئ؟" إذا لاحظت مشكلة._`;
-  }
+  const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem);
   await bot.sendMessage(
     chatId, msg,
     { parse_mode: "Markdown", reply_markup: kbAfterSuccess(bookName, sourceUrl) }
@@ -628,9 +649,11 @@ async function sendAnnouncement(bot: TelegramBot, chatId: number, userId: string
 }
 
 async function buildNoResultMessage(bookName: string): Promise<string> {
-  // FIX-6: كانت تُجري 2 network requests بـ timeout 3 ثوانٍ قبل كل رسالة "لا نتائج"
-  // هذا يُضيف تأخيراً حتى 3 ثوانٍ لكل مستخدم لا يجد كتابه — والغالبية ليست شبكتهم مشكلة
-  // الحل: نعرض رسالة "لا نتائج" فوراً — المستخدم يعرف إذا كانت شبكته مشكلة
+  // لو Firecrawl quota منتهية → رسالة صادقة بدل "لم أجد"
+  const fcDown = await isFirecrawlDown().catch(() => false);
+  if (fcDown) {
+    return `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
+  }
   return buildNoResults(bookName, false);
 }
 

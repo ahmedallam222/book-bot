@@ -1,152 +1,187 @@
-import TelegramBot from "node-telegram-bot-api";
-import { L, closeLogger } from "./logger.js";
-import { ADMIN_IDS, QUEUE_WORKERS, TEMP_CLEANUP_INTERVAL } from "./config.js";
-import { setAlertBot } from "./blacklist.js";
-import { seedBansFromEnv } from "./guards.js";
-import { ensureTempDir, cleanTempFiles } from "./tempFiles.js";
-import { cleanSessionStore } from "./session.js";
-import { SOURCES } from "./sources.js";
-import { registerCommands, registerMessageHandler } from "./commands.js";
-import { registerCallbackHandler } from "./callbacks.js";
-import { initWorkers, stopWorkers, activeWorkerCount } from "./worker.js";
-import { startAlertWatcher } from "./alertWatcher.js";
-import { broadcastWeeklyToAdmins } from "./weekly.js";
+import TelegramBot                    from "node-telegram-bot-api";
+import { L }                          from "./logger.js";
+import { redis }                      from "./redis.js";
+import { registerCommands, registerMessageHandler } from "../bot/commands.js";
+import { registerCallbackHandler }    from "../bot/callbacks.js";
+import { dequeue, completeJob, failJob, recoverStuckJobs } from "./queue.js";
+import { processBookRequest }         from "./bookRequest.js";
+import { cleanOldTempFiles }          from "./tempFiles.js";
+import { startAlertWatcher }          from "./alertWatcher.js";
+import { storage }                    from "../storage.js";
+import type { QueueJob }              from "./types.js";
 
 // ══════════════════════════════════════════════
-// BOT ENTRY POINT — v5
+// INDEX — نقطة بدء البوت والـ Workers
 // ══════════════════════════════════════════════
 
-let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+const BOT_TOKEN     = process.env.BOT_TOKEN || "";
+const WORKER_COUNT  = parseInt(process.env.WORKER_COUNT || "3", 10);
+const POLL_INTERVAL = 500; // ms
+
+let _bot:          TelegramBot | null = null;
+let _botUsername   = "";
+let _botId         = 0;
+let _workerCount   = 0;
+let _started       = false;
+
+export function activeWorkerCount(): number {
+  return _workerCount;
+}
+
+// ── startBot ──────────────────────────────────
 
 export async function startBot(): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-  if (!token) {
-    L.error("bot", "TELEGRAM_BOT_TOKEN not set — aborting");
+  if (_started) return;
+  _started = true;
+
+  if (!BOT_TOKEN) {
+    L.error("bot", "BOT_TOKEN not set — bot will not start");
     return;
   }
 
-  ensureTempDir();
+  L.info("bot", "Starting Kholasa Books bot...");
 
-  // Temp file cleanup
-  if (cleanupInterval) { clearInterval(cleanupInterval); cleanupInterval = null; }
-  cleanupInterval = setInterval(() => {
-    cleanTempFiles([]);
-    cleanSessionStore();   // تنظيف session store من الـ entries القديمة (منع memory leak)
-  }, TEMP_CLEANUP_INTERVAL).unref();
+  _bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-  await seedBansFromEnv().catch((e) =>
-    L.error("system", "seedBansFromEnv failed", { err: String(e) })
-  );
-
-  // Drop pending updates بعد restart
-  await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ drop_pending_updates: true }),
-  }).catch(() => {});
-
-  const bot = new TelegramBot(token, {
-    polling: { autoStart: true, params: { timeout: 30 } },
-  });
-
-  bot.on("polling_error", (e: any) => L.botError(String(e?.message || e)));
-
-  // Bot info
-  let botUsername = "", botId = 0;
+  // جلب معلومات البوت
   try {
-    const me = await bot.getMe();
-    botUsername = me.username || "";
-    botId       = me.id;
-    L.botStart(botUsername, QUEUE_WORKERS, SOURCES.length);
+    const me   = await _bot.getMe();
+    _botUsername = me.username || "";
+    _botId       = me.id;
+    L.info("bot", `Bot started: @${_botUsername} (${_botId})`);
   } catch (e) {
-    L.error("bot", "Failed to get bot info", { err: String(e) });
+    L.error("bot", `getMe failed: ${String(e).slice(0, 80)}`);
   }
 
-  setAlertBot(bot);
+  // تسجيل handlers
+  registerCommands(_bot, BOT_TOKEN, () => _botUsername, () => _botId);
+  registerMessageHandler(_bot, BOT_TOKEN, () => _botUsername);
+  registerCallbackHandler(_bot, BOT_TOKEN);
 
-  // ── Register bot commands list (يظهر في قائمة Telegram) ──────────
-  bot.setMyCommands([
-    { command: "start",   description: "القائمة الرئيسية" },
-    { command: "search",  description: "بحث عن كتاب" },
-    { command: "random",  description: "كتاب عشوائي (اختياري: نوع)" },
-    { command: "stats",   description: "إحصائياتي اليومية" },
-    { command: "history", description: "آخر كتب حمّلتها" },
-    { command: "last",    description: "إعادة تحميل آخر كتاب طلبته" },
-    { command: "top",     description: "أكثر الكتب طلباً" },
-    { command: "weekly",  description: "تقريري الأسبوعي" },
-    { command: "cancel",  description: "إلغاء الطلب الحالي" },
-    { command: "queue",   description: "حالة الطابور" },
-    { command: "help",    description: "دليل الاستخدام" },
-  ]).catch(() => {});
-
-  // ── Workers ──────────────────────────────────────────────────────
-  initWorkers(bot);
-
-  // ── Handlers ──────────────────────────────────────────────────────
-  registerCommands(bot, token, () => botUsername, () => botId);
-  registerCallbackHandler(bot, token);
-  registerMessageHandler(bot, token, () => botUsername);
-
-  // ── Group welcome ─────────────────────────────────────────────────
-  bot.on("new_chat_members", async (msg) => {
-    if (msg.chat.type !== "group" && msg.chat.type !== "supergroup") return;
-    const botJoined = botId > 0 && (msg.new_chat_members ?? []).some((m) => m.id === botId);
-    if (!botJoined) return;
-    await bot.sendMessage(
-      msg.chat.id,
-      `📚 *أهلاً! أنا بوت خلاصة الكتب*\n\n` +
-      `اكتب *بوت* ثم اسم أي كتاب وأُرسله PDF مجاناً!\n\n` +
-      `مثال: \`بوت أرض زيكولا\``,
-      { parse_mode: "Markdown" }
-    ).catch(() => {});
+  // استماع لأحداث البث من الـ dashboard
+  (process as NodeJS.EventEmitter).on("dashboard:broadcast", async (payload: {
+    message: string; parse_mode?: string
+  }) => {
+    await broadcastToAll(payload.message, payload.parse_mode || "Markdown");
   });
 
-  // ── Alert watcher (Step 1) ────────────────────────────────────────
-  // يبدأ فوراً — يقرأ ADMIN_IDS من env، لا يحتاج فتح /admin
-  startAlertWatcher(bot);
+  // FIX v29: استرجاع الـ jobs العالقة من الـ restart السابق
+  // يجب أن يكون قبل تشغيل الـ workers لأنهم قد يلتقطون jobs مباشرة
+  await recoverStuckJobs().catch((e) =>
+    L.error("bot", "recoverStuckJobs failed", { err: String(e).slice(0, 80) })
+  );
 
-  // ── Weekly broadcast scheduler ────────────────────────────────────
-  // يُرسل تقريراً أسبوعياً لكل الأدمنز كل يوم جمعة مساءً (تلقائياً)
-  // checkInterval: كل ساعة — فعلياً يُرسل مرة واحدة كل 7 أيام (Redis key)
-  const WEEKLY_CHECK_INTERVAL = 60 * 60 * 1000; // كل ساعة
-  setInterval(() => {
-    const now = new Date();
-    // يوم الجمعة (5) الساعة 20:00 مساءً (Riyadh UTC+3 = 17:00 UTC)
-    if (now.getUTCDay() === 5 && now.getUTCHours() === 17) {
-      broadcastWeeklyToAdmins(bot).catch(e =>
-        L.error("bot", "Weekly broadcast error", { err: String(e).slice(0, 100) })
-      );
-    }
-  }, WEEKLY_CHECK_INTERVAL).unref();
+  // تشغيل Workers
+  for (let i = 0; i < WORKER_COUNT; i++) {
+    startWorker(i + 1);
+  }
 
-  // ── Graceful shutdown ─────────────────────────────────────────────
-  const shutdown = (signal: string) => {
-    L.info("system", `Shutdown: ${signal}`);
-    if (cleanupInterval) { clearInterval(cleanupInterval); cleanupInterval = null; }
-    stopWorkers();
-    cleanTempFiles([]);
-    bot.stopPolling();
-    L.info("system", "Bot stopped ✅");
-    closeLogger();   // أغلق log file وفرّغ الـ buffer قبل الخروج
-  };
+  // تنظيف الملفات المؤقتة كل ساعة
+  setInterval(() => cleanOldTempFiles(), 3_600_000).unref();
 
-  // حفظ مرجع shutdown لاستخدامه في signal handlers الخارجية
-  _shutdownRef = shutdown;
+  L.info("bot", `${WORKER_COUNT} workers started`);
+
+  // تشغيل مراقب التنبيهات
+  startAlertWatcher(_bot);
 }
 
-// ── Signal handlers — مُسجَّلة مرة واحدة على مستوى الـ module ─────────────
-// تمنع تراكم listeners عند إعادة استدعاء startBot (hot-reload)
-let _shutdownRef: ((sig: string) => void) | null = null;
+// ── Worker loop ───────────────────────────────
 
-process.once("SIGTERM",           () => _shutdownRef?.("SIGTERM"));
-process.once("SIGINT",            () => _shutdownRef?.("SIGINT"));
-process.on("uncaughtException",   (e) => {
-  L.error("system", "Uncaught exception — exiting", { err: String(e).slice(0, 300) });
-  // BUG FIX: الكود القديم كان يسجّل الخطأ ويكمل — يترك البوت في حالة غير محددة
-  // الصحيح: الخروج بـ code 1 فوراً بعد التسجيل — process manager (PM2/systemd) يُعيد التشغيل
-  process.exit(1);
+function startWorker(workerId: number): void {
+  _workerCount++;
+
+  const loop = async () => {
+    while (true) {
+      try {
+        const job = await dequeue();
+        if (!job) {
+          await sleep(POLL_INTERVAL);
+          continue;
+        }
+
+        L.info("worker", `Processing job`, {
+          worker: workerId, jobId: job.id,
+          book: job.bookName.slice(0, 50), userId: job.userId
+        });
+
+        const success = await processJobSafe(job);
+        if (success) {
+          await completeJob(job);
+        } else {
+          await failJob(job);
+        }
+      } catch (e) {
+        L.error("worker", `Worker ${workerId} loop error`, { err: String(e).slice(0, 100) });
+        await sleep(1000);
+      }
+    }
+  };
+
+  loop().catch((e) => {
+    _workerCount--;
+    L.error("worker", `Worker ${workerId} crashed`, { err: String(e).slice(0, 100) });
+    // أعد تشغيل الـ worker بعد 5 ثوانٍ
+    setTimeout(() => startWorker(workerId), 5000);
+  });
+}
+
+async function processJobSafe(job: QueueJob): Promise<boolean> {
+  if (!_bot) return false;
+  try {
+    await processBookRequest(_bot, job);
+    return true;
+  } catch (e) {
+    L.error("worker", `processBookRequest threw`, {
+      jobId: job.id, err: String(e).slice(0, 150)
+    });
+    return false;
+  }
+}
+
+// ── Broadcast ─────────────────────────────────
+
+async function broadcastToAll(message: string, parseMode = "Markdown"): Promise<void> {
+  if (!_bot) return;
+  try {
+    const userIds = await storage.getAllUserIds();
+    L.adminAction("system", `broadcast to ${userIds.length} users`);
+
+    let sent = 0, failed = 0;
+    for (const uid of userIds) {
+      try {
+        await _bot.sendMessage(parseInt(uid, 10), message, {
+          parse_mode: parseMode as any,
+        });
+        sent++;
+        await sleep(50); // تجنب حد الـ rate limit لـ Telegram
+      } catch {
+        failed++;
+      }
+    }
+
+    L.info("bot", `Broadcast done`, { sent, failed, total: userIds.length });
+  } catch (e) {
+    L.error("bot", `Broadcast error`, { err: String(e).slice(0, 100) });
+  }
+}
+
+// ── Helpers ───────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Graceful shutdown ─────────────────────────
+process.on("SIGTERM", async () => {
+  L.info("bot", "SIGTERM received — shutting down...");
+  if (_bot) await _bot.stopPolling().catch(() => {});
+  await redis.quit().catch(() => {});
+  process.exit(0);
 });
-process.on("unhandledRejection",  (r) => L.error("system", "Unhandled rejection", { reason: String(r).slice(0, 300) }));
 
-// Re-export for server/routes.ts
-export { activeWorkerCount };
+process.on("SIGINT", async () => {
+  L.info("bot", "SIGINT received — shutting down...");
+  if (_bot) await _bot.stopPolling().catch(() => {});
+  await redis.quit().catch(() => {});
+  process.exit(0);
+});

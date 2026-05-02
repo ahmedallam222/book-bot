@@ -1,154 +1,132 @@
 // ══════════════════════════════════════════════
-// TEXT UTILITIES — Arabic normalization + Markdown escaping
+// TEXT UTILITIES — خلاصة الكتب
 // ══════════════════════════════════════════════
 
 /**
- * normalizeArabic — تُعيَّر النص العربي للمقارنة:
- *  1. يُزال التشكيل الكامل (harakat + tatweel)
- *  2. تُحوَّل Arabic Presentation Forms → أحرف أساسية (ﻋ → ع)
- *  3. تُوحَّد الهمزات: أ إ آ → ا
- *  4. تُوحَّد الألف المقصورة: ى → ي
- *  5. تُوحَّد التاء المربوطة: ة → ه
- *
- * E5 FIX: إضافة:
- *   - Tatweel (ـ) U+0640: يكتب بعض الناس "مـحـمـد" بدل "محمد"
- *   - Arabic Presentation Forms A/B (FB50–FDFF, FE70–FEFF):
- *     بعض البرامج القديمة تحفظ "ﻋ" بدل "ع" → normalizeArabic يجب أن تُساوي بينهما.
- *     نستخدم NFC أولاً (يحوّل بعض الأشكال المركّبة) ثم regex للباقي.
- */
-export function normalizeArabic(text: string): string {
-  if (!text) return "";
-  return text
-    // NFC يحوّل المركّبات Unicode إلى شكلها الكنوني
-    .normalize("NFC")
-    // Arabic Presentation Forms A (FB50–FDFF) — أشكال بداية/وسط/نهاية الحروف
-    // Arabic Presentation Forms B (FE70–FEFF) — حركات ممتدة وأشكال موصولة
-    .replace(/[\uFB50-\uFDFF\uFE70-\uFEFF]/g, (ch) => {
-      // محاولة تحويل الـ char عبر NFD + إزالة diacritics
-      try { return ch.normalize("NFKD").replace(/[\u0300-\u036F]/g, ""); }
-      catch { return ch; }
-    })
-    // Tatweel ـ (U+0640) — حرف المد الزخرفي
-    .replace(/\u0640/g, "")
-    // التشكيل الكامل: fathah, dammah, kasrah, sukun, shadda + علامات قرآنية
-    .replace(/[\u0610-\u061A\u064B-\u065F\u0670]/g, "")
-    // توحيد الهمزات
-    .replace(/[أإآ]/g, "ا")
-    // ألف مقصورة → ياء
-    .replace(/ى/g, "ي")
-    // تاء مربوطة → هاء
-    .replace(/ة/g, "ه")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * normalizeForCache — مفتاح كاش موحّد:
- * normalizeArabic + lowercase + حذف الترقيم
- */
-export function normalizeForCache(text: string): string {
-  if (!text) return "";
-  return normalizeArabic(text)
-    .toLowerCase()
-    .replace(/[^\u0600-\u06FFa-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * escMd — يُهرّب النصوص لـ Telegram Markdown v1
- * الأحرف الخاصة: _ * ` [
+ * Markdown v1 escaping — يهرّب أحرف التنسيق الخاصة
+ * يدعم: * _ ` [ ]
  */
 export function escMd(text: string): string {
-  if (!text) return "";
-  return text.replace(/[_*`\[]/g, "\\$&");
-}
-
-const RELEVANCE_STOPWORDS = new Set([
-  "كتاب",
-  "كتب",
-  "روايه",
-  "روايات",
-  "تحميل",
-  "تنزيل",
-  "قراءه",
-  "pdf",
-  "نسخه",
-  "مجانا",
-  "free",
-  "book",
-  "books",
-  "download",
-  "read",
-  "ebook",
-]);
-
-function relevanceWords(text: string): string[] {
-  const normalized = normalizeArabic(text)
-    .toLowerCase()
-    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ");
-
-  return normalized
-    .split(/\s+/)
-    .filter((w) => w.length >= 2 && !RELEVANCE_STOPWORDS.has(w));
-}
-
-export function normalizeBookCacheKey(text: string): string {
-  const words = relevanceWords(text);
-  return words.length > 0 ? words.join(" ") : normalizeForCache(text);
+  return text.replace(/([*_`[]])/g, "\\$1"); // ✅ FIX: أُضيف ] لإغلاق الـ character class
 }
 
 /**
- * urlFilenameRelevance — مدى صلة اسم الملف في الـ URL بالكتاب المطلوب.
- * يُعيد 0 (لا صلة) إلى 1 (تطابق كامل).
- *
- * الخوارزمية:
- *  1. استخرج اسم الملف من URL وحوّله لكلمات
- *  2. قسِّم اسم الكتاب إلى كلمات
- *  3. احسب نسبة كلمات الكتاب الموجودة في اسم الملف
+ * توحيد النص العربي — للكاش والمقارنة
+ * يُزيل التشكيل ويوحّد أشكال الحروف
+ */
+export function normalizeArabic(text: string): string {
+  return text
+    .replace(/[ً-ٰٟ]/g, "")  // حذف التشكيل
+    .replace(/[أإآٱ]/g, "ا")                 // توحيد الألف
+    .replace(/ة/g,  "ه")                      // تاء مربوطة → هاء
+    .replace(/ى/g,  "ي")                      // ألف مقصورة → ياء
+    .replace(/ؤ/g,  "و")
+    .replace(/ئ/g,  "ي")
+    .replace(/[٠-٩]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48))
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * تطبيع للكاش — يُوحّد النص ويُحوّله لـ lowercase للمقارنة
+ */
+export function normalizeForCache(text: string): string {
+  return normalizeArabic(text)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * تنظيف استعلام البحث — يُزيل كلمات الحشو الشائعة
+ * مثال: "تحميل رواية اسمها أرض زيكولا pdf مجانا" → "أرض زيكولا"
+ */
+export function cleanSearchQuery(query: string): string {
+  const fillerWords = [
+    // أفعال الطلب
+    "تحميل", "تنزيل", "حمل", "نزل", "ابغي", "ابغى", "ابي", "أبي",
+    "اريد", "أريد", "ممكن", "اجيب", "أجيب", "اطلب", "أطلب",
+    // كلمات وصفية
+    "كتاب", "رواية", "روايه", "قصة", "قصه", "كتيب", "مؤلف",
+    "كتب", "روايات", "قصص", "ملف",
+    // كلمات تقنية
+    "pdf", "PDF", "ebook", "epub",
+    // كلمات الوصف
+    "اسمه", "اسمها", "اسمه", "اسمها", "يسمى", "تسمى",
+    "مجانا", "مجانًا", "مجاني", "مجانية", "free", "مجاناً",
+    "كامل", "كاملة", "كامله", "نسخة", "نسخه",
+  ];
+
+  let cleaned = query.trim();
+
+  // أزل الكلمات من البداية والنهاية والوسط
+  for (const word of fillerWords) {
+    // استخدم regex لتجنب إزالة كلمات جزئية
+    const re = new RegExp(`(^|\\s)${word}(\\s|$)`, "gi");
+    cleaned = cleaned.replace(re, " ");
+  }
+
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+  // لو التنظيف أفرغ الاستعلام — ارجع للأصلي
+  if (cleaned.length < 2) return query.trim();
+
+  return cleaned;
+}
+
+/**
+ * وقت التجديد التالي — يُستخدم في رسائل الـ stats والـ daily limit
+ * يُعيد مثلاً: "5 ساعة و23 دقيقة" أو "47 دقيقة" أو "دقائق قليلة"
+ */
+export function buildResetTime(): string {
+  const midnight = new Date();
+  midnight.setUTCHours(24, 0, 0, 0);
+  const diffMs = midnight.getTime() - Date.now();
+  const diffH  = Math.floor(diffMs / 3_600_000);
+  const diffM  = Math.floor((diffMs % 3_600_000) / 60_000);
+  return diffH > 0
+    ? `${diffH} ساعة و${diffM} دقيقة`
+    : diffM > 1
+    ? `${diffM} دقيقة`
+    : "دقائق قليلة";
+}
+
+/**
+ * يُستخدم لترتيب URLs قبل التحميل —
+ * أسماء الملفات الرقمية تحصل على 0.3 neutral بدل 0
  */
 export function urlFilenameRelevance(bookName: string, url: string): number {
-  if (!url || !bookName) return 0.5;
-
-  let filename = "";
   try {
-    const parsed = new URL(url);
-    filename = parsed.pathname.split("/").pop() || "";
-    for (const key of ["title", "book", "name", "file", "q"]) {
-      const value = parsed.searchParams.get(key);
-      if (value) filename += ` ${value}`;
+    const filename = decodeURIComponent(
+      new URL(url).pathname.split("/").pop()?.split("?")[0] || ""
+    ).replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim().toLowerCase();
+
+    if (!filename || filename.length < 2) return 0;
+
+    // اسم الملف رقمي بحت (ID من archive.org مثلاً) — neutral score
+    if (/^\d+$/.test(filename.replace(/\s/g, ""))) return 0.3;
+
+    const normBook = normalizeForCache(bookName);
+    const normFile = normalizeForCache(filename);
+
+    const bookWords = normBook.split(/\s+/).filter((w) => w.length >= 3);
+    const fileWords = new Set(normFile.split(/\s+/).filter((w) => w.length >= 3));
+
+    if (bookWords.length === 0 || fileWords.size === 0) return 0.1;
+
+    const matched = bookWords.filter((w) => fileWords.has(w)).length;
+
+    // FIX: لو مفيش تطابق كلمات لكن اسم الملف يحتوي جزء من اسم الكتاب كـ substring
+    // مثال: bookName="مئة عام من العزلة", filename="miaamilazla" (transliteration)
+    // لا نرفضه بصفر — نعطيه 0.15 بدل 0
+    if (matched === 0) {
+      const bookNoSpace = normBook.replace(/\s/g, "");
+      const fileNoSpace = normFile.replace(/\s/g, "");
+      if (fileNoSpace.length > 4 && bookNoSpace.includes(fileNoSpace.slice(0, 5))) return 0.15;
+      return 0;
     }
+
+    return matched / bookWords.length;
   } catch {
-    filename = url.split("/").pop()?.split("?")[0] || "";
+    return 0;
   }
-  filename = filename.replace(/\.(pdf|html?|php)$/i, "");
-  if (!filename) return 0.5;
-
-  let cleanFilename = filename;
-  try { cleanFilename = decodeURIComponent(filename); } catch {}
-  // BUG-4 FIX: يجب تعيير الـ Arabic في اسم الملف أيضاً قبل المقارنة.
-  // المشكلة: bookWords مُعيَّرة (normalizeArabic → "أ" تصبح "ا")
-  //           لكن cleanFilename كانت بدون تعيير → "أرض" في الملف لا تطابق "ارض" من الكتاب.
-  // الحل: نُعيَّر cleanFilename بنفس normalizeArabic قبل استخراج الكلمات.
-  cleanFilename = normalizeArabic(cleanFilename)
-    .replace(/[-_+.]/g, " ")
-    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ")
-    .toLowerCase();
-
-  const bookWords = relevanceWords(bookName);
-  if (bookWords.length === 0) return 0.5;
-
-  const filenameWords = new Set(
-    cleanFilename.split(/\s+/).filter((w) => w.length >= 2)
-  );
-  const filenameFlat = cleanFilename.replace(/\s/g, "");
-
-  let matched = 0;
-  for (const word of bookWords) {
-    // word مُعيَّرة بالفعل (من normBook) — نستخدمها مباشرة
-    if (filenameWords.has(word) || filenameFlat.includes(word)) {
-      matched++;
-    }
-  }
-  return matched / bookWords.length;
 }

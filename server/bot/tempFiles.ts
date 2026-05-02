@@ -1,78 +1,69 @@
-import * as fs from "fs";
+import * as fs   from "fs";
 import * as path from "path";
-import { TEMP_DIR, TEMP_FILE_MAX_AGE } from "./config.js";
-import { L } from "./logger.js";
+import { TEMP_DIR } from "./config.js";
+import { L }        from "./logger.js";
 
 // ══════════════════════════════════════════════
-// TEMP FILE MANAGEMENT — مع إحصائيات وlogging
+// TEMP FILES — إدارة الملفات المؤقتة
 // ══════════════════════════════════════════════
 
+let _dirEnsured = false;
+
+/** يُنشئ مجلد الملفات المؤقتة إن لم يكن موجوداً */
 export function ensureTempDir(): void {
-  if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
-
-export function safeDeleteTemp(fp: string): void {
+  if (_dirEnsured) return;
   try {
-    if (fs.existsSync(fp)) fs.unlinkSync(fp);
-  } catch {}
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+    _dirEnsured = true;
+  } catch (e) {
+    L.error("tempFiles", `Cannot create temp dir: ${TEMP_DIR}`, { err: String(e).slice(0, 100) });
+  }
 }
 
-export interface TempStats {
-  totalFiles:  number;
-  totalBytes:  number;
-  oldestAgeMs: number;
-}
-
-export function getTempStats(): TempStats {
-  if (!fs.existsSync(TEMP_DIR)) return { totalFiles: 0, totalBytes: 0, oldestAgeMs: 0 };
-  const now  = Date.now();
-  let totalFiles = 0, totalBytes = 0, oldestAgeMs = 0;
+/** يحذف ملفاً مؤقتاً بأمان — لا يُلقي exceptions */
+export function safeDeleteTemp(filePath: string): void {
+  if (!filePath) return;
   try {
-    for (const f of fs.readdirSync(TEMP_DIR)) {
-      const fp = path.join(TEMP_DIR, f);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    // تجاهل أخطاء الحذف — الـ OS سيتعامل معها
+  }
+}
+
+/** يُحصي عدد الملفات وحجمها الإجمالي في مجلد temp */
+export function getTempStats(): { totalFiles: number; totalBytes: number } {
+  let totalFiles = 0;
+  let totalBytes = 0;
+  try {
+    if (!fs.existsSync(TEMP_DIR)) return { totalFiles, totalBytes };
+    for (const file of fs.readdirSync(TEMP_DIR)) {
+      const fp = path.join(TEMP_DIR, file);
       try {
         const stat = fs.statSync(fp);
-        totalFiles++;
-        totalBytes  += stat.size;
-        oldestAgeMs  = Math.max(oldestAgeMs, now - stat.mtimeMs);
+        if (stat.isFile()) {
+          totalFiles++;
+          totalBytes += stat.size;
+        }
       } catch {}
     }
   } catch {}
-  return { totalFiles, totalBytes, oldestAgeMs };
+  return { totalFiles, totalBytes };
 }
 
-/**
- * تنظيف الملفات المؤقتة القديمة.
- * يُنادى كل TEMP_CLEANUP_INTERVAL من الـ index.
- */
-export function cleanTempFiles(cleaners: Array<() => void> = []): void {
-  const now     = Date.now();
-  let cleaned   = 0;
-  let freedBytes = 0;
-
+/** تنظيف الملفات القديمة (أكبر من maxAgeMs) */
+export function cleanOldTempFiles(maxAgeMs = 3_600_000): void {
   try {
-    if (fs.existsSync(TEMP_DIR)) {
-      for (const f of fs.readdirSync(TEMP_DIR)) {
-        const fp = path.join(TEMP_DIR, f);
-        try {
-          const stat = fs.statSync(fp);
-          if (now - stat.mtimeMs > TEMP_FILE_MAX_AGE) {
-            freedBytes += stat.size;
-            fs.unlinkSync(fp);
-            cleaned++;
-          }
-        } catch {}
+    if (!fs.existsSync(TEMP_DIR)) return;
+    const now   = Date.now();
+    const files = fs.readdirSync(TEMP_DIR);
+    for (const file of files) {
+      const fp  = path.join(TEMP_DIR, file);
+      const stat = fs.statSync(fp);
+      if (now - stat.mtimeMs > maxAgeMs) {
+        safeDeleteTemp(fp);
       }
     }
-  } catch {}
-
-  if (cleaned > 0) {
-    L.tempClean(cleaned, freedBytes / 1024 / 1024);
-  } else {
-    L.debug("system", `Temp cleanup: nothing to delete`);
-  }
-
-  for (const clean of cleaners) {
-    try { clean(); } catch {}
+  } catch {
+    // تجاهل أخطاء التنظيف
   }
 }
