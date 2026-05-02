@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
-import { BLACKLIST_THRESHOLD } from "./config.js";
+import { BLACKLIST_THRESHOLD, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
 import { isAdmin } from "./guards.js";
 import { getSession, deleteSession, storeRetryKey } from "./session.js";
 import { blacklistUrlDirect } from "./blacklist.js";
@@ -13,17 +13,23 @@ import {
 import { kbAfterFail, kbMain, buildFailMessage } from "./keyboards.js";
 import { handleBookRequest } from "./bookRequest.js";
 import { SOURCES } from "./sources.js";
-import { cancelUserJobs, getQueueStats } from "./queue.js";
-import { isPremium, getUserDailyLimit } from "./userSettings.js";
+import { cancelUserJobs, getQueueStats, getUserPendingCount } from "./queue.js";
+import { isPremium, getUserDailyLimit, getPremiumExpiry } from "./userSettings.js";
 import { handleWeeklyCommand } from "./weekly.js";
+import { handleRandomGenreCallback } from "./random.js";
+import { redis } from "./redis.js";
+import { normalizeForCache, normalizeArabic, buildResetTime } from "./text.js";
+// FIX: استيراد wishlist من module مستقل — لا global، لا dynamic import زائد
+import {
+  getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
+} from "./wishlist.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
 // ══════════════════════════════════════════════
 
 export function registerCallbackHandler(bot: TelegramBot, token: string): void {
-  // FIX-1: منع double-tap — نقر مرتين سريعاً كان يُطلق طلبَين متزامنَين
-  // نستخدم Set<string> بمفتاح userId:data — يُحذف بعد 3 ثوانٍ تلقائياً
+  // منع double-tap — نقر مرتين سريعاً
   const processingCallbacks = new Set<string>();
 
   bot.on("callback_query", async (query) => {
@@ -32,37 +38,33 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     const userId = String(query.from.id);
     const data   = query.data || "";
 
-    // Step 3 FIX: dedup key + cleanup في finally يضمن عدم التعلّق حتى لو رمى handler
     const dedupKey = `${userId}:${data}`;
     if (processingCallbacks.has(dedupKey)) {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       return;
     }
-    const needsDedup = data.startsWith("retry:")        ||
-                       data === "cancel_my_jobs"         ||
-                       data === "main_menu"              ||
-                       data === "my_stats"               ||
-                       data === "my_queue"               ||
-                       data.startsWith("wrong_file:")    ||
-                       data.startsWith("bad_file:")      ||   // BUG FIX: منع double-report للرابط نفسه
-                       data.startsWith("feedback:")      ||
-                       // BUG-4 FIX: أزرار البث الجماعي لم تكن محمية من double-tap
-                       // نقر مرتين على "تأكيد الإرسال" → بثّان متزامنان لكل المستخدمين
+    const needsDedup = data.startsWith("retry:")         ||
+                       data === "cancel_my_jobs"          ||
+                       data === "main_menu"               ||
+                       data === "my_stats"                ||
+                       data === "my_queue"                ||
+                       data.startsWith("bad_file:")       ||
                        data === "admin_broadcast_confirm" ||
-                       data === "admin_broadcast_cancel";
+                       data === "admin_broadcast_cancel"  ||
+                       data.startsWith("rg:")             ||
+                       data === "premium_buy"             ||
+                       data === "wishlist_view"           ||
+                       data === "wishlist_clear"          ||
+                       data.startsWith("wishlist_add:")   ||
+                       data.startsWith("wishlist_del:");
     if (needsDedup) processingCallbacks.add(dedupKey);
 
     L.debug("bot", `Callback`, { userId, data: data.slice(0, 50) });
     try {
 
-    // FIX BUG-14: كان answerCallbackQuery يُستدعى مسبقاً بشكل عام (سطر 33)
-    // ثم يُستدعى مرة ثانية بـ show_alert للـ admin/cancel/queue — الثانية دائماً تفشل
-    // الحل: نُجيب على كل نوع callback بالطريقة المناسبة له فقط
-
     // ── Admin callbacks ───────────────────────────
     if (data.startsWith("admin_") || data.startsWith("admin_src_toggle:")) {
       if (!isAdmin(userId)) {
-        // نُجيب بـ alert مباشرة — لم نُجب مسبقاً
         await bot.answerCallbackQuery(query.id, { text: "🚫 للمشرفين فقط.", show_alert: true }).catch(() => {});
         return;
       }
@@ -71,10 +73,9 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── cancel_my_jobs — نحتاج alert يُظهر النتيجة ────
+    // ── cancel_my_jobs ────────────────────────────
     if (data === "cancel_my_jobs") {
       const cancelled = await cancelUserJobs(userId);
-      // نُجيب بـ alert مباشرة (لم نُجب بعد)
       await bot.answerCallbackQuery(query.id, {
         text: cancelled > 0 ? `✅ تم إلغاء ${cancelled} طلب` : "لا طلبات معلّقة",
         show_alert: true,
@@ -82,7 +83,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── queue_status — نحتاج alert أيضاً ─────────────
+    // ── queue_status ──────────────────────────────
     if (data === "queue_status") {
       const qs = await getQueueStats();
       await bot.answerCallbackQuery(query.id, {
@@ -92,25 +93,20 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── noop — زر للعرض فقط (مثل رقم الصفحة) ─────────────
-    // FIX: كان يرجع بدون answerCallbackQuery → Telegram يُظهر spinner على الزر للأبد
+    // ── noop ──────────────────────────────────────
     if (data === "noop") {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       return;
     }
 
-    // ── weekly_refresh — يحتاج answerCallbackQuery قبل عملية ثقيلة ─────────
-    // FIX: كان يُجاب مرتين — المرة الأولى بدون نص (السطر العام أعلاه)
-    // ثم محاولة ثانية بالنص "جاري التحديث..." — الثانية تفشل دائماً صمتاً
-    // الحل: نُعالجه قبل answerCallbackQuery العام ونُجيب بالنص الصحيح مرة واحدة
+    // ── weekly_refresh ────────────────────────────
     if (data === "weekly_refresh") {
       await bot.answerCallbackQuery(query.id, { text: "⏳ جاري التحديث..." }).catch(() => {});
       await handleWeeklyCommand(bot, chatId, userId, isAdmin(userId));
       return;
     }
 
-    // ── weekly_export — يحتاج show_alert → يجب معالجته قبل answerCallbackQuery العام ──
-    // BUG-35 FIX: كان بعد السطر العام → query مُجاب مسبقاً → show_alert لا يظهر للمستخدم
+    // ── weekly_export ─────────────────────────────
     if (data === "weekly_export") {
       if (!isAdmin(userId)) {
         await bot.answerCallbackQuery(query.id, { text: "🚫 للمشرفين فقط.", show_alert: true }).catch(() => {});
@@ -121,22 +117,114 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── باقي الـ callbacks: نُجيب فوراً بدون alert ────
+    // ══════════════════════════════════════════════
+    // BUG FIX: wishlist callbacks يجب معالجتها قبل
+    // الـ general answerCallbackQuery — وإلا فإن
+    // toast notifications (✅ تم الحفظ / 🗑️ حُذف)
+    // لن تظهر للمستخدم لأن Telegram يرفض الـ second call
+    // ══════════════════════════════════════════════
+
+    // ── wishlist_add: ─────────────────────────────
+    if (data.startsWith("wishlist_add:")) {
+      const sessionKey = data.slice(13).trim();
+      // FIX: getSession مستورد مباشرة أعلاه — لا dynamic import زائد
+      const entry = getSession(sessionKey);
+      if (!entry?.bookName) {
+        await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت صلاحية هذا الزر", show_alert: true }).catch(() => {});
+        return;
+      }
+      const bookToAdd  = entry.bookName;
+      const [list, maxSlots] = await Promise.all([
+        getWishlist(userId),
+        getWishlistMax(userId),
+      ]);
+      if (list.some((b: string) => normalizeArabic(b) === normalizeArabic(bookToAdd))) {
+        await bot.answerCallbackQuery(query.id, { text: "✅ الكتاب موجود في قائمتك بالفعل" }).catch(() => {});
+        return;
+      }
+      if (list.length >= maxSlots) {
+        await bot.answerCallbackQuery(query.id, { text: `⚠️ القائمة ممتلئة (${maxSlots} كتاب)`, show_alert: true }).catch(() => {});
+        return;
+      }
+      list.push(bookToAdd);
+      await saveWishlist(userId, list);
+      await bot.answerCallbackQuery(query.id, { text: `🔖 تم الحفظ! لديك ${list.length}/${maxSlots} كتاب` }).catch(() => {});
+      return;
+    }
+
+    // ── wishlist_del: ─────────────────────────────
+    if (data.startsWith("wishlist_del:")) {
+      const idx  = parseInt(data.slice(13), 10);
+      const list = await getWishlist(userId);
+      if (!isNaN(idx) && idx >= 0 && idx < list.length) {
+        const removed = list.splice(idx, 1)[0];
+        await saveWishlist(userId, list);
+        // Toast يؤكد الحذف — يظهر الآن بعد إصلاح الترتيب
+        await bot.answerCallbackQuery(query.id, { text: `🗑️ حُذف: ${removed.slice(0, 30)}` }).catch(() => {});
+        if (query.message?.message_id) {
+          await bot.editMessageText(buildWishlistMsg(list), {
+            chat_id: chatId, message_id: query.message.message_id,
+            parse_mode: "Markdown",
+            reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+          }).catch(() => {});
+        }
+      } else {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+      }
+      return;
+    }
+
+    // ── wishlist_clear ────────────────────────────
+    if (data === "wishlist_clear") {
+      await saveWishlist(userId, []);
+      // Toast يؤكد المسح — يظهر الآن بعد إصلاح الترتيب
+      await bot.answerCallbackQuery(query.id, { text: "🗑️ تم مسح القائمة" }).catch(() => {});
+      if (query.message?.message_id) {
+        await bot.editMessageText(buildWishlistMsg([]), {
+          chat_id: chatId, message_id: query.message.message_id,
+          parse_mode: "Markdown",
+          reply_markup: buildWishlistKb([]), // FIX-4: token محذوف
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // ── باقي الـ callbacks: General answer ────────
     await bot.answerCallbackQuery(query.id).catch(() => {});
+
+    // ── premium_buy — Telegram Stars invoice ─────
+    if (data === "premium_buy") {
+      const prem = await isPremium(userId);
+      if (prem) {
+        await bot.answerCallbackQuery(query.id, { text: "⭐ أنت بالفعل مشترك في Premium!" }).catch(() => {});
+        return;
+      }
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        await (bot as any).sendInvoice(
+          chatId,
+          "خلاصة الكتب Premium ⭐",
+          `احصل على ${PREMIUM_LIMIT} تحميل يومياً بدلاً من ${DAILY_LIMIT} — لمدة 30 يوماً`,
+          `premium:${userId}`,  // payload — يُستخدم عند successful_payment
+          "",                   // provider_token — فارغ لـ Telegram Stars
+          "XTR",                // عملة Stars
+          [{ label: "اشتراك شهري", amount: PREMIUM_STARS_PRICE }]
+        );
+      } catch (e) {
+        L.error("payment", "sendInvoice error", { err: String(e).slice(0, 100) });
+        await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
+      }
+      return;
+    }
 
     // ── retry ─────────────────────────────────────
     if (data.startsWith("retry:")) {
       const sessionKey = data.slice(6).trim();
       const entry      = getSession(sessionKey);
-      // BUG-11 FIX: لو الجلسة انتهت، كان يمرر الـ UUID كـ bookName → بحث بلا معنى
-      // الحل: نُخبر المستخدم أن الزر انتهى ونطلب منه إعادة الكتابة
       if (!entry?.bookName) {
         await bot.sendMessage(chatId,
-          `⏰ *انتهت صلاحية هذا الزر*
-
-اكتب اسم الكتاب من جديد وسأبحث عنه.`,
-          { parse_mode: "Markdown" }
-        ).catch(() => {});
+          `⏰ *انتهت صلاحية هذا الزر*\n\nاكتب اسم الكتاب من جديد وسأبحث عنه.`,
+          { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
       await handleBookRequest(bot, chatId, userId, entry.bookName, token, query.from.username);
@@ -144,16 +232,13 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     }
 
     // ── pagination ────────────────────────────────
-    // FIX BUG-15: data.split(":") ينكسر إذا كانت session key تحتوي على ":"
-    // Format: "fp:<sessionKey>:<page>" — نستخدم lastIndexOf لفصل الـ page
     if (data.startsWith("fp:")) {
-      const withoutPrefix = data.slice(3);                         // "<sessionKey>:<page>"
+      const withoutPrefix = data.slice(3);
       const lastColon     = withoutPrefix.lastIndexOf(":");
-      const sessionKey    = withoutPrefix.slice(0, lastColon);     // كل شيء قبل آخر ":"
+      const sessionKey    = withoutPrefix.slice(0, lastColon);
       const page          = parseInt(withoutPrefix.slice(lastColon + 1) || "0", 10);
       const entry         = getSession(sessionKey);
       const bookName      = entry?.bookName || "";
-
       if (!bookName) {
         await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
         return;
@@ -173,8 +258,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
             reply_markup: { inline_keyboard: [[
               { text: "🔍 بحث جديد",  callback_data: "new_search" },
               { text: "🔄 أعد البحث", callback_data: `retry:${storeRetryKey(bookName)}` },
-            ]]}}
-        ).catch(() => {});
+            ]]}}).catch(() => {});
       }
       return;
     }
@@ -184,15 +268,45 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       const sessionKey = data.slice(9).trim();
       const entry      = getSession(sessionKey);
       if (entry?.url) {
-        // FIX BUG-16: كان يستدعي recordUrlFailure في loop بشكل متسلسل N مرة
-        // الآن نستخدم blacklistUrlDirect لإضافة القيمة مباشرة في Redis بـ INCRBY
         await blacklistUrlDirect(entry.url, BLACKLIST_THRESHOLD);
+        if (entry.bookName) {
+          const cachedBook = await storage.getCachedBook(entry.bookName).catch(() => null);
+          if (cachedBook) await storage.deleteCachedBook(cachedBook.id).catch(() => {});
+          await redis.del(`sc:${normalizeForCache(entry.bookName)}`).catch(() => {});
+          L.info("system", `Cache cleared for bad file`, { book: entry.bookName.slice(0, 50) });
+        }
         deleteSession(sessionKey);
         L.warn("system", `Bad file reported`, { url: entry.url.slice(0, 80), userId });
-        await bot.sendMessage(chatId, `✅ شكراً! تم تجاهل هذا الرابط.`).catch(() => {});
+        const badFileKb = entry.bookName ? {
+          inline_keyboard: [[
+            { text: "🔄 ابحث عن نسخة أخرى", callback_data: `retry:${storeRetryKey(entry.bookName)}` },
+            { text: "🔍 كتاب جديد",          callback_data: "new_search" },
+          ]],
+        } : undefined;
+        await bot.sendMessage(chatId,
+          `✅ *شكراً على الإبلاغ!*\n_تم تجاهل هذا الرابط وحذفه من الأرشيف_\n\n_سيبحث البوت عن نسخة أفضل عند طلبه مجدداً_ 🔍`,
+          { parse_mode: "Markdown", ...(badFileKb ? { reply_markup: badFileKb } : {}) }
+        ).catch(() => {});
       } else {
         await bot.sendMessage(chatId, `⏰ انتهت صلاحية هذا الزر.`).catch(() => {});
       }
+      return;
+    }
+
+    // ── random genre ──────────────────────────────
+    if (data.startsWith("rg:")) {
+      await handleRandomGenreCallback(bot, chatId, userId, token, query.from.username, data.slice(3));
+      return;
+    }
+
+    // ── wishlist_view ─────────────────────────────
+    // بعد الـ general answer — لا تحتاج toast خاص
+    if (data === "wishlist_view") {
+      const list = await getWishlist(userId);
+      await bot.sendMessage(chatId, buildWishlistMsg(list), {
+        parse_mode: "Markdown",
+        reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+      }).catch(() => {});
       return;
     }
 
@@ -200,7 +314,6 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     switch (data) {
       case "main_menu": {
         const name = query.from.first_name || "صديقي";
-        // FIX-4: كانت 3 await متسلسلة — الآن بالتوازي
         const [prem, limit, dlRaw] = await Promise.all([
           isPremium(userId),
           getUserDailyLimit(userId),
@@ -222,15 +335,20 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         break;
 
       case "my_stats": {
-        // FIX-4: كانت 3 await متسلسلة — الآن بالتوازي
-        const [prem, limit, dlCount] = await Promise.all([
+        const [prem, limit, dlCount, expiry] = await Promise.all([
           isPremium(userId),
           getUserDailyLimit(userId),
           storage.getDailyDownloadCount(userId).catch(() => 0),
+          getPremiumExpiry(userId),
         ]);
-        const remaining   = Math.max(0, limit - dlCount);
-        const premBadge   = prem ? " ⭐ *مميّز*" : "";
-        const indicator   = limit <= 0 ? "♾️" : remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
+        const remaining = Math.max(0, limit - dlCount);
+        const premBadge = prem ? " ⭐ *مميّز*" : "";
+        const expiryLine = prem
+          ? expiry
+            ? `\n📅 _ينتهي: ${expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long" })}_`
+            : `\n♾️ _اشتراك دائم_`
+          : "";
+        const indicator = limit <= 0 ? "♾️" : remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
         let statBar: string;
         if (limit <= 0) {
           statBar = "`▰▰▰▰▰▰▰▰▰▰` ♾️";
@@ -238,38 +356,61 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
           const filled = Math.round((dlCount / Math.max(limit, 1)) * 10);
           statBar = "`" + "▰".repeat(Math.min(filled, 10)) + "▱".repeat(Math.max(0, 10 - filled)) + "`";
         }
+        const statsKb: TelegramBot.InlineKeyboardMarkup = prem
+          ? { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] }
+          : {
+              inline_keyboard: [
+                [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
+                [{ text: "🏠  القائمة",            callback_data: "main_menu"   }],
+              ],
+            };
         await bot.sendMessage(chatId,
-          `📊 *إحصائياتك*${premBadge}\n` +
-          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `${statBar}\n\n` +
-          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n` +
-          `${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*\n\n` +
-          `_يتجدد رصيدك كل منتصف ليل_ 🌙`,
-          { parse_mode: "Markdown" }
+          `📊 *إحصائياتك*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
+          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
+          `_يتجدد بعد ${buildResetTime()}_ 🕐`,
+          { parse_mode: "Markdown", reply_markup: statsKb }
         );
         break;
       }
 
-      case "my_history":   await buildHistoryMessage(bot, chatId, userId);    break;
-      case "top_books":    await buildTopBooksMessage(bot, chatId);            break;
+      case "my_queue": {
+        // FIX v29: يُظهر طلبات المستخدم الشخصية لا إحصاءات الطابور الكلية
+        // سابقاً: getQueueStats() → المستخدم يرى أعداد الطابور الكامل (مُضلِّل!)
+        // الآن: getUserPendingCount → عدد طلباته المعلقة تحديداً
+        const userPending = await getUserPendingCount(userId);
+        const qs          = await getQueueStats();
+        const pendingText = userPending === 0
+          ? "✅ لا طلبات معلقة لديك"
+          : userPending === 1
+          ? "📋 لديك طلب واحد قيد المعالجة"
+          : `📋 لديك *${userPending}* طلبات قيد المعالجة`;
+        await bot.sendMessage(chatId,
+          `📋 *حالة طلباتك*\n\n${pendingText}\n\n_إجمالي الطابور: High ${qs.highQueue} · Normal ${qs.normalQueue}_`,
+          { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[
+            { text: "❌ إلغاء طلبي", callback_data: "cancel_my_jobs" },
+            { text: "🏠 القائمة",    callback_data: "main_menu"       },
+          ]]}}).catch(() => {});
+        break;
+      }
+
+      case "my_history":   await buildHistoryMessage(bot, chatId, userId); break;
+      case "top_books":    await buildTopBooksMessage(bot, chatId);        break;
       case "help":
         await bot.sendMessage(chatId,
-          `❓ *كيف تستخدم البوت؟*\n` +
-          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `*في المحادثة الخاصة:*\n` +
-          `◦ اكتب اسم أي كتاب مباشرةً\n` +
-          `◦ /search اسم الكتاب\n\n` +
-          `*في المجموعات — ٣ طرق:*\n` +
-          `◦ بوت اسم الكتاب\n` +
-          `◦ bot اسم الكتاب\n` +
-          `◦ @اسم_البوت اسم الكتاب\n\n` +
-          `*أوامر مفيدة:*\n` +
-          `/stats · /history · /top · /queue · /cancel`,
+          `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `*في المحادثة الخاصة:*\n◦ اكتب اسم أي كتاب مباشرةً\n◦ /search اسم الكتاب\n\n` +
+          `*في المجموعات — ٣ طرق:*\n◦ بوت اسم الكتاب\n◦ bot اسم الكتاب\n◦ @اسم\\_البوت اسم الكتاب\n\n` +
+          `*أوامر مفيدة:*\n/stats · /history · /top · /queue · /cancel · /last · /random · /weekly · /wishlist · /premium`,
           { parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] } }
+            reply_markup: { inline_keyboard: [
+              [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
+              [{ text: "🏠  القائمة",           callback_data: "main_menu"   }],
+            ]},
+          }
         );
         break;
     }
+
     } catch (e: any) {
       L.error("bot", "Unhandled error in callback handler", {
         userId, data: data.slice(0, 50),
