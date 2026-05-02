@@ -207,8 +207,9 @@ export async function sendSourceHealth(bot: TelegramBot, chatId: number): Promis
     msg += "_لا بيانات بعد — ابدأ البحث لتُجمَع الإحصائيات_";
   } else {
     for (const s of sources) {
-      const health = s.ok > s.fail ? "🟢" : s.ok === 0 ? "🔴" : "🟡";
-      msg += `${health} \`${s.domain}\`\n✅ ${s.ok} | ❌ ${s.fail} | معدل: *${s.rate}*\n\n`;
+      const health = s.autoDisabled ? "⛔" : s.ok > s.fail ? "🟢" : s.ok === 0 ? "🔴" : "🟡";
+      const status = s.autoDisabled ? " — معطّل تلقائياً" : "";
+      msg += `${health} \`${s.domain}\`${status}\n✅ ${s.ok} | ❌ ${s.fail} | معدل: *${s.rate}*\n\n`;
     }
   }
 
