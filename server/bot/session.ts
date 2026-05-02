@@ -1,93 +1,62 @@
-import { RETRY_KEY_TTL } from "./config.js";
-import type { SessionEntry } from "./types.js";
-import { normalizeForCache } from "./text.js";
+import { randomBytes } from "crypto";
 
 // ══════════════════════════════════════════════
-// SESSION STORE
-// حل مشكلة callback_data > 64 bytes (Telegram limit):
-// نخزّن URL + bookName بـ key قصير "s<counter>"
+// SESSION — جلسات مؤقتة للـ callbacks
 // ══════════════════════════════════════════════
+//
+// Telegram callback_data محدود بـ 64 بايت — لا يكفي لتخزين URL + bookName
+// نحتفظ بالبيانات في الذاكرة ونبعت مفتاحاً قصيراً في الـ callback_data
 
-const sessionStore = new Map<string, SessionEntry>();
-let sessionCounter = 0;
+interface SessionEntry {
+  bookName?: string;
+  url?:      string;
+  ts:        number;
+}
 
-function storeSession(entry: Omit<SessionEntry, "ts">): string {
-  // BUG-6 FIX: كان يزيد sessionCounter إلى ما لا نهاية → بعد Number.MAX_SAFE_INTEGER يتصرف بشكل غير متوقع
-  // الحل: نحصر الرقم بـ 1 مليون → لا تصادم عملي (الـ store أقصاه 2000 مدخل)
-  sessionCounter = (sessionCounter % 1_000_000) + 1;
-  const key = `s${sessionCounter}`;
-  sessionStore.set(key, { ...entry, ts: Date.now() });
+const _sessions = new Map<string, SessionEntry>();
+const SESSION_TTL_MS  = 24 * 3_600_000; // 24h
+const SESSION_MAX     = 5_000;
 
-  if (sessionStore.size > 2000) {
-    const hour = 60 * 60 * 1000;
-    const now  = Date.now();
-    for (const [k, v] of sessionStore.entries())
-      if (now - v.ts > hour) sessionStore.delete(k);
-
-    // LRU eviction لو التنظيف بالوقت لم يكفِ:
-    // Map يحتفظ بترتيب الإدراج → أول 500 مفتاح هم الأقدم
-    // استخدام iteration مباشر بدل sort() → O(n) بدل O(n log n)
-    if (sessionStore.size > 1800) {
-      let evicted = 0;
-      for (const k of sessionStore.keys()) {
-        if (evicted++ >= 500) break;
-        sessionStore.delete(k);
-      }
-    }
+// تنظيف دوري
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _sessions) {
+    if (now - v.ts > SESSION_TTL_MS) _sessions.delete(k);
   }
+}, 30 * 60_000).unref();
+
+function newKey(): string {
+  return randomBytes(6).toString("hex");
+}
+
+function enforceLimit(): void {
+  if (_sessions.size < SESSION_MAX) return;
+  // احذف أقدم 500 entry
+  const oldest = [..._sessions.entries()]
+    .sort((a, b) => a[1].ts - b[1].ts)
+    .slice(0, 500)
+    .map(([k]) => k);
+  for (const k of oldest) _sessions.delete(k);
+}
+
+export function getSession(key: string): SessionEntry | undefined {
+  return _sessions.get(key);
+}
+
+export function deleteSession(key: string): void {
+  _sessions.delete(key);
+}
+
+export function storeRetryKey(bookName: string): string {
+  enforceLimit();
+  const key = newKey();
+  _sessions.set(key, { bookName, ts: Date.now() });
   return key;
 }
 
-/** جلب entry من الـ store */
-export function getSession(key: string): SessionEntry | undefined {
-  return sessionStore.get(key);
-}
-
-/** حذف entry بعد استخدامه */
-export function deleteSession(key: string): void {
-  sessionStore.delete(key);
-}
-
-/** تخزين رابط feedback مع bookName */
 export function storeFeedbackUrl(url: string, bookName: string): string {
-  return storeSession({ type: "feedback", url, bookName });
+  enforceLimit();
+  const key = newKey();
+  _sessions.set(key, { url, bookName, ts: Date.now() });
+  return key;
 }
-
-// ══════════════════════════════════════════════
-// RETRY KEY CACHE — dedup: نفس الكتاب يعيد استخدام مفتاحه
-// ══════════════════════════════════════════════
-
-const retryKeyCache = new Map<string, { key: string; ts: number }>();
-
-export function storeRetryKey(bookName: string): string {
-  const normKey = normalizeForCache(bookName);
-  const cached = retryKeyCache.get(normKey);
-  if (
-    cached &&
-    Date.now() - cached.ts < RETRY_KEY_TTL &&
-    sessionStore.has(cached.key)
-  ) {
-    return cached.key;
-  }
-  const newKey = storeSession({ type: "retry", bookName });
-  retryKeyCache.set(normKey, { key: newKey, ts: Date.now() });
-  if (retryKeyCache.size > 500) cleanRetryKeyCache();
-  return newKey;
-}
-
-// ── Cleanup ──────────────────────────────────
-
-export function cleanSessionStore(): void {
-  const now = Date.now();
-  const hour = 60 * 60 * 1000;
-  for (const [k, v] of sessionStore.entries())
-    if (now - v.ts > hour) sessionStore.delete(k);
-}
-
-export function cleanRetryKeyCache(): void {
-  const now = Date.now();
-  for (const [k, v] of retryKeyCache.entries())
-    if (now - v.ts > RETRY_KEY_TTL) retryKeyCache.delete(k);
-}
-
-// ملاحظة: sessionStoreSize() حُذفت — لم تُستدعَ من أي مكان خارج هذا الملف

@@ -1,230 +1,102 @@
-import { createHash } from "crypto";
 import { isBlacklisted } from "./blacklist.js";
-import { redis } from "./redis.js";
-import { UA, TIMEOUT_VERIFY, VERIFY_CACHE_TTL } from "./config.js";
-import { L } from "./logger.js";
+import { L }              from "./logger.js";
+import { UA, VIEWER_ONLY_DOMAINS } from "./config.js";
 
 // ══════════════════════════════════════════════
-// VERIFY — فحص صلاحية روابط PDF
-//
-// المنطق:
-//  1. فلتر روابط Blacklist أولاً (رخيص — Redis lookup)
-//  2. فحص كاش Redis (تجنب HTTP مكرر)
-//  3. HEAD request (أو GET partial) للتحقق من:
-//     - الرابط يرد (2xx)
-//     - Content-Type يحوي pdf أو octet-stream
-//     - Content-Length > 10KB (ليس ملف فارغ/خطأ)
+// VERIFY — التحقق من صلاحية روابط PDF
 // ══════════════════════════════════════════════
 
-interface VerifyStats {
-  blacklisted: number;
-  checked:     number;
-  valid:       number;
-}
-
-export interface VerifyBatchResult {
+export interface VerifyBatch {
   urls:  string[];
-  stats: VerifyStats;
-}
-
-// BUG FIX: base64url.slice(0,80) كانت تُنتج تصادمات لـ URLs طويلة تختلف بعد الحرف 60.
-// مثال: url1 = "https://site.com/books/very-long-path-A-..." و url2 = "...path-B-..."
-// قد ينتجان نفس الـ base64 prefix → نفس cache key → نتيجة خاطئة للـ URL الثاني.
-// الحل: SHA-256 يضمن uniqueness كاملاً لأي إدخال — نفس النهج في pdfValidator.ts
-function verifyCacheKey(url: string): string {
-  return `vcache:${createHash("sha256").update(url).digest("hex").slice(0, 32)}`;
+  stats: { blacklisted: number; checked: number; valid: number };
 }
 
 /**
- * verifyPdfUrl
- * ─────────────
- * يتحقق من صلاحية رابط PDF واحد.
- * يُعيد: "valid" | "invalid" | "unknown" (timeout/error)
+ * يُصفّي قائمة URLs:
+ *  1. يُزيل المحجوبة في الـ blacklist
+ *  2. يتحقق بـ HEAD request إن كان Content-Type يشير لـ PDF
  */
-async function verifyPdfUrl(url: string): Promise<"valid" | "invalid" | "unknown"> {
-  // ── فحص الكاش ──────────────────────────────
-  const cacheKey = verifyCacheKey(url);
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached === "1") return "valid";
-    if (cached === "0") return "invalid";
-  } catch { /* تجاهل خطأ Redis → نكمل الفحص */ }
+export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatch> {
+  const stats = { blacklisted: 0, checked: 0, valid: 0 };
 
-  // ── HEAD request ─────────────────────────────
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_VERIFY);
+  if (urls.length === 0) return { urls: [], stats };
 
-  try {
-    const r = await fetch(url, {
-      method:  "HEAD",
-      headers: {
-        "User-Agent": UA,
-        "Accept":     "application/pdf,*/*",
-      },
-      signal:   ctrl.signal,
-      redirect: "follow",
-    });
-
-    // إذا HEAD مرفوض → جرّب GET بأول 256 bytes فقط
-    // BUG FIX: كان يُشارك نفس ctrl مع HEAD — إذا استغرق HEAD 8 ثوانٍ ثم أعاد 403،
-    // يتبقى ثانيتان فقط للـ GET وقد يُلغى قبل الاستجابة → URL يُصنَّف خطأً كـ "unknown".
-    // الحل: AbortController جديد مع timeout مستقل لكل محاولة GET fallback.
-    if (r.status === 405 || r.status === 403) {
-      const ctrl2  = new AbortController();
-      const timer2 = setTimeout(() => ctrl2.abort(), TIMEOUT_VERIFY);
-      let r2: Response;
-      try {
-        r2 = await fetch(url, {
-          method:  "GET",
-          headers: {
-            "User-Agent": UA,
-            "Accept":     "application/pdf,*/*",
-            "Range":      "bytes=0-255",
-          },
-          signal:   ctrl2.signal,
-          redirect: "follow",
-        });
-      } finally {
-        clearTimeout(timer2);
-      }
-      if (!r2.ok) {
-        await redis.setex(cacheKey, Math.floor(VERIFY_CACHE_TTL / 1000), "0");
-        return "invalid";
-      }
-      // BUG-E FIX: الكود القديم: `await r2.arrayBuffer()` يُنزِّل الملف كاملاً
-      // المشكلة: إذا تجاهل الـ server الـ Range header وأرسل 50MB كاملة
-      //   → يستهلك TIMEOUT_VERIFY (10 ثوانٍ) قبل الاكتمال → URL يُصنَّف "unknown"
-      //   → PDF صالح يُتجاهل فقط لأن التحقق استغرق وقتاً طويلاً
-      // الحل: نقرأ أول chunk من الـ stream ثم نُلغيه فوراً
-      //   أول chunk = 16KB عادةً (أكثر من كافٍ لـ 4 bytes %PDF)
-      let hasPdf = false;
-      try {
-        const reader = r2.body?.getReader();
-        if (reader) {
-          const { value: firstChunk } = await reader.read();
-          reader.cancel().catch(() => {}); // أوقف الـ stream — لا نحتاج الباقي
-          const bytes = firstChunk || new Uint8Array(0);
-          hasPdf = bytes.length >= 4 &&
-            bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
-        }
-      } catch { /* تجاهل خطأ قراءة الـ stream → hasPdf يبقى false */ }
-      const ttl = Math.floor(VERIFY_CACHE_TTL / 1000);
-      await redis.setex(cacheKey, ttl, hasPdf ? "1" : "0");
-      return hasPdf ? "valid" : "invalid";
-    }
-
-    if (!r.ok) {
-      await redis.setex(cacheKey, Math.floor(VERIFY_CACHE_TTL / 1000), "0");
-      return "invalid";
-    }
-
-    const ct   = (r.headers.get("content-type") || "").toLowerCase();
-    const size = parseInt(r.headers.get("content-length") || "0", 10);
-
-    // قبول: pdf أو octet-stream أو application/force-download
-    const looksLikePdf =
-      ct.includes("pdf") ||
-      ct.includes("octet-stream") ||
-      ct.includes("application/force-download");
-
-    // BUG FIX: Content-Type فارغ كان يُخزَّن كـ "0" (invalid) ويُمنع الـ URL نهائياً
-    // كثير من مواقع الكتب العربية لا ترسل Content-Type صحيح مع HEAD
-    // لكن الملف نفسه قد يكون PDF صالحاً — نُعامله كـ "unknown" ونتركه لـ download يحكم
-    if (!ct) {
-      return "unknown"; // لا نُخزَّن في الكاش — نجرّب عند التحميل الفعلي
-    }
-
-    const tooSmall = size > 0 && size < 10_240; // أقل من 10KB → مشبوه
-
-    const result = looksLikePdf && !tooSmall;
-    const ttl = Math.floor(VERIFY_CACHE_TTL / 1000);
-    await redis.setex(cacheKey, ttl, result ? "1" : "0").catch(() => {});
-    return result ? "valid" : "invalid";
-
-  } catch (e: any) {
-    const err = String(e?.message || e);
-    if (err.includes("abort") || err.includes("timeout")) {
-      L.debug("verify", `Timeout verifying: ${url.slice(0, 60)}`);
-      return "unknown"; // timeout → لا تُخزِّن في الكاش — قد يكون مؤقتاً
-    }
-    // BUG FIX (BUG-REVIEW-1): الكود القديم كان يُخزِّن "0" (invalid) في الكاش
-    // لكن يُعيد "unknown" — التناقض يسبب: أي طلب تالٍ خلال 60 ثانية يقرأ "0"
-    // ويُعيد "invalid" → يُسقط الرابط كلياً رغم أنه لم يُثبَت أنه خاطئ.
-    // الحل: لا نُخزّن شيئاً عند خطأ الشبكة — "unknown" يعني "لا أعلم، جرّب لاحقاً"
-    L.debug("verify", `Network error verifying: ${url.slice(0, 60)} — ${err.slice(0, 60)}`);
-    return "unknown";
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * findValidPdfUrls
- * ─────────────────
- * يفلتر قائمة URLs ويُعيد الصالحة منها مع إحصائيات.
- *
- * الخوارزمية:
- *  1. فلتر Blacklist (Redis atomic)
- *  2. فحص كل رابط متبقٍّ بالتوازي (Promise.allSettled)
- *  3. ترتيب: "valid" أولاً ثم "unknown"
- *
- * الـ BUG السابق: كان يتحقق بشكل تسلسلي → بطيء جداً
- * الإصلاح: تشغيل كل الفحوصات بالتوازي مع timeout فردي
- */
-export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatchResult> {
-  if (urls.length === 0) {
-    return { urls: [], stats: { blacklisted: 0, checked: 0, valid: 0 } };
-  }
-
-  const stats: VerifyStats = { blacklisted: 0, checked: 0, valid: 0 };
-
-  // ── فلتر Blacklist بالتوازي ────────────────────
-  const blChecks = await Promise.allSettled(
-    urls.map((u) => isBlacklisted(u))
-  );
-
-  const toCheck: string[] = [];
-  for (let i = 0; i < urls.length; i++) {
-    const check = blChecks[i];
-    const isBlack = check.status === "fulfilled" && check.value;
-    if (isBlack) {
+  // ── فلتر الـ blacklist ────────────────────────
+  const blChecks = await Promise.allSettled(urls.map((u) => isBlacklisted(u)));
+  const notBlacklisted = urls.filter((_, i) => {
+    if (blChecks[i].status === "fulfilled" && (blChecks[i] as PromiseFulfilledResult<boolean>).value) {
       stats.blacklisted++;
-      L.debug("verify", `Blacklisted: ${urls[i].slice(0, 60)}`);
-    } else {
-      toCheck.push(urls[i]);
+      return false;
     }
-  }
+    return true;
+  });
 
-  if (toCheck.length === 0) {
-    return { urls: [], stats };
-  }
+  // ── فلتر منصات العرض — لا PDF قابل للتحميل منها أبداً ──
+  // fliphtml5.com, scribd.com, issuu.com وغيرها من عوارض الوثائق
+  // المحاولة معها تستهلك 90 ثانية وتفشل دائماً — نُزيلها فوراً
+  const notViewerOnly = notBlacklisted.filter((url) => {
+    const isViewer = VIEWER_ONLY_DOMAINS.some((d) => url.includes(d));
+    if (isViewer) {
+      L.debug("verify", `Viewer-only domain — skipped immediately`, { url: url.slice(0, 80) });
+    }
+    return !isViewer;
+  });
 
-  // ── فحص URL بالتوازي ──────────────────────────
-  stats.checked = toCheck.length;
+  // ── HEAD check لأول 6 URLs ───────────────────
+  const toCheck = notViewerOnly.slice(0, 6);
+  const rest    = notViewerOnly.slice(6); // تجاوز الـ HEAD check — pass through
 
-  const verifyResults = await Promise.allSettled(
-    toCheck.map((u) => verifyPdfUrl(u))
+  const valid: string[] = [];
+
+  await Promise.allSettled(
+    toCheck.map(async (url) => {
+      stats.checked++;
+      try {
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8_000);
+        try {
+          // FIX v29: إضافة Accept-Language: ar — مواقع عربية قد تُعيد محتوى مختلفاً
+          const r = await fetch(url, {
+            method: "HEAD",
+            headers: {
+              "User-Agent":      UA,
+              "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
+            },
+            signal: ctrl.signal,
+            redirect: "follow",
+          });
+          const ct = r.headers.get("content-type") || "";
+          if (r.ok && (ct.includes("pdf") || ct.includes("octet-stream"))) {
+            stats.valid++;
+            valid.push(url);
+          } else if (r.ok && ct.includes("html")) {
+            // صفحة HTML — download.ts يتعامل معها (قد تحتوي رابط PDF)
+            valid.push(url);
+          } else if (r.ok && !ct) {
+            // لا Content-Type — قد يكون PDF بدون header صحيح → نُمرّره
+            valid.push(url);
+          } else if (!r.ok) {
+            // FIX-VERIFY: 404/410 → رفض نهائي بدون تمرير
+            // 429/5xx → تمرير (مشكلة مؤقتة وليست URL فاشلة)
+            if (r.status === 404 || r.status === 410 || r.status === 403) {
+              L.debug("verify", `HEAD ${r.status} — skipping permanently`, { url: url.slice(0, 60) });
+            } else {
+              // مشكلة مؤقتة (429, 5xx) → نُمرّر ونتيح لـ download.ts الحكم
+              valid.push(url);
+            }
+          } else {
+            // نوع آخر غير معروف — نُمرّره ونتيح لـ download.ts الحكم
+            valid.push(url);
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch {
+        // timeout أو network error — نمرر الـ URL
+        valid.push(url);
+      }
+    })
   );
 
-  const validUrls:   string[] = [];
-  const unknownUrls: string[] = [];
-
-  for (let i = 0; i < toCheck.length; i++) {
-    const res = verifyResults[i];
-    const result = res.status === "fulfilled" ? res.value : "unknown";
-    if (result === "valid") {
-      validUrls.push(toCheck[i]);
-      stats.valid++;
-    } else if (result === "unknown") {
-      // timeout/error → نُضيفها كـ fallback (قد تنجح عند التحميل الفعلي)
-      unknownUrls.push(toCheck[i]);
-    }
-    // "invalid" → نتجاهلها كلياً
-  }
-
-  // الصالحة أولاً ثم المجهولة كـ fallback
-  return {
-    urls:  [...validUrls, ...unknownUrls],
-    stats,
-  };
+  return { urls: [...valid, ...rest], stats };
 }

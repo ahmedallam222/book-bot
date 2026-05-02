@@ -1,559 +1,607 @@
-import * as fs from "fs";
 import TelegramBot from "node-telegram-bot-api";
-import { storage } from "../storage.js";
-import { L } from "./logger.js";
-import { redis } from "./redis.js";
-import { TEMP_DIR, MAINTENANCE_KEY, BOT_ANNOUNCE_KEY } from "./config.js";
-import { SOURCES } from "./sources.js";
-import { escMd } from "./text.js";
-import { blacklistStats, clearBlacklist } from "./blacklist.js";
-import { bannedCount, bannedList } from "./guards.js";
-import { getQueueStats, clearQueues, clearDLQ, getDLQJobs } from "./queue.js";
-import { getTopBooks, getDailyStats, invalidateTodayStatsCache } from "./analytics.js";
-import { activeWorkerCount } from "./worker.js";
-import {
-  isPremium, setPremium, listPremiumUsers, premiumCount,
-  getUserDailyLimit, setUserDailyLimit, resetUserDailyLimit,
-  setUserNote, clearUserNote,
-} from "./userSettings.js";
-import {
-  sendHealthReport, sendAnalyticsPanel, sendWeeklyStats, sendSourceHealth,
-} from "./health.js";
+import { redis }         from "./redis.js";
+import { L }             from "./logger.js";
+import { storage }       from "../storage.js";
+import { escMd }         from "./text.js";
+import { getQueueStats, clearDLQ, getDLQJobs } from "./queue.js";
+import { blacklistStats, clearBlacklist }        from "./blacklist.js";
+import { getPdfValidationStats }                 from "./pdfValidator.js";
+import { getDailyStats, getTotalStats, getTopBooks, getSourceStats, getFunnelStats, getWeeklyStats } from "./analytics.js";
+import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
+import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
+
 // ══════════════════════════════════════════════
-// ADMIN PANEL
+// ADMIN — لوحة تحكم المشرفين (كاملة)
 // ══════════════════════════════════════════════
 
+// ── Welcome message ───────────────────────────
+export function buildWelcome(
+  name: string, remaining: number, limit: number,
+  sourceCount: number, isPrem: boolean
+): string {
+  const premBadge = isPrem ? " ⭐" : "";
+  let balanceLine: string;
+  if (limit <= 0) {
+    balanceLine = "♾️ رصيد غير محدود";
+  } else {
+    const used   = Math.max(0, limit - remaining);
+    const filled = Math.round((used / limit) * 8);
+    const bar    = "█".repeat(Math.min(filled, 8)) + "░".repeat(Math.max(0, 8 - filled));
+    const emoji  = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
+    balanceLine  = `${emoji} \`${bar}\` *${remaining}/${limit}* كتاب متبقٍّ`;
+  }
+  return (
+    `📚 *أهلاً ${escMd(name)}${premBadge}*\n` +
+    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+    `${balanceLine}\n` +
+    `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
+    `_اكتب اسم أي كتاب وسأحضره لك فوراً_ ✨`
+  );
+}
+
+// ── لوحة التحكم الرئيسية ─────────────────────
 export async function sendAdminPanel(bot: TelegramBot, chatId: number): Promise<void> {
   try {
-    const [stats, cacheStats, bl, bCount, qStats, pCount, isMaint, today] = await Promise.all([
-      storage.getStats().catch(() => ({ totalUsers: 0, totalSearches: 0, totalDownloads: 0 })),
-      storage.getCacheStats().catch(() => ({ totalCached: 0, totalServed: 0 })),
-      blacklistStats().catch(() => ({ total: 0, active: 0 })),
-      bannedCount().catch(() => 0),
+    const [today, total, qs, blStats, pdfStats, dbStats] = await Promise.all([
+      getDailyStats(),
+      getTotalStats(),
       getQueueStats(),
-      premiumCount().catch(() => 0),
-      redis.get(MAINTENANCE_KEY).catch(() => null),
-      getDailyStats().catch(() => null),
+      blacklistStats(),
+      getPdfValidationStats(),
+      storage.getStats(),
     ]);
 
-    const memMB      = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
-    const upSec      = Math.floor(process.uptime());
-    const upH        = Math.floor(upSec / 3600);
-    const upM        = Math.floor((upSec % 3600) / 60);
-    const upStr      = upH > 0 ? `${upH}س ${upM}د` : `${upM}د`;
-    const tmpCount   = await fs.promises.readdir(TEMP_DIR).then((f) => f.length).catch(() => 0);
-    const maintEmoji = isMaint === "1" ? "🔴 مفعّل" : "🟢 معطّل";
-    const dlqAlert   = qStats.dlqSize >= 20 ? " ⚠️" : "";
-
-    const dailyLine = today
-      ? `📈 اليوم: *${today.searches}* بحث | *${today.downloads}* تحميل | نجاح *${today.successRate}*\n` +
-        `⚡ الكاش: *${today.cacheHits}* | ⏱️ متوسط: *${today.avgMs}ms* | 👤 نشطون: *${today.activeUsers}*`
-      : `_لا بيانات يومية_`;
+    const isMaint  = await redis.get(MAINTENANCE_KEY).catch(() => null);
+    const announce = await redis.get(BOT_ANNOUNCE_KEY).catch(() => null);
+    const successRate = (today.requests ?? 0) > 0
+      ? Math.round(((today.found ?? 0) / (today.requests ?? 1)) * 100)
+      : 0;
 
     const msg =
-      `🛠️ *لوحة الإدارة — خلاصة الكتب*\n` +
-      `━━━━━━━━━━━━━━━━━\n\n` +
-      `*📅 اليوم:*\n` +
-      `${dailyLine}\n\n` +
-      `*📊 الإجماليات:*\n` +
-      `👥 المستخدمون: *${stats.totalUsers}* | ⭐ مميزون: *${pCount}*\n` +
-      `🔍 بحث كلي: *${stats.totalSearches}* | 📥 تحميل كلي: *${stats.totalDownloads}*\n\n` +
-      `*⚡ الكاش:*\n` +
-      `📚 *${cacheStats.totalCached}* كتاب | خُدم *${cacheStats.totalServed}* مرة\n\n` +
-      `*🔄 الطابور:*\n` +
-      `⚡ High: *${qStats.highQueue}* | 📋 Normal: *${qStats.normalQueue}*\n` +
-      `💀 DLQ: *${qStats.dlqSize}*${dlqAlert} | ⚙️ Workers: *${activeWorkerCount()}*\n\n` +
-      `*🛡️ الأمان:*\n` +
-      `🚫 Blacklist: *${bl.active}/${bl.total}* | محظورون: *${bCount}*\n\n` +
-      `*💻 النظام:*\n` +
-      `💾 Heap: *${memMB} MB* | ⏱️ Uptime: *${upStr}*\n` +
-      `📁 Temp: *${tmpCount}* ملف | 🔧 صيانة: *${maintEmoji}*`;
+      `🔧 *لوحة التحكم — خلاصة الكتب*\n` +
+      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+      `📊 *اليوم:*\n` +
+      `◦ طلبات: *${today.requests ?? 0}* | نجح: *${today.found ?? 0}* (${successRate}%)\n` +
+      `◦ تحميل: *${today.downloads ?? 0}* | كاش: *${today.cache_hits ?? 0}*\n\n` +
+      `📈 *الإجمالي:*\n` +
+      `◦ مستخدمون: *${dbStats.totalUsers}*\n` +
+      `◦ تحميلات: *${total.downloads ?? 0}* | بحث: *${total.searches ?? 0}*\n\n` +
+      `📋 *الطابور:*\n` +
+      `◦ High: *${qs.highQueue}* | Normal: *${qs.normalQueue}* | DLQ: *${qs.dlqSize}*\n\n` +
+      `🛡️ *PDF Validator:*\n` +
+      `◦ قبول: *${pdfStats.accepted}* | رفض: *${pdfStats.rejected}* (${pdfStats.rejectionRate})\n` +
+      `◦ Mistral: *${pdfStats.mistralUsed}* مرة\n\n` +
+      `🚫 *Blacklist:* ${blStats.total} رابط\n` +
+      `📢 *إعلان:* ${announce ? `"${announce.slice(0, 30)}..."` : "لا يوجد"}\n` +
+      `🔧 *الصيانة:* ${isMaint === "1" ? "✅ مفعّلة" : "❌ معطّلة"}`;
 
     await bot.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
-      reply_markup: buildAdminKeyboard(isMaint === "1"),
-    });
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "📊 إحصاءات",      callback_data: "admin_stats"    },
+            { text: "📋 الطابور",       callback_data: "admin_queue"    },
+          ],
+          [
+            { text: "👥 المستخدمون",    callback_data: "admin_users_0"  },
+            { text: "🏆 أكثر تحميلاً", callback_data: "admin_top"      },
+          ],
+          [
+            { text: "🚫 Blacklist",     callback_data: "admin_blacklist" },
+            { text: "💾 الكاش",         callback_data: "admin_cache"     },
+          ],
+          [
+            { text: "📡 المصادر",       callback_data: "admin_sources"   },
+            { text: "🔭 الـ Funnel",    callback_data: "admin_funnel"    },
+          ],
+          [
+            { text: isMaint === "1" ? "✅ إيقاف الصيانة" : "🔧 تفعيل الصيانة",
+              callback_data: "admin_toggle_maintenance" },
+          ],
+          [
+            { text: "📢 بث جماعي",      callback_data: "admin_broadcast" },
+            { text: "🗑️ مسح DLQ",       callback_data: "admin_clear_dlq" },
+          ],
+        ],
+      },
+    }).catch(() => {});
   } catch (e) {
-    L.error("admin", `sendAdminPanel error`, { err: String(e).slice(0, 200) });
-    await bot.sendMessage(chatId, "❌ خطأ في جلب الإحصائيات");
+    L.error("admin", `sendAdminPanel error`, { err: String(e).slice(0, 100) });
   }
 }
 
-function buildAdminKeyboard(isMaint: boolean): TelegramBot.InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [
-      [
-        { text: "🔄 تحديث",            callback_data: "admin_refresh"      },
-        { text: isMaint ? "✅ إنهاء صيانة" : "🔧 وضع صيانة", callback_data: "admin_toggle_maint" },
-      ],
-      [
-        { text: "🏥 صحة البوت",        callback_data: "admin_health"       },
-        { text: "📊 Analytics",         callback_data: "admin_analytics"    },
-      ],
-      [
-        { text: "📢 إعلان",             callback_data: "admin_announce"     },
-        { text: "📡 بث جماعي",          callback_data: "admin_broadcast"    },
-      ],
-      [
-        { text: "📋 الطابور",           callback_data: "admin_queue"        },
-        { text: "💀 فاشلة (DLQ)",      callback_data: "admin_dlq"          },
-      ],
-      [
-        { text: "⭐ المميزون",          callback_data: "admin_premium"      },
-        { text: "🚫 المحظورون",        callback_data: "admin_bans"         },
-      ],
-      [
-        { text: "🔌 المصادر",           callback_data: "admin_sources"      },
-        { text: "🧹 مسح Blacklist",     callback_data: "admin_clear_bl"    },
-      ],
-      [
-        { text: "📚 أكثر الكتب",        callback_data: "admin_top_books"   },
-        { text: "📤 تصدير CSV",         callback_data: "admin_export_csv"  },
-      ],
-      // BUG-B FIX: كان الـ fallback يُنتج http://localhost:5000/dashboard
-      // Telegram يرفض أي URL بـ localhost/IP خاص في الأزرار: "Wrong HTTP URL"
-      // الحل: اعرض الزر فقط إذا DASHBOARD_URL مضبوطة بـ URL عام صحيح
-      ...(process.env.DASHBOARD_URL && process.env.DASHBOARD_URL.startsWith("http")
-        ? [[{ text: "🌐 لوحة الويب (Dashboard)", url: process.env.DASHBOARD_URL }]]
-        : []),
-    ],
-  };
-}
-
-// ══════════════════════════════════════════════
-// CALLBACK DISPATCHER
-// ══════════════════════════════════════════════
-
-const pendingActions = new Map<string, { action: string; ts: number; message?: string }>();
-
-// FIX-7: pendingActions كان يتراكم للأبد — entries قديمة لا تُنظَّف إلا لو جاء admin مجدداً
-// نُضيف cleanup دورياً كل 10 دقائق يحذف أي entry أعمر من 5 دقائق
-setInterval(() => {
-  const cutoff = Date.now() - 5 * 60 * 1000;
-  for (const [uid, entry] of pendingActions) {
-    if (entry.ts < cutoff) pendingActions.delete(uid);
-  }
-}, 10 * 60 * 1000).unref(); // unref: لا يمنع Node من الخروج
-
-export async function handleAdminCallback(
-  bot: TelegramBot,
-  chatId: number,
-  userId: string,
-  data: string,
-  msgId?: number,
-  queryId?: string   // BUG-1 FIX: query.id كان يُستخدم داخل هذه الدالة لكنه غير موجود في scope
-                     // callbacks.ts تُمرره الآن صراحةً — يُستخدم فقط لـ answerCallbackQuery
-): Promise<void> {
-  L.adminAction(userId, data);
-
-  switch (data) {
-
-    case "admin_refresh":
-      // FIX-v11-4: بدون invalidate كان الـ cache يُعيد نفس القيم لـ 30 ثانية حتى عند الضغط على "تحديث"
-      invalidateTodayStatsCache();
-      await sendAdminPanel(bot, chatId);
-      break;
-
-    case "admin_health":
-      await sendHealthReport(bot, chatId);
-      break;
-
-    case "admin_analytics":
-      await sendAnalyticsPanel(bot, chatId);
-      break;
-
-    case "admin_weekly":
-      await sendWeeklyStats(bot, chatId);
-      break;
-
-    case "admin_source_health":
-      await sendSourceHealth(bot, chatId);
-      break;
-
-    // ── Maintenance ──────────────────────────────
-    case "admin_toggle_maint": {
-      const current = await redis.get(MAINTENANCE_KEY).catch(() => null);
-      if (current === "1") {
-        await redis.del(MAINTENANCE_KEY);
-        await bot.sendMessage(chatId, `✅ *تم إنهاء وضع الصيانة.* البوت يعمل الآن.`, { parse_mode: "Markdown" });
-        L.info("admin", `Maintenance OFF`, { by: userId });
-      } else {
-        await redis.set(MAINTENANCE_KEY, "1");
-        await bot.sendMessage(chatId, `🔧 *تم تفعيل وضع الصيانة.*\nالمستخدمون لن يتمكنوا من إرسال طلبات.`, { parse_mode: "Markdown" });
-        L.info("admin", `Maintenance ON`, { by: userId });
-      }
-      break;
-    }
-
-    // ── Announce ─────────────────────────────────
-    case "admin_announce": {
-      const current = await redis.get(BOT_ANNOUNCE_KEY).catch(() => null);
-      const curText = current ? `\n\n_الحالي:_\n${current}` : "\n\n_لا يوجد إعلان_";
-      pendingActions.set(userId, { action: "set_announce", ts: Date.now() });
-      await bot.sendMessage(
-        chatId,
-        `📢 *إعلان*${curText}\n\n---\nأرسل نص الإعلان الجديد، أو أرسل \`clear\` لحذفه.`,
-        { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "❌ إلغاء", callback_data: "admin_cancel_action" }]] } }
-      );
-      break;
-    }
-
-    // ── Broadcast ────────────────────────────────
-    case "admin_broadcast": {
-      pendingActions.set(userId, { action: "broadcast", ts: Date.now() });
-      await bot.sendMessage(
-        chatId,
-        `📡 *البث الجماعي*\n\nأرسل الرسالة التي تريد إرسالها لكل المستخدمين.\n⚠️ _ستظهر معاينة قبل الإرسال._`,
-        { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "❌ إلغاء", callback_data: "admin_cancel_action" }]] } }
-      );
-      break;
-    }
-
-    // ── Broadcast Confirm ─────────────────────────
-    case "admin_broadcast_confirm": {
-      const pendingBroadcast = pendingActions.get(userId);
-      if (!pendingBroadcast || pendingBroadcast.action !== "broadcast_preview") {
-        // BUG-1 FIX: كان يستخدم query.id المجهول — الآن queryId مُمرَّر كـ parameter
-        if (queryId) await bot.answerCallbackQuery(queryId, { text: "انتهت صلاحية الجلسة — أعد المحاولة" }).catch(() => {});
-        break;
-      }
-      const msgToSend = pendingBroadcast.message ?? "";
-      pendingActions.delete(userId);
-      if (queryId) await bot.answerCallbackQuery(queryId, { text: "جاري البث..." }).catch(() => {});
-      await runBroadcast(bot, chatId, msgToSend);
-      break;
-    }
-
-    case "admin_broadcast_cancel": {
-      pendingActions.delete(userId);
-      if (queryId) await bot.answerCallbackQuery(queryId, { text: "تم إلغاء البث." }).catch(() => {});
-      await bot.sendMessage(chatId, "❌ *تم إلغاء البث الجماعي.*", { parse_mode: "Markdown" });
-      break;
-    }
-
-    // ── Queue ────────────────────────────────────
-    case "admin_queue": {
-      const qs = await getQueueStats();
-      await bot.sendMessage(
-        chatId,
-        `📋 *حالة الطابور:*\n\n⚡ High: *${qs.highQueue}*\n📋 Normal: *${qs.normalQueue}*\n💀 DLQ: *${qs.dlqSize}*\n⚙️ Workers نشطون: *${activeWorkerCount()}*`,
-        { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
-          [{ text: "🗑️ مسح الطابور", callback_data: "admin_clear_queue" },
-           { text: "💀 عرض DLQ",      callback_data: "admin_dlq"         }],
-          [{ text: "◀️ رجوع",         callback_data: "admin_refresh"     }],
-        ]}},
-      );
-      break;
-    }
-
-    case "admin_clear_queue":
-      await clearQueues();
-      await bot.sendMessage(chatId, `✅ تم مسح الطابور.`);
-      L.info("admin", `Queues cleared`, { by: userId });
-      break;
-
-    case "admin_dlq": {
-      const jobs = await getDLQJobs(10);
-      if (jobs.length === 0) { await bot.sendMessage(chatId, `✅ Dead Letter Queue فارغ.`); break; }
-      let msg = `💀 *آخر الطلبات الفاشلة:*\n\n`;
-      for (const j of jobs)
-        msg += `• \`${j.userId}\` — _${escMd(j.bookName)}_\n  ❌ ${j.failReason?.slice(0, 60) || "unknown"}\n`;
-      await bot.sendMessage(chatId, msg, { parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "🗑️ مسح DLQ", callback_data: "admin_clear_dlq" }]] } });
-      break;
-    }
-
-    case "admin_clear_dlq":
-      await clearDLQ();
-      await bot.sendMessage(chatId, `✅ تم مسح DLQ.`);
-      break;
-
-    // ── Premium ──────────────────────────────────
-    case "admin_premium": {
-      const list   = await listPremiumUsers();
-      const pCount = list.length;
-      await bot.sendMessage(
-        chatId,
-        `⭐ *المميزون (${pCount}):*\n\n` +
-          (pCount > 0 ? list.slice(0, 20).map((id) => `• \`${id}\``).join("\n") : "_لا يوجد_") +
-          `\n\n_/premium\\_add <id> — إضافة_\n_/premium\\_remove <id> — إزالة_\n_/set\\_limit <id> <n> — حد مخصص_\n_/note <id> <text> — ملاحظة_`,
-        { parse_mode: "Markdown" }
-      );
-      break;
-    }
-
-    // ── Bans ─────────────────────────────────────
-    case "admin_bans": {
-      const list   = await bannedList();
-      const banStr = list.length > 0 ? list.slice(0, 30).map((id) => `• \`${id}\``).join("\n") : "_لا يوجد_";
-      await bot.sendMessage(
-        chatId,
-        `🚫 *المحظورون (${list.length}):*\n\n${banStr}\n\n_/ban <id>_ | _/unban <id>_`,
-        { parse_mode: "Markdown" }
-      );
-      break;
-    }
-
-    // ── Sources — FIX BUG-18: كان redis.exists في for loop (N queries) → pipeline الآن ──
-    case "admin_sources": {
-      const pipe = redis.pipeline();
-      for (const src of SOURCES) pipe.exists(`src:off:${src.domain}`);
-      const offResults = (await pipe.exec()) as [Error | null, number][];
-
-      const rows: TelegramBot.InlineKeyboardButton[][] = [];
-      for (let i = 0; i < SOURCES.length; i++) {
-        const src   = SOURCES[i];
-        const isOff = offResults[i]?.[1] === 1;
-        rows.push([{ text: `${isOff ? "🔴" : "🟢"} ${src.emoji} ${src.name}`, callback_data: `admin_src_toggle:${src.domain}` }]);
-      }
-      rows.push([{ text: "◀️ رجوع", callback_data: "admin_refresh" }]);
-      await bot.sendMessage(chatId, `🔌 *إدارة المصادر:*\n\nاضغط لتفعيل/تعطيل.`, { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } });
-      break;
-    }
-
-    case "admin_cancel_action":
-      pendingActions.delete(userId);
-      await bot.sendMessage(chatId, `✅ تم الإلغاء.`);
-      break;
-
-    case "admin_clear_bl": {
-      const count = await clearBlacklist();
-      await bot.sendMessage(chatId, `✅ تم مسح ${count} رابط من Blacklist.`);
-      L.info("admin", `Blacklist cleared`, { by: userId, count });
-      break;
-    }
-
-    case "admin_top_books":
-      await buildTopBooksMessage(bot, chatId);
-      break;
-
-    case "admin_export_csv":
-      await exportCSV(bot, chatId);
-      break;
-
-    default:
-      if (data.startsWith("admin_src_toggle:")) {
-        const domain = data.slice(17);
-        const rKey   = `src:off:${domain}`;
-        const isOff  = (await redis.exists(rKey)) === 1;
-        if (isOff) {
-          await redis.del(rKey);
-          await bot.sendMessage(chatId, `✅ تم تفعيل \`${domain}\``, { parse_mode: "Markdown" });
-        } else {
-          await redis.set(rKey, "1");
-          await bot.sendMessage(chatId, `🔴 تم تعطيل \`${domain}\``, { parse_mode: "Markdown" });
-        }
-        L.adminAction(userId, `src_toggle:${domain} → ${isOff ? "ON" : "OFF"}`);
-        await handleAdminCallback(bot, chatId, userId, "admin_sources");
-      }
-  }
-}
-
-// ══════════════════════════════════════════════
-// PENDING ACTION HANDLER (multi-step)
-// ══════════════════════════════════════════════
+// ── Pending admin actions ─────────────────────
+const _pendingBroadcast  = new Map<string, { step: string; draft?: string }>();
+const _pendingUserSearch = new Set<string>();
 
 export async function handleAdminPendingAction(
-  bot: TelegramBot,
-  chatId: number,
-  userId: string,
-  text: string
+  bot: TelegramBot, chatId: number, userId: string, text: string
 ): Promise<boolean> {
-  const pending = pendingActions.get(userId);
-  if (!pending) return false;
-  if (Date.now() - pending.ts > 5 * 60 * 1000) { pendingActions.delete(userId); return false; }
 
-  pendingActions.delete(userId);
-
-  if (pending.action === "set_announce") {
-    if (text.toLowerCase() === "clear") {
-      await redis.del(BOT_ANNOUNCE_KEY);
-      await bot.sendMessage(chatId, `✅ تم حذف الإعلان.`);
-      L.adminAction(userId, "announce:clear");
-    } else {
-      await redis.set(BOT_ANNOUNCE_KEY, text);
-      await bot.sendMessage(chatId, `✅ تم تعيين الإعلان.\n\n📢 ${text}`);
-      L.adminAction(userId, `announce:set (${text.slice(0, 40)})`);
-    }
-    return true;
-  }
-
-  if (pending.action === "broadcast") {
-    // IMP-5 FIX: إضافة خطوة تأكيد قبل البث — لمنع الإرسال بالخطأ لكل المستخدمين
-    // قبل: الرسالة تُرسَل فوراً بعد كتابتها → خطأ إملائي واحد = بث لآلاف المستخدمين
-    // الآن: نعرض معاينة + أزرار تأكيد/إلغاء → Admin يراجع قبل الإرسال
-    pendingActions.set(userId, { action: "broadcast_preview", message: text, ts: Date.now() });
-    const userCount = await storage.getAllUserIds().then(ids => ids.length).catch(() => 0);
-    await bot.sendMessage(
-      chatId,
-      `📋 *معاينة البث الجماعي*
-
-` +
-      `👥 سيُرسَل لـ *${userCount}* مستخدم
-
-` +
-      `─────────────────────
-${text}
-─────────────────────
-
-` +
-      `هل تريد إرسال هذه الرسالة؟`,
+  // انتظار نص البث
+  const pending = _pendingBroadcast.get(userId);
+  if (pending?.step === "awaiting_broadcast") {
+    _pendingBroadcast.set(userId, { step: "confirm_broadcast", draft: text });
+    await bot.sendMessage(chatId,
+      `📢 *معاينة البث:*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${text}\n\n_هل تريد إرساله لجميع المستخدمين؟_`,
       {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[
-          { text: "✅ تأكيد الإرسال",  callback_data: "admin_broadcast_confirm" },
-          { text: "❌ إلغاء",            callback_data: "admin_broadcast_cancel"  },
-        ]] },
+          { text: "✅ إرسال", callback_data: "admin_broadcast_confirm" },
+          { text: "❌ إلغاء", callback_data: "admin_broadcast_cancel"  },
+        ]]},
       }
-    );
+    ).catch(() => {});
+    return true;
+  }
+
+  // انتظار ID للبحث عن مستخدم
+  if (_pendingUserSearch.has(userId)) {
+    _pendingUserSearch.delete(userId);
+    const targetId = text.trim();
+    if (!/^\d{5,15}$/.test(targetId)) {
+      await bot.sendMessage(chatId,
+        `❌ ID غير صالح: \`${escMd(targetId)}\`\n_يجب أن يكون أرقاماً فقط (5-15 رقم)_`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      return true;
+    }
+    await showUserDetail(bot, chatId, targetId);
     return true;
   }
 
   return false;
 }
 
-// FIX BUG-17: broadcast — زيادة الـ delay وإضافة معالجة خطأ 429 (rate limit)
-// كان 50ms = ~20 رسالة/ثانية بدون أي retry على 429
-async function runBroadcast(bot: TelegramBot, chatId: number, message: string): Promise<void> {
-  L.info("admin", `Broadcast started`);
+// ── عرض تفاصيل مستخدم بـ ID ──────────────────
+async function showUserDetail(bot: TelegramBot, chatId: number, targetId: string): Promise<void> {
   try {
-    const allUsers = await storage.getAllUserIds();
-    let sent = 0, failed = 0;
-    const statusMsg = await bot.sendMessage(chatId, `📡 *جاري البث...*\n\n0 / ${allUsers.length}`, { parse_mode: "Markdown" });
+    const [prem, limit, dlCount, history, expiry] = await Promise.all([
+      isPremium(targetId),
+      getUserDailyLimit(targetId),
+      storage.getDailyDownloadCount(targetId).catch(() => 0),
+      storage.getUserSearchHistory(targetId, 5).catch(() => [] as { query: string; createdAt: Date | null }[]),
+      getPremiumExpiry(targetId),
+    ]);
 
-    for (let i = 0; i < allUsers.length; i++) {
-      let retries = 0;
-      while (retries < 3) {
-        try {
-          await bot.sendMessage(Number(allUsers[i]), `📢 *رسالة من الإدارة:*\n\n${message}`, { parse_mode: "Markdown" });
-          sent++;
-          break;
-        } catch (err: any) {
-          // 429: Too Many Requests — انتظر وأعد المحاولة
-          if (err?.response?.statusCode === 429) {
-            const retryAfter = (err.response?.body?.parameters?.retry_after ?? 5) * 1000;
-            await sleep(retryAfter + 500);
-            retries++;
-          } else {
-            // blocked / deactivated / other — لا فائدة من retry
-            failed++;
-            break;
-          }
-        }
+    const premLabel  = prem
+      ? expiry
+        ? `⭐ Premium (ينتهي ${expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long" })})`
+        : "⭐ Premium (دائم)"
+      : "مجاني";
+    const limitLabel = limit <= 0 ? "∞" : String(limit);
+    const histLines  = history.length
+      ? history.map((h, i) => `${i + 1}\\. _${escMd(h.query.slice(0, 45))}_`).join("\n")
+      : "_لا سجل_";
+
+    await bot.sendMessage(chatId,
+      `👤 *مستخدم: \`${targetId}\`*\n` +
+      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+      `◦ نوع الحساب: *${premLabel}*\n` +
+      `◦ الحد اليومي: *${limitLabel}*\n` +
+      `◦ حمّل اليوم: *${dlCount}*\n\n` +
+      `*آخر الكتب:*\n${histLines}`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [
+          [
+            { text: prem ? "❌ إلغاء Premium" : "⭐ منح Premium",
+              callback_data: `admin_user_prem:${targetId}` },
+          ],
+          [
+            { text: "🔍 بحث مستخدم آخر", callback_data: "admin_user_search" },
+            { text: "🔙 قائمة المستخدمين", callback_data: "admin_users_0"   },
+          ],
+        ]},
       }
-      if (retries >= 3) failed++;
-
-      // تأخير 40ms بين كل رسالة (~25/ثانية — تحت حد Telegram البالغ 30/ثانية)
-      await sleep(40);
-
-      if ((i + 1) % 20 === 0) {
-        await bot.editMessageText(`📡 *جاري البث...*\n\n✅ ${sent} | ❌ ${failed} / ${allUsers.length}`, {
-          chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "Markdown",
-        }).catch(() => {});
-      }
-    }
-
-    await bot.editMessageText(
-      `✅ *اكتمل البث!*\n\n✅ ${sent} | ❌ ${failed} | 📊 ${allUsers.length}`,
-      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "Markdown" }
     ).catch(() => {});
-
-    L.info("admin", `Broadcast done`, { sent, failed, total: allUsers.length });
   } catch (e) {
-    await bot.sendMessage(chatId, `❌ خطأ في البث: ${String(e).slice(0, 200)}`);
+    await bot.sendMessage(chatId, `⚠️ خطأ: ${String(e).slice(0, 80)}`).catch(() => {});
   }
 }
 
-// ══════════════════════════════════════════════
-// SHARED HELPERS
-// ══════════════════════════════════════════════
-
-export async function buildTopBooksMessage(bot: TelegramBot, chatId: number): Promise<void> {
+// ── Admin callback handler ────────────────────
+export async function handleAdminCallback(
+  bot:      TelegramBot,
+  chatId:   number,
+  userId:   string,
+  data:     string,
+  msgId?:   number,
+  queryId?: string
+): Promise<void> {
   try {
-    const top    = await getTopBooks(10, new Date().toISOString().slice(0, 10));
-    const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
-    let msg = `🏆 *أكثر الكتب طلباً اليوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n`;
-    if (top.length === 0) {
-      msg += `_لا طلبات بعد اليوم_\n\n_ابحث عن أي كتاب لتبدأ القائمة_`;
-    } else {
-      const maxCount = top[0]?.count || 1;
-      top.forEach((b, i) => {
-        const pct  = Math.round((b.count / maxCount) * 10);
-        const bar  = "▰".repeat(Math.max(1, pct)) + "▱".repeat(Math.max(0, 10 - pct));
-        msg += `${medals[i]} *${escMd(b.title.slice(0, 38))}*\n`;
-        msg += `\`${bar}\` _${b.count} طلب_\n\n`;
+
+    // ── قائمة المستخدمين مع pagination ──────────────────
+    if (data.startsWith("admin_users_")) {
+      const page    = parseInt(data.replace("admin_users_", ""), 10) || 0;
+      const perPage = 10;
+      const { users, total } = await storage.getAllUsersWithDetails(perPage, page * perPage);
+      const totalPages = Math.ceil(total / perPage);
+
+      if (!users.length) {
+        await bot.sendMessage(chatId, `👥 لا يوجد مستخدمون بعد.`).catch(() => {});
+        return;
+      }
+
+      // جلب premium status لكل المستخدمين في pipeline واحد بدل N calls
+      const premPipeline = redis.pipeline();
+      users.forEach((u) => premPipeline.sismember(PREMIUM_SET_KEY, u.telegramId));
+      const premResults = await premPipeline.exec();
+
+      const lines = users.map((u, i) => {
+        const num    = page * perPage + i + 1;
+        const name   = escMd((u.firstName || u.username || u.telegramId).slice(0, 22));
+        const dls    = u.totalDownloads ?? 0;
+        const isPrem = (premResults?.[i]?.[1] as number) === 1;
+        const badge  = isPrem ? "⭐" : "◦";
+        return `${num}\\. ${badge} ${name} — *${dls}* ⬇️`;
       });
-    }
-    await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
-  } catch {
-    await bot.sendMessage(chatId, "❌ خطأ في جلب البيانات");
-  }
-}
 
-// FIX BUG-19: كان يحمّل ALL recent searches ثم يفلتر في الذاكرة
-// إذا كان للمستخدم تحميلات قديمة خارج النافذة المؤقتة لن تظهر له
-// FIX-v11-3: حُذف duck-type check للـ getUserSearchHistory
-// الدالة معرَّفة في interface IStorage وستُنفَّذ دائماً — التحقق الوقتي خطأ تصميم
-export async function buildHistoryMessage(bot: TelegramBot, chatId: number, userId: string): Promise<void> {
-  try {
-    const userSearches = await storage.getUserSearchHistory(userId, 7).catch(() => [] as { query: string }[]);
+      const nav: TelegramBot.InlineKeyboardButton[] = [];
+      if (page > 0)              nav.push({ text: "◀️", callback_data: `admin_users_${page - 1}` });
+      nav.push({ text: `${page + 1} / ${totalPages}`, callback_data: "noop" });
+      if (page < totalPages - 1) nav.push({ text: "▶️", callback_data: `admin_users_${page + 1}` });
 
-    if (userSearches.length === 0) {
       await bot.sendMessage(chatId,
-        `📚 *لم تحمّل أي كتاب بعد*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n_اكتب اسم أي كتاب تريده وسأبحث عنه فوراً_`,
-        { parse_mode: "Markdown" });
+        `👥 *المستخدمون* (${total} إجمالي)\n` +
+        `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+        lines.join("\n"),
+        {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            nav.length > 0 ? nav : [],
+            [
+              { text: "🔍 بحث بـ ID",       callback_data: "admin_user_search" },
+              { text: "🔙 لوحة التحكم",     callback_data: "admin_panel"       },
+            ],
+          ].filter(r => r.length > 0)},
+        }
+      ).catch(() => {});
       return;
     }
-    const nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣"];
-    let msg = `📚 *آخر كتبك*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n`;
-    userSearches.forEach((s, i) => { msg += `${nums[i] ?? `${i+1}.`} ${escMd(s.query)}\n`; });
-    msg += `\n_اكتب اسم أي كتاب لإعادة تحميله_`;
-    await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
-  } catch {
-    await bot.sendMessage(chatId, "❌ خطأ في جلب السجل");
-  }
-}
 
-// FIX BUG-20: CSV injection — أسماء الكتب التي تبدأ بـ = + - @ قد تُفعّل صيغ Excel
-// الحل: نُحيط كل خلية بعلامات اقتباس مزدوجة ونُهرّب الاقتباسات الداخلية
-function csvCell(value: string): string {
-  // إذا كانت القيمة تبدأ بحرف يُفعّل Formula Injection في Excel — نُضيف مسافة
-  const dangerous = /^[=+\-@\t\r]/.test(value);
-  const sanitized = dangerous ? ` ${value}` : value;
-  // نُحيط بعلامات اقتباس ونُضاعف أي اقتباسات داخلية
-  return `"${sanitized.replace(/"/g, '""').replace(/\n/g, " ")}"`;
-}
-
-async function exportCSV(bot: TelegramBot, chatId: number): Promise<void> {
-  try {
-    const recent = await storage.getRecentSearches(1000);
-    const counts = new Map<string, { sent: number; found: number }>();
-    for (const s of recent) {
-      const e = counts.get(s.query) || { sent: 0, found: 0 };
-      if (s.pdfSent)   e.sent++;
-      if (s.bookFound) e.found++;
-      counts.set(s.query, e);
+    // ── بحث عن مستخدم بـ ID ─────────────────────────────
+    if (data === "admin_user_search") {
+      _pendingUserSearch.add(userId);
+      await bot.sendMessage(chatId,
+        `🔍 *بحث عن مستخدم*\n\n_أرسل الـ Telegram ID (أرقام فقط):_`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      return;
     }
-    // FIX BUG-20: استخدام csvCell لتأمين كل خلية
-    let csv = "الكتاب,مرات_الإرسال,مرات_الوجود\n";
-    [...counts.entries()].sort((a, b) => b[1].sent - a[1].sent).forEach(([q, d]) => {
-      csv += `${csvCell(q)},${d.sent},${d.found}\n`;
-    });
-    const buf = Buffer.from("\uFEFF" + csv, "utf8");
-    await bot.sendDocument(
-      chatId, buf,
-      { caption: `📊 *إحصائيات الكتب* — ${counts.size} كتاب`, parse_mode: "Markdown" },
-      { filename: `stats_${new Date().toISOString().slice(0, 10)}.csv`, contentType: "text/csv" }
-    );
-    L.adminAction(chatId.toString(), `CSV exported (${counts.size} books)`);
+
+    // ── toggle premium لمستخدم محدد ─────────────────────
+    if (data.startsWith("admin_user_prem:")) {
+      const targetId = data.split(":")[1] ?? "";
+      if (!targetId) return;
+      const wasPrem = await isPremium(targetId);
+      await setPremium(targetId, !wasPrem);
+      L.adminAction(userId, `${wasPrem ? "revoke" : "grant"} premium → ${targetId}`);
+      await bot.sendMessage(chatId,
+        `✅ ${wasPrem ? "تم إلغاء Premium من" : "تم منح Premium لـ"} \`${targetId}\``,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      await showUserDetail(bot, chatId, targetId);
+      return;
+    }
+
+    // ── العودة للوحة الرئيسية ────────────────────────────
+    if (data === "admin_panel") {
+      await sendAdminPanel(bot, chatId);
+      return;
+    }
+
+    switch (data) {
+
+      // ── إحصاءات تفصيلية ─────────────────────────────
+      case "admin_stats": {
+        const [today, total, topBooks] = await Promise.all([
+          getDailyStats(),
+          getTotalStats(),
+          getTopBooks(5),
+        ]);
+        const weekData  = await getWeeklyStats();
+        const weekLines = Object.entries(weekData)
+          .map(([day, s]) =>
+            `◦ ${day}: طلبات *${s.requests ?? 0}* | نجح *${s.found ?? 0}* | تحميل *${s.downloads ?? 0}*`
+          ).join("\n");
+        const topLines = topBooks.map((b, i) =>
+          `${i + 1}\\. _${escMd(b.book.slice(0, 45))}_ *(${b.count})*`
+        ).join("\n");
+
+        await bot.sendMessage(chatId,
+          `📊 *إحصاءات تفصيلية*\n` +
+          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `*اليوم:*\n` +
+          `◦ طلبات: *${today.requests??0}* | نجح: *${today.found??0}*\n` +
+          `◦ تحميل: *${today.downloads??0}* | كاش: *${today.cache_hits??0}*\n\n` +
+          `*الإجمالي:*\n` +
+          `◦ تحميلات: *${total.downloads??0}* | بحث: *${total.searches??0}*\n\n` +
+          `*آخر 7 أيام:*\n${weekLines || "_لا بيانات_"}\n\n` +
+          `*أكثر الكتب طلباً:*\n${topLines || "_لا بيانات_"}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [
+              [{ text: "📤 تصدير CSV",    callback_data: "admin_export_csv" }],
+              [{ text: "🔙 لوحة التحكم", callback_data: "admin_panel"      }],
+            ]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── أكثر الكتب تحميلاً ───────────────────────────
+      case "admin_top": {
+        const top = await getTopBooks(20);
+        if (!top.length) {
+          await bot.sendMessage(chatId, `🏆 لا توجد بيانات بعد.`).catch(() => {});
+          break;
+        }
+        const medals = ["🥇","🥈","🥉"];
+        const lines  = top.map((b, i) =>
+          `${medals[i] ?? `${i + 1}\\.`} _${escMd(b.book.slice(0, 50))}_ *(${b.count})*`
+        ).join("\n");
+        await bot.sendMessage(chatId,
+          `🏆 *أكثر 20 كتاباً تحميلاً*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [
+              [{ text: "📤 تصدير CSV",    callback_data: "admin_export_csv" }],
+              [{ text: "🔙 لوحة التحكم", callback_data: "admin_panel"      }],
+            ]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── الطابور ──────────────────────────────────────
+      case "admin_queue": {
+        const qs      = await getQueueStats();
+        const dlqJobs = await getDLQJobs(5);
+        const dlqLines = dlqJobs.map((j) =>
+          `◦ _${escMd(j.bookName.slice(0, 40))}_ — ${j.retries} retry`
+        ).join("\n");
+        await bot.sendMessage(chatId,
+          `📋 *الطابور*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `⚡ High: *${qs.highQueue}*\n` +
+          `📋 Normal: *${qs.normalQueue}*\n` +
+          `💀 DLQ: *${qs.dlqSize}*\n` +
+          `🔄 نشط: *${qs.totalActiveJobs}*\n\n` +
+          `${dlqLines ? `*آخر DLQ:*\n${dlqLines}` : "_DLQ فارغ_ ✅"}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [
+              [{ text: "🗑️ مسح DLQ",     callback_data: "admin_clear_dlq" }],
+              [{ text: "🔙 لوحة التحكم", callback_data: "admin_panel"     }],
+            ]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      case "admin_clear_dlq":
+        await clearDLQ();
+        L.adminAction(userId, "DLQ cleared");
+        await bot.sendMessage(chatId, `✅ تم مسح DLQ بنجاح.`).catch(() => {});
+        break;
+
+      // ── Blacklist ────────────────────────────────────
+      case "admin_blacklist": {
+        const bl = await blacklistStats();
+        await bot.sendMessage(chatId,
+          `🚫 *Blacklist*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `◦ إجمالي: *${bl.total}* رابط محجوب`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [
+              [{ text: "🗑️ مسح الـ Blacklist", callback_data: "admin_clear_blacklist" }],
+              [{ text: "🔙 لوحة التحكم",        callback_data: "admin_panel"           }],
+            ]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      case "admin_clear_blacklist":
+        await clearBlacklist();
+        L.adminAction(userId, "blacklist cleared");
+        await bot.sendMessage(chatId, `✅ تم مسح الـ Blacklist بنجاح.`).catch(() => {});
+        break;
+
+      // ── Cache ────────────────────────────────────────
+      case "admin_cache": {
+        const cStats = await storage.getCacheStats();
+        await bot.sendMessage(chatId,
+          `💾 *الكاش*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `◦ مخزّن: *${cStats.totalCached}* كتاب\n` +
+          `◦ خُدم من الكاش: *${cStats.totalServed}* مرة`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[
+              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+            ]]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── المصادر ──────────────────────────────────────
+      case "admin_sources": {
+        const srcStats = await getSourceStats();
+        const lines = srcStats.slice(0, 13).map((s) => {
+          const tot    = s.ok + s.fail;
+          const rate   = tot > 0 ? Math.round((s.ok / tot) * 100) : 0;
+          const emoji  = rate >= 70 ? "🟢" : rate >= 40 ? "🟡" : "🔴";
+          const domain = s.domain.replace("www.", "").slice(0, 20);
+          return `${emoji} _${escMd(domain)}_ — ${rate}% (${s.ok}✅ ${s.fail}❌)`;
+        }).join("\n");
+        await bot.sendMessage(chatId,
+          `📡 *أداء المصادر*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `${lines || "_لا بيانات بعد_"}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[
+              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+            ]]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── Funnel ───────────────────────────────────────
+      case "admin_funnel": {
+        const f        = await getFunnelStats();
+        const total    = f.total        ?? 0;
+        const found    = f.search_found ?? 0;
+        const success  = f.send_success ?? 0;
+        const direct   = f.send_direct  ?? 0;
+        const local    = f.send_local   ?? 0;
+        const foundPct   = total > 0 ? Math.round((found   / total) * 100) : 0;
+        const successPct = found > 0 ? Math.round((success / found) * 100) : 0;
+        await bot.sendMessage(chatId,
+          `🔭 *Funnel اليوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `◦ إجمالي طلبات: *${total}*\n` +
+          `◦ وجد نتائج: *${found}* (${foundPct}%)\n` +
+          `◦ أُرسل بنجاح: *${success}* (${successPct}% من الموجود)\n\n` +
+          `*طريقة الإرسال:*\n` +
+          `◦ Direct: *${direct}*\n` +
+          `◦ Local: *${local}*`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[
+              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+            ]]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── Maintenance ──────────────────────────────────
+      case "admin_toggle_maintenance": {
+        const isMaint = await redis.get(MAINTENANCE_KEY).catch(() => null);
+        if (isMaint === "1") {
+          await redis.del(MAINTENANCE_KEY);
+          L.adminAction(userId, "maintenance OFF");
+          await bot.sendMessage(chatId, `✅ تم إيقاف وضع الصيانة.`).catch(() => {});
+        } else {
+          await redis.set(MAINTENANCE_KEY, "1");
+          L.adminAction(userId, "maintenance ON");
+          await bot.sendMessage(chatId, `🔧 تم تفعيل وضع الصيانة.`).catch(() => {});
+        }
+        break;
+      }
+
+      // ── بث جماعي ────────────────────────────────────
+      case "admin_broadcast":
+        _pendingBroadcast.set(userId, { step: "awaiting_broadcast" });
+        await bot.sendMessage(chatId,
+          `📢 *بث جماعي*\n\n_أرسل نص الرسالة التي تريد بثها:_\n_يدعم Markdown ✅_`,
+          { parse_mode: "Markdown" }
+        ).catch(() => {});
+        break;
+
+      case "admin_broadcast_confirm": {
+        const pending = _pendingBroadcast.get(userId);
+        _pendingBroadcast.delete(userId);
+        if (!pending?.draft) {
+          await bot.sendMessage(chatId, `❌ لا يوجد نص للبث.`).catch(() => {});
+          break;
+        }
+        (process as NodeJS.EventEmitter).emit("dashboard:broadcast", {
+          message:    pending.draft,
+          parse_mode: "Markdown",
+        });
+        L.adminAction(userId, `broadcast: ${pending.draft.slice(0, 50)}`);
+        await bot.sendMessage(chatId, `✅ تم إرسال البث.`).catch(() => {});
+        break;
+      }
+
+      case "admin_broadcast_cancel":
+        _pendingBroadcast.delete(userId);
+        await bot.sendMessage(chatId, `❌ تم إلغاء البث.`).catch(() => {});
+        break;
+
+      // ── تصدير CSV ───────────────────────────────────
+      case "admin_export_csv": {
+        const top = await getTopBooks(50);
+        const csv = ["كتاب,تحميلات", ...top.map((b) => `"${b.book}",${b.count}`)].join("\n");
+        await bot.sendDocument(chatId,
+          Buffer.from(csv, "utf-8"),
+          { caption: "📊 أكثر الكتب تحميلاً" },
+          { filename: `kholasa_top_books_${new Date().toISOString().split("T")[0]}.csv`, contentType: "text/csv" }
+        ).catch(() => {});
+        break;
+      }
+
+      default:
+        L.debug("admin", `Unknown admin callback: ${data}`);
+    }
+
   } catch (e) {
-    await bot.sendMessage(chatId, `❌ خطأ في التصدير: ${String(e).slice(0, 200)}`);
+    L.error("admin", `handleAdminCallback error`, { data, err: String(e).slice(0, 100) });
+    await bot.sendMessage(chatId, `⚠️ خطأ مؤقت: ${String(e).slice(0, 60)}`).catch(() => {});
   }
 }
 
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+// ── buildHistoryMessage ───────────────────────
+export async function buildHistoryMessage(
+  bot: TelegramBot, chatId: number, userId: string
+): Promise<void> {
+  try {
+    const history = await storage.getUserSearchHistory(userId, 7);
+    if (!history.length) {
+      await bot.sendMessage(chatId,
+        `📚 *سجل كتبك*\n\n_لم تطلب أي كتاب بعد!_\n\nابحث عن كتاب وسيظهر هنا.`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      return;
+    }
+    const lines = history.map((h, i) =>
+      `${i + 1}\\. _${escMd(h.query.slice(0, 55))}_`
+    ).join("\n");
+    await bot.sendMessage(chatId,
+      `📚 *آخر كتبك*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[
+          { text: "🏠 القائمة", callback_data: "main_menu" },
+        ]]},
+      }
+    ).catch(() => {});
+  } catch (e) {
+    L.error("admin", `buildHistoryMessage error`, { err: String(e).slice(0, 100) });
+    await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
+  }
 }
 
-export { buildWelcome } from "./ui.js";
+// ── buildTopBooksMessage ──────────────────────
+export async function buildTopBooksMessage(
+  bot: TelegramBot, chatId: number
+): Promise<void> {
+  try {
+    const top = await getTopBooks(15);
+    if (!top.length) {
+      await bot.sendMessage(chatId,
+        `🏆 *الأكثر تحميلاً*\n\n_لا توجد بيانات بعد!_`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+      return;
+    }
+    const medals = ["🥇","🥈","🥉"];
+    const lines  = top.map((b, i) =>
+      `${medals[i] ?? `${i + 1}\\.`} _${escMd(b.book.slice(0, 55))}_`
+    ).join("\n");
+    await bot.sendMessage(chatId,
+      `🏆 *الأكثر تحميلاً*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[
+          { text: "🏠 القائمة", callback_data: "main_menu" },
+        ]]},
+      }
+    ).catch(() => {});
+  } catch (e) {
+    L.error("admin", `buildTopBooksMessage error`, { err: String(e).slice(0, 100) });
+  }
+}
