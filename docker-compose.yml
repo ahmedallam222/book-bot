@@ -56,6 +56,12 @@ services:
       - "5000:5000"
     volumes:
       - bot_temp:/app/temp
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'node dist/index.cjs' >/dev/null && wget -q --spider --timeout=5 https://api.telegram.org"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
 
 volumes:
   db_data:
