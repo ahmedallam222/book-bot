@@ -133,29 +133,42 @@ export function buildFailMessage(
 ): string {
   if (results.length === 0) {
     return (
-      `😔 *لم أجد روابط قابلة للتحميل*\n` +
+      `😔 *لم أجد PDF قابل للإرسال*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
       `_"${escMd(bookName.slice(0, 52))}"_\n\n` +
-      `💡 جرّب صياغة مختلفة أو أضف اسم المؤلف`
+      `جرّب العنوان فقط أو أضف اسم المؤلف.`
     );
   }
 
   const PAGE_SIZE  = 5;
   const totalPages = Math.ceil(results.length / PAGE_SIZE);
   const slice      = results.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const directCount = results.filter((r) => r.access === "direct_pdf").length;
+  const downloadPageCount = results.filter((r) => r.access === "download_page").length;
+  const protectedCount = results.filter((r) => r.access === "protected_page").length;
 
   let msg =
-    `🔗 *${results.length} رابط مباشر*\n` +
+    `🔎 *لا يوجد PDF مباشر صالح للإرسال*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
     `_"${escMd(bookName.slice(0, 52))}"_\n`;
 
   if (totalPages > 1) msg += `_صفحة ${page + 1} من ${totalPages}_\n`;
-  msg += `\n_لم ينجح الإرسال التلقائي — اختر رابطاً مباشراً:_\n\n`;
+  msg += `\n`;
+  if (directCount > 0) msg += `• PDF فشل: ${directCount}\n`;
+  if (downloadPageCount > 0) msg += `• تحميل محتمل: ${downloadPageCount}\n`;
+  if (protectedCount > 0) msg += `• مدفوع/قراءة فقط: ${protectedCount}\n`;
+  msg += `\n_هذه نتائج معاينة وليست تحميلًا مضمونًا:_\n\n`;
 
   slice.forEach((r, i) => {
     const rawUrl  = r.directPdfUrl || r.url;
     const safeUrl = rawUrl.replace(/\)/g, "%29").replace(/\]/g, "%5D");
-    const label   = r.directPdfUrl ? "PDF" : "صفحة";
+    const labelByAccess: Record<BookResult["access"], string> = {
+      direct_pdf: "PDF فشل",
+      download_page: "تحميل محتمل",
+      catalog_page: "معلومات",
+      protected_page: "مدفوع",
+    };
+    const label   = labelByAccess[r.access ?? (r.directPdfUrl ? "direct_pdf" : "catalog_page")];
     const star    = (r._score && r._score > 0.5) ? " ⭐" : "";
     const num     = page * PAGE_SIZE + i + 1;
     msg += `${num}\\. ${r.source.emoji} [${escMd(r.title.slice(0, 38))}](${safeUrl}) _${label}${star}_\n`;
@@ -163,4 +176,3 @@ export function buildFailMessage(
 
   return msg;
 }
-
