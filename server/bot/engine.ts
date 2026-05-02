@@ -126,8 +126,37 @@ const CATALOG_ACCESS_PATTERNS = [
   /نبذة عن|وصف الكتاب|مراجعة|ملخص|تفاصيل الكتاب|بوابة الناشرين|الناشرين والمؤلفين/i,
 ];
 
+const NOISY_PREVIEW_DOMAINS = new Set([
+  "facebook.com",
+  "scribd.com",
+  "t.me",
+  "telegram.me",
+  "telegram.org",
+  "wattpad.com",
+]);
+
 function isSlowDomain(url: string): boolean {
   return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
+}
+
+function hostnameFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isNoisyPreviewDomain(url: string): boolean {
+  const host = hostnameFromUrl(url);
+  if (!host) return false;
+  return [...NOISY_PREVIEW_DOMAINS].some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function isConfiguredSourceDomain(url: string): boolean {
+  const host = hostnameFromUrl(url);
+  if (!host) return false;
+  return SOURCES.some((source) => host === source.domain || host.endsWith(`.${source.domain}`));
 }
 
 // ══════════════════════════════════════════════
@@ -237,6 +266,11 @@ async function unifiedSearch(
           };
         }
         return makeResult(doc, srcConfig, idx);
+      })
+      .filter((result) => {
+        if (result.access !== "catalog_page") return true;
+        if (!isConfiguredSourceDomain(result.url)) return false;
+        return !isNoisyPreviewDomain(result.url);
       });
 
   } catch (e: any) {

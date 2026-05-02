@@ -32,6 +32,7 @@ function parseCacheKey(input: string): string {
 // ── STEP 1: Local regex cleaner ───────────────────────────────
 
 const NOISE_PREFIXES: RegExp[] = [
+  /^(?:بوت|بوتي|البوت|bot)\s+/i,
   /^(أريد|اريد)\s+(كتاب|كتابه?|مؤلف|ملف|pdf)\s+/i,
   /^(ابحث|بحث|ابحثلي|بحثلي|جيبلي|جيب لي|جيب)\s+(عن\s+)?(كتاب\s+)?/i,
   /^(ممكن|قدر|تقدر)\s+(ت?جيب|ت?رسل|ت?شاركني|ت?حمل)\s+(لي\s+|لنا\s+)?(كتاب\s+)?/i,
@@ -53,10 +54,18 @@ function localCleanBookName(input: string): string | null {
   let cleaned = input.trim();
   let changed = false;
 
-  for (const pattern of NOISE_PREFIXES) {
-    const before = cleaned;
-    cleaned = cleaned.replace(pattern, "").trim();
-    if (cleaned !== before) { changed = true; break; }
+  let prefixChanged = true;
+  while (prefixChanged) {
+    prefixChanged = false;
+    for (const pattern of NOISE_PREFIXES) {
+      const before = cleaned;
+      cleaned = cleaned.replace(pattern, "").trim();
+      if (cleaned !== before) {
+        changed = true;
+        prefixChanged = true;
+        break;
+      }
+    }
   }
 
   for (const pattern of NOISE_SUFFIXES) {
