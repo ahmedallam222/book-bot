@@ -1,7 +1,7 @@
 import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES, INTL_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
-import { normalizeForCache } from "./text.js";
+import { normalizeArabic, normalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import {
@@ -108,6 +108,22 @@ interface FirecrawlSearchResponse {
   data?:   FirecrawlDoc[];
   error?:  string;
 }
+
+type ResultAccess = BookResult["access"];
+
+const PROTECTED_ACCESS_PATTERNS = [
+  /شراء|اشتر|اشتري|سعر|أضف إلى السلة|اضف الى السلة|السلة|الدفع|مدفوع|غير مجاني|نفدت الكمية/i,
+  /buy now|add to cart|checkout|price|paid|subscription|subscribe|premium|out of stock/i,
+  /حقوق النشر|الكتب المرخصة|المرخصة والقانونية|قراءة ومراجعة|قراءة أونلاين|اقرأ أونلاين/i,
+];
+
+const DOWNLOAD_ACCESS_PATTERNS = [
+  /تحميل\s+(?:كتاب|رواية|ملف)?|تنزيل|رابط مباشر|تحميل مباشر|download|download book|free pdf|pdf مجانا/i,
+];
+
+const CATALOG_ACCESS_PATTERNS = [
+  /نبذة عن|وصف الكتاب|مراجعة|ملخص|تفاصيل الكتاب|بوابة الناشرين|الناشرين والمؤلفين/i,
+];
 
 // ══════════════════════════════════════════════
 // Unified Search — call واحدة لمجموعة domains
@@ -235,6 +251,7 @@ function makeResult(doc: FirecrawlDoc, source: SourceConfig, idx: number): BookR
   const url          = doc.url || doc.metadata?.sourceURL || "";
   const directPdfUrl = isPdfUrl(url) ? url : extractPdfLink(doc.markdown || "", url, source);
   const title        = doc.metadata?.title?.replace(/\s*[-|–—].*$/, "").trim() || url;
+  const access       = classifyAccess(doc, directPdfUrl);
 
   return {
     id:           `${source.domain}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -242,8 +259,47 @@ function makeResult(doc: FirecrawlDoc, source: SourceConfig, idx: number): BookR
     url,
     directPdfUrl,
     source,
-    _score: directPdfUrl ? 1 : 0.5,
+    access: access.kind,
+    accessReason: access.reason,
+    _score: scoreResult(doc, directPdfUrl, access.kind),
   };
+}
+
+function classifyAccess(doc: FirecrawlDoc, directPdfUrl: string | null): { kind: ResultAccess; reason: string } {
+  if (directPdfUrl) return { kind: "direct_pdf", reason: "pdf_link" };
+
+  const haystack = [
+    doc.url,
+    doc.metadata?.title,
+    doc.metadata?.description,
+    doc.markdown?.slice(0, 12_000),
+  ].filter(Boolean).join("\n");
+
+  if (PROTECTED_ACCESS_PATTERNS.some((p) => p.test(haystack))) {
+    return { kind: "protected_page", reason: "paid_or_read_only_signals" };
+  }
+  if (DOWNLOAD_ACCESS_PATTERNS.some((p) => p.test(haystack))) {
+    return { kind: "download_page", reason: "download_signals" };
+  }
+  if (CATALOG_ACCESS_PATTERNS.some((p) => p.test(haystack))) {
+    return { kind: "catalog_page", reason: "catalog_signals" };
+  }
+  return { kind: "catalog_page", reason: "no_direct_pdf" };
+}
+
+function scoreResult(doc: FirecrawlDoc, directPdfUrl: string | null, access: ResultAccess): number {
+  const accessScore: Record<ResultAccess, number> = {
+    direct_pdf: 1,
+    download_page: 0.7,
+    catalog_page: 0.35,
+    protected_page: 0.1,
+  };
+  const titleText = `${doc.metadata?.title || ""} ${doc.url || ""}`;
+  const normalizedTitle = normalizeArabic(titleText)
+    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ")
+    .toLowerCase();
+  const urlScore = directPdfUrl ? urlFilenameRelevance(normalizedTitle, directPdfUrl) : 0.5;
+  return Math.max(0.05, Math.min(1, accessScore[access] * 0.85 + urlScore * 0.15));
 }
 
 /**
@@ -434,9 +490,10 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
       r.directPdfUrl ? isBlacklisted(r.directPdfUrl) : Promise.resolve(false)
     )
   );
-  const filtered = allResults.filter((_, i) =>
-    !(blChecks[i].status === "fulfilled" && blChecks[i].value)
-  );
+  const filtered = allResults.filter((_, i) => {
+    const check = blChecks[i];
+    return !(check.status === "fulfilled" && check.value);
+  });
 
   // ── إزالة المكررات ────────────────────────────
   const seenUrls = new Set<string>();
@@ -446,6 +503,8 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     seenUrls.add(key);
     return true;
   });
+
+  unique.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
   L.info("engine", `Search "${query}": ${unique.length} unique results (ar:${arabicResults.length} intl:${intlResults.length})`);
 
