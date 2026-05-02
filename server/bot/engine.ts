@@ -159,11 +159,12 @@ async function unifiedSearch(
 ): Promise<BookResult[]> {
   if (!FIRECRAWL_API_KEY || activeDomains.length === 0) return [];
 
-  const fcQuery = `${query} pdf`;
+  const sitePart = activeDomains.map((d) => `site:${d}`).join(" OR ");
+  const fcQuery  = `(${sitePart}) ${query} pdf`;
 
   const body: Record<string, unknown> = {
     query:    fcQuery,
-    limit:    5,
+    limit:    isArabic ? Math.min(activeDomains.length * 3, 20) : 5,
     country:  "SA",
     location: "Saudi Arabia",
   };
