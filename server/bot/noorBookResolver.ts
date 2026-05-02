@@ -28,7 +28,6 @@
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import * as fs from "fs/promises";
 import { L } from "./logger.js";
-import { UA } from "./config.js";
 
 let _browserPromise: Promise<Browser> | null = null;
 let _browserCloseTimer: NodeJS.Timeout | null = null;
@@ -59,15 +58,19 @@ async function getBrowser(): Promise<Browser> {
       return pw.chromium.launch({
         executablePath: exec,
         headless: true,
+        // ملاحظات:
+        //   --headless=new جوهري لتجاوز CF — الوضع القديم (--headless
+        //   بدون =new) بيبعت fingerprint مختلف و CF بيرفع challenge.
+        //   وضع new بيستخدم نفس renderer بتاع Chrome العادي.
+        //   --disable-blink-features=AutomationControlled بيخفي
+        //   navigator.webdriver = true اللي CF بيتفحصه أول حاجة.
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-blink-features=AutomationControlled",
           "--disable-gpu",
-          "--no-zygote",
-          "--single-process",
-          "--disable-features=IsolateOrigins,site-per-process",
+          "--headless=new",
         ],
       });
     })().catch((e) => {
@@ -105,14 +108,23 @@ export async function downloadNoorBookPdf(
   try {
     const browser = await getBrowser();
     context = await browser.newContext({
-      userAgent: UA,
+      // UA لازم يبقى Chrome جديد فعلاً، مش البوت UA التاني (اللي
+      // بستخدمو في HTTP fetches). CF بيفحص UA + JS fingerprint.
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       locale: "ar-SA",
       viewport: { width: 1280, height: 800 },
       acceptDownloads: true,
-      // CF-friendly: no obvious automation hints
       extraHTTPHeaders: {
         "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
       },
+    });
+
+    // إلغاء علامة navigator.webdriver قبل أي script في الصفحة بيتنفّذ.
+    // جوهري لـ CF — لو webdriver=true بيرفع challenge فوراً، ولو undefined
+      // بيعدي بدون challenge أصلاً.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
 
     const page: Page = await context.newPage();
