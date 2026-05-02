@@ -1,4 +1,8 @@
-# Testing book-bot production runtime
+---
+name: testing-book-bot
+description: Test book-bot production health, source analytics, and PDF ranking/search quality. Use when validating Telegram book-bot runtime, search/result quality, source auto-disable, or deployment health.
+---
+# Testing book-bot production runtime and search quality
 
 ## When to use
 
@@ -6,7 +10,7 @@ Use this skill when testing the Telegram book-bot production deployment for sear
 
 ## Devin Secrets Needed
 
-- `FIRECRAWL_API_KEY` — needed for local/dev Firecrawl-backed searches if running the bot outside production.
+- `FIRECRAWL_API_KEY` — needed for real local/dev Firecrawl-backed searches if running the bot outside production. Not needed for deterministic mocked ranking tests.
 - `AWS_UBUNTU_SSH_PRIVATE_KEY` or an equivalent SSH key provisioned at `$HOME/.ssh/devin_aws_ubuntu_key` — needed to access the production Ubuntu server.
 
 Do not print production `.env` values. Production runtime secrets live in `/home/ubuntu/book-bot/.env` on the server.
@@ -98,6 +102,35 @@ docker compose logs --since="$START_TS" bot 2>&1 | grep -E 'uncaughtException|Fi
 ```
 
 Expected: no matches after test recovery. Historical 409 lines may exist if a previous session accidentally started a second polling process; final state should still show one actual Node process and no recent 409s.
+
+## Deterministic local ranking test
+
+Use this when validating search ranking logic without Telegram UI, production, or real Firecrawl calls.
+
+1. Start an isolated Redis container on a non-default port, for example:
+
+```bash
+docker run --rm -d --name book-bot-test-redis -p 6389:6379 redis:7-alpine
+```
+
+2. Run a `tsx` harness with `REDIS_URL=redis://127.0.0.1:6389 FIRECRAWL_API_KEY=dummy`. Mock `globalThis.fetch` before importing `server/bot/engine.ts`; `engine.ts` reads `FIRECRAWL_API_KEY` at import time.
+
+3. For ranking tests, use two sources from the same unified-search group so old stable sorting cannot pass by incidental merge order. For Arabic ranking, `kutub-pdf.net` and `hindawi.org` are both `isArabic: true`.
+
+4. Seed source stats so the weak source is low quality but not auto-disabled. The default auto-disable cutoff is `SOURCE_AUTO_DISABLE_MAX_RATE=0.15`, so use a weak rate above 15%, e.g. `kutub-pdf.net ok=2 fail=8` (20%). A `1 ok / 9 fail` seed would auto-disable the source and test filtering instead of ranking.
+
+5. Make the mocked Arabic Firecrawl response return the bad URL first, then the good matching URL second, for example:
+
+- Bad first: `https://www.kutub-pdf.net/TT-79.pdf`
+- Good second: `https://www.hindawi.org/books/العقيدة-الواسطية.pdf`
+
+Expected for `searchAllSources("العقيدة الواسطية")`: exactly two results, with the Hindawi matching PDF first and `TT-79.pdf` second. Also verify `urlFilenameRelevance` directly for matching filename (`1`), unrelated filename (`0`), and a generic query with `?title=` (`1`).
+
+6. Always stop the Redis container after the test:
+
+```bash
+docker stop book-bot-test-redis
+```
 
 ## Reporting limitations
 
