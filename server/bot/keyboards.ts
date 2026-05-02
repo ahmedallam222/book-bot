@@ -143,19 +143,32 @@ export function buildFailMessage(
   const PAGE_SIZE  = 5;
   const totalPages = Math.ceil(results.length / PAGE_SIZE);
   const slice      = results.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const directCount = results.filter((r) => r.access === "direct_pdf").length;
+  const downloadPageCount = results.filter((r) => r.access === "download_page").length;
+  const protectedCount = results.filter((r) => r.access === "protected_page").length;
 
   let msg =
-    `🔗 *${results.length} رابط مباشر*\n` +
+    `🔎 *راجعت ${results.length} نتيجة ولم أجد PDF صالحاً للإرسال*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
     `_"${escMd(bookName.slice(0, 52))}"_\n`;
 
   if (totalPages > 1) msg += `_صفحة ${page + 1} من ${totalPages}_\n`;
-  msg += `\n_لم ينجح الإرسال التلقائي — اختر رابطاً مباشراً:_\n\n`;
+  msg += `\n`;
+  if (directCount > 0) msg += `• ${directCount} رابط PDF فشل التحقق أو الإرسال\n`;
+  if (downloadPageCount > 0) msg += `• ${downloadPageCount} صفحة تبدو قابلة للتحميل لكنها لم تعطِ ملف PDF مباشر\n`;
+  if (protectedCount > 0) msg += `• ${protectedCount} صفحة تبدو مدفوعة/قراءة فقط\n`;
+  msg += `\n_أعرض لك النتائج للمعاينة فقط — ليست روابط تحميل مضمونة:_\n\n`;
 
   slice.forEach((r, i) => {
     const rawUrl  = r.directPdfUrl || r.url;
     const safeUrl = rawUrl.replace(/\)/g, "%29").replace(/\]/g, "%5D");
-    const label   = r.directPdfUrl ? "PDF" : "صفحة";
+    const labelByAccess: Record<BookResult["access"], string> = {
+      direct_pdf: "PDF غير مؤكد",
+      download_page: "صفحة تحميل",
+      catalog_page: "صفحة معلومات",
+      protected_page: "مدفوع/قراءة فقط",
+    };
+    const label   = labelByAccess[r.access ?? (r.directPdfUrl ? "direct_pdf" : "catalog_page")];
     const star    = (r._score && r._score > 0.5) ? " ⭐" : "";
     const num     = page * PAGE_SIZE + i + 1;
     msg += `${num}\\. ${r.source.emoji} [${escMd(r.title.slice(0, 38))}](${safeUrl}) _${label}${star}_\n`;
@@ -163,4 +176,3 @@ export function buildFailMessage(
 
   return msg;
 }
-

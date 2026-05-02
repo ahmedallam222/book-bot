@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import type { QueueJob, QueueJobStatus } from "./types.js";
@@ -327,7 +328,7 @@ export async function clearDLQ(): Promise<void> {
 // ── Crash Recovery ────────────────────────────
 // يُستدعى عند بدء الـ Workers — يُعيد jobs العالقة في "processing" للقائمة
 // (تحدث عند crash أو restart مفاجئ أثناء معالجة job)
-export async function recoverStuckJobs(bot?: import("node-telegram-bot-api").default): Promise<void> {
+export async function recoverStuckJobs(bot?: TelegramBot): Promise<void> {
   try {
     const allJobIds = await redis.hkeys(QUEUE_JOBS_HASH);
     if (allJobIds.length === 0) return;
