@@ -27,7 +27,23 @@ FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
-RUN apk add --no-cache tini procps wget
+# Chromium + خطوط عربية لازمين لـ noor-book Playwright resolver:
+#   - chromium / chromium-swiftshader: المتصفح + GPU stub (للـ headless)
+#   - فونتات: Noto Naskh Arabic + DejaVu + freefont = ضمان عرض النصوص
+#     العربية في الـ JS challenge وفي صفحة الكتاب
+#   - nss + freetype + harfbuzz + ca-certificates: dependencies لازمة
+#     لـ chromium في Alpine
+RUN apk add --no-cache \
+      tini procps wget \
+      chromium chromium-swiftshader \
+      nss freetype harfbuzz ca-certificates \
+      font-noto font-noto-arabic ttf-freefont \
+      font-noto-cjk dbus
+
+# نخلي playwright-core يعرف يستخدم chromium المثبت بدل ما ينزل واحد جديد
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/dev/null
+ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
