@@ -1,7 +1,7 @@
 import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES, INTL_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
-import { getAutoDisabledSourceDomains } from "./analytics.js";
+import { getSourceStats } from "./analytics.js";
 import { normalizeArabic, normalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
@@ -341,6 +341,22 @@ function scoreResult(doc: FirecrawlDoc, directPdfUrl: string | null, access: Res
   return Math.max(0.05, Math.min(1, accessScore[access] * 0.85 + urlScore * 0.15));
 }
 
+function resultDomain(result: BookResult): string {
+  try {
+    return new URL(result.directPdfUrl || result.url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return result.source.domain.toLowerCase();
+  }
+}
+
+function rankResult(result: BookResult, query: string, srcRateMap: Map<string, number>): number {
+  const domain = resultDomain(result);
+  const sourceRate = srcRateMap.get(domain) ?? srcRateMap.get(result.source.domain) ?? 0.5;
+  const targetUrl = result.directPdfUrl || result.url;
+  const relevance = urlFilenameRelevance(query, targetUrl);
+  return (result._score ?? 0) * 0.45 + relevance * 0.35 + sourceRate * 0.2;
+}
+
 /**
  * extractPdfLink — استخراج رابط PDF من markdown المُرجَع
  *
@@ -486,7 +502,9 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     SOURCES.map(() => [null, null])
   )) as [Error | null, string | null][];
 
-  const autoDisabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
+  const srcStats = await getSourceStats().catch(() => []);
+  const srcRateMap = new Map(srcStats.map((s) => [s.domain, s.ok / Math.max(s.ok + s.fail, 1)]));
+  const autoDisabledDomains = new Set(srcStats.filter((s) => s.autoDisabled).map((s) => s.domain));
 
   const enabledDomains = new Set(
     SOURCES
@@ -549,7 +567,7 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     return true;
   });
 
-  unique.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+  unique.sort((a, b) => rankResult(b, query, srcRateMap) - rankResult(a, query, srcRateMap));
 
   L.info("engine", `Search "${query}": ${unique.length} unique results (ar:${arabicResults.length} intl:${intlResults.length})`);
 

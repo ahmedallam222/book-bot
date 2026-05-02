@@ -1,4 +1,4 @@
-import { eq, desc, sql, sum, count, and } from "drizzle-orm";
+import { eq, desc, sql, sum, count, and, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import {
@@ -6,6 +6,7 @@ import {
   type User, type InsertUser, type SearchLog, type InsertSearchLog,
   type CachedBook, type InsertCachedBook, type DailyLimit, type InsertDailyLimit,
 } from "@shared/schema";
+import { normalizeBookCacheKey } from "./bot/text.js";
 
 // ══════════════════════════════════════════════
 // DB POOL — معدَّل وغير مُعرَّض للـ pool exhaustion
@@ -32,6 +33,10 @@ export const db = drizzle(pool);
 
 function normalizeQuery(q: string): string {
   return q.toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+function cacheKeysForQuery(query: string): string[] {
+  return [...new Set([normalizeBookCacheKey(query), normalizeQuery(query)].filter(Boolean))];
 }
 
 // ══════════════════════════════════════════════
@@ -126,17 +131,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getCachedBook(query: string): Promise<CachedBook | null> {
-    const normalized = normalizeQuery(query);
+    const keys = cacheKeysForQuery(query);
+    if (keys.length === 0) return null;
     const result = await db
       .select()
       .from(cachedBooks)
-      .where(eq(cachedBooks.bookQueryNormalized, normalized))
+      .where(keys.length === 1
+        ? eq(cachedBooks.bookQueryNormalized, keys[0])
+        : inArray(cachedBooks.bookQueryNormalized, keys))
       .limit(1);
     return result.length > 0 ? result[0] : null;
   }
 
   async cacheBook(data: InsertCachedBook): Promise<CachedBook> {
-    const normalized = normalizeQuery(data.bookQuery);
+    const normalized = normalizeBookCacheKey(data.bookQuery);
     const inserted = await db
       .insert(cachedBooks)
       .values({ ...data, bookQueryNormalized: normalized })

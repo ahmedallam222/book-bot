@@ -64,6 +64,40 @@ export function escMd(text: string): string {
   return text.replace(/[_*`\[]/g, "\\$&");
 }
 
+const RELEVANCE_STOPWORDS = new Set([
+  "كتاب",
+  "كتب",
+  "روايه",
+  "روايات",
+  "تحميل",
+  "تنزيل",
+  "قراءه",
+  "pdf",
+  "نسخه",
+  "مجانا",
+  "free",
+  "book",
+  "books",
+  "download",
+  "read",
+  "ebook",
+]);
+
+function relevanceWords(text: string): string[] {
+  const normalized = normalizeArabic(text)
+    .toLowerCase()
+    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ");
+
+  return normalized
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !RELEVANCE_STOPWORDS.has(w));
+}
+
+export function normalizeBookCacheKey(text: string): string {
+  const words = relevanceWords(text);
+  return words.length > 0 ? words.join(" ") : normalizeForCache(text);
+}
+
 /**
  * urlFilenameRelevance — مدى صلة اسم الملف في الـ URL بالكتاب المطلوب.
  * يُعيد 0 (لا صلة) إلى 1 (تطابق كامل).
@@ -78,11 +112,16 @@ export function urlFilenameRelevance(bookName: string, url: string): number {
 
   let filename = "";
   try {
-    filename = new URL(url).pathname.split("/").pop() || "";
+    const parsed = new URL(url);
+    filename = parsed.pathname.split("/").pop() || "";
+    for (const key of ["title", "book", "name", "file", "q"]) {
+      const value = parsed.searchParams.get(key);
+      if (value) filename += ` ${value}`;
+    }
   } catch {
     filename = url.split("/").pop()?.split("?")[0] || "";
   }
-  filename = filename.replace(/\.pdf$/i, "");
+  filename = filename.replace(/\.(pdf|html?|php)$/i, "");
   if (!filename) return 0.5;
 
   let cleanFilename = filename;
@@ -96,11 +135,7 @@ export function urlFilenameRelevance(bookName: string, url: string): number {
     .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ")
     .toLowerCase();
 
-  const normBook = normalizeArabic(bookName)
-    .toLowerCase()
-    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ");
-
-  const bookWords = normBook.split(/\s+/).filter((w) => w.length >= 2);
+  const bookWords = relevanceWords(bookName);
   if (bookWords.length === 0) return 0.5;
 
   const filenameWords = new Set(
