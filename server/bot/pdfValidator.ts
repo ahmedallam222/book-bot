@@ -487,7 +487,17 @@ async function askMistral(
   ];
   if (metaTitle) lines.push(`PDF metadata title: "${metaTitle}"`);
   else           lines.push(`(PDF metadata title is empty)`);
-  if (urlHint)   lines.push(`PDF filename: "${urlHint}"`);
+  // FIX: نمرر اسم الملف الـ decoded من الـ URL (slug الكتاب) بدل الـ URL الخام
+  // الـ URL الخام بيكون فيه percent-encoded Arabic (%D8%A2%D9%86%D8%A7...) و Mistral
+  // مش بيفك الترميز ده دائماً → كان يجاوب NO للكتب العربية بسبب filename "غير مفهوم"
+  // الحل: استخراج آخر segment من الـ path وفك ترميزه + شيل الزوائد
+  let promptFilename = urlHint;
+  try {
+    const decoded = decodeURIComponent(new URL(urlHint).pathname.split("/").pop() || "");
+    const cleaned = decoded.replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim();
+    if (cleaned.length > 1) promptFilename = cleaned;
+  } catch { /* urlHint مش URL → نسيبه زي ما هو */ }
+  if (promptFilename) lines.push(`PDF filename: "${promptFilename}"`);
   lines.push(
     ``,
     `Rules (follow strictly):`,
