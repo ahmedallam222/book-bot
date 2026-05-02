@@ -153,6 +153,12 @@ function isNoisyPreviewDomain(url: string): boolean {
   return [...NOISY_PREVIEW_DOMAINS].some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
+function isConfiguredSourceDomain(url: string): boolean {
+  const host = hostnameFromUrl(url);
+  if (!host) return false;
+  return SOURCES.some((source) => host === source.domain || host.endsWith(`.${source.domain}`));
+}
+
 // ══════════════════════════════════════════════
 // Unified Search — call واحدة لمجموعة domains
 //
@@ -263,6 +269,7 @@ async function unifiedSearch(
       })
       .filter((result) => {
         if (result.access !== "catalog_page") return true;
+        if (!isConfiguredSourceDomain(result.url)) return false;
         return !isNoisyPreviewDomain(result.url);
       });
 
