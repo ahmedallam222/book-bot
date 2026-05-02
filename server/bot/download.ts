@@ -170,6 +170,50 @@ async function expandArchiveOrgUrl(url: string): Promise<string | null> {
 }
 
 // ══════════════════════════════════════════════
+// FOULABOOK RESOLVER
+// foulabook.com/<lang>/book/<slug>  هو landing page بـ HTML.
+// الـ PDF الفعلي بيتقدّم من /book/downloading/<id>
+// (Content-Type: application/pdf, content-disposition: attachment).
+// نفتح الـ landing page مرة واحدة ونستخرج الـ id.
+// ══════════════════════════════════════════════
+async function expandFoulabookUrl(url: string): Promise<string | null> {
+  if (!/foulabook\.com\/[a-z]{2}\/book\//i.test(url)) return null;
+
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent":      UA,
+        "Accept":          "text/html,application/xhtml+xml",
+        "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
+      },
+      signal:   ctrl.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+
+    if (!r.ok) return null;
+
+    const html = (await r.text().catch(() => "")).slice(0, 200_000);
+    const m = html.match(/foulabook\.com\/book\/downloading\/(\d+)/i);
+    if (!m) return null;
+
+    const directUrl = `https://foulabook.com/book/downloading/${m[1]}`;
+    L.info("download", "Resolved foulabook landing → direct PDF", {
+      landing: url.slice(0, 80),
+      id:      m[1],
+    });
+    return directUrl;
+  } catch (e) {
+    clearTimeout(timer);
+    L.warn("download", `expandFoulabookUrl error: ${String(e).slice(0, 80)}`);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════
 // MAIN — downloadAndSend
 // ══════════════════════════════════════════════
 export async function downloadAndSend(
@@ -193,6 +237,18 @@ export async function downloadAndSend(
       pdfUrl = expanded;
     } else {
       L.warn("download", "Could not resolve archive.org details — will try as-is", {
+        url: pdfUrl.slice(0, 80),
+      });
+    }
+  }
+
+  // ── foulabook.com/<lang>/book/ → /book/downloading/<id> ──
+  if (/foulabook\.com\/[a-z]{2}\/book\//i.test(pdfUrl)) {
+    const expanded = await expandFoulabookUrl(pdfUrl);
+    if (expanded) {
+      pdfUrl = expanded;
+    } else {
+      L.warn("download", "Could not resolve foulabook landing — will try as-is", {
         url: pdfUrl.slice(0, 80),
       });
     }
