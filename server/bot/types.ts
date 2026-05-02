@@ -20,6 +20,8 @@ export interface BookResult {
   directPdfUrl: string | null;
   source: SourceConfig;
   author?: string;
+  access: "direct_pdf" | "download_page" | "catalog_page" | "protected_page";
+  accessReason?: string;
   // _allPdfs حُذفت — لم تكن تُعبَأ من makeResult() أبداً
   _score?: number;
 }

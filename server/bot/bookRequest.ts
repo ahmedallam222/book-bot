@@ -15,7 +15,7 @@ import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, buildFailMessage } fr
 import { getUserDailyLimit, getUserNote } from "./userSettings.js";
 import { redis } from "./redis.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel } from "./analytics.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
@@ -366,15 +366,22 @@ async function performFullSearch(
 
   const allPdfUrls: string[] = [];
   const pageUrlFallbacks: string[] = [];
+  const downloadablePageFallbacks: string[] = [];
   // BUG FIX: استخدام Set لتجنب تكرار نفس URL في كلا القائمتين
   // قبل: نفس URL يمكن أن يُضاف أكثر من مرة إذا أعادته مصادر متعددة
   const seenPdfUrls   = new Set<string>();
   const seenPageUrls  = new Set<string>();
+  const seenDownloadPages = new Set<string>();
   for (const r of results) {
     if (r.directPdfUrl) {
       if (!seenPdfUrls.has(r.directPdfUrl)) {
         seenPdfUrls.add(r.directPdfUrl);
         allPdfUrls.push(r.directPdfUrl);
+      }
+    } else if (r.url && r.access === "download_page") {
+      if (!seenDownloadPages.has(r.url)) {
+        seenDownloadPages.add(r.url);
+        downloadablePageFallbacks.push(r.url);
       }
     } else if (r.url) {
       if (!seenPageUrls.has(r.url)) {
@@ -410,12 +417,11 @@ async function performFullSearch(
   if (validUrls.length === 0 && uniquePdfs.length > 0) {
     // Fallback 2: روابط PDF الخام (فشلت verify لكن قد تنجح عند التحميل الفعلي)
     validUrls = [...uniquePdfs.slice(0, 5)];
-  } else if (validUrls.length === 0 && uniquePdfs.length === 0 && pageUrlFallbacks.length > 0) {
-    // Fallback 3: صفحات HTML — download.ts سيحاول استخراج PDF منها
-    L.info("bot", `No direct PDF URLs — trying ${Math.min(3, pageUrlFallbacks.length)} page URLs as last resort`, {
+  } else if (validUrls.length === 0 && uniquePdfs.length === 0 && downloadablePageFallbacks.length > 0) {
+    L.info("bot", `No direct PDF URLs — trying ${Math.min(3, downloadablePageFallbacks.length)} download pages as last resort`, {
       book: bookName.slice(0, 50),
     });
-    validUrls = [...new Set(pageUrlFallbacks)].slice(0, 3);
+    validUrls = [...new Set(downloadablePageFallbacks)].slice(0, 3);
   }
 
   // ── ترتيب URLs الذكي — 3 معايير مدمجة ──────────────────────────────
@@ -440,7 +446,7 @@ async function performFullSearch(
         // (2) أداء المصدر التاريخي — 0 لـ 1، وزن 30%
         const sourceRate = srcRateMap.get(domain) ?? 0.5;
         // (3) عقوبة المواقع غير الموثوقة — وزن 20%
-        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? 0 : 1;
+        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? -1 : 1;
         return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
       };
       return scoreUrl(b) - scoreUrl(a);
@@ -482,6 +488,9 @@ async function performFullSearch(
       if (!result.ok && !result.permanent && !result.rejectedContent) {
         await sleep(500); // M4 FIX: 500ms كافٍ للـ back-off — 2000ms كانت تعطّل الـ worker
         result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token);
+      }
+      if (!result.ok) {
+        trackSourceAttempt(dlDomain, false).catch(() => {});
       }
       if (result.ok) {
         sent          = true;
