@@ -691,15 +691,39 @@ export async function validatePdfContent(
       });
       // (Falls through to the 64KB read + Mistral path below.)
     } else {
-      L.info("pdfValidator", "Trusted domain — informative URL, no search title, skipping validation", { url: pdfUrl.slice(0, 80) });
-      redis.incr(TEL_ACCEPTED).catch(() => {});
-      return {
-        accepted: true,
-        score: 1,
-        event: "candidate_accepted_title_match",
-        mistralUsed: false,
-        metaTitle: searchTitle,
-      };
+      // Informative-looking filename, no search title. Before bypass,
+      // verify the filename has at least *some* token overlap with the
+      // requested book — otherwise the slug could be an entirely
+      // different book on the same trusted domain.
+      //
+      // Production incident 2026-05-03: archive.org URL
+      // `.../items/dalilkuwa-s2021-a/dalilkuwa-s2021-a.pdf` (= "الدليل
+      // إلى القوة والدهاء") was bypassed for the request "الموجز في
+      // فن التفاوض". Filename was informative (not digit-only) so this
+      // branch fired and accepted blindly. Filename relevance check
+      // catches this: 0 token overlap → fall through to full validation.
+      const filenameScore = urlFilenameRelevance(bookName, pdfUrl);
+      if (filenameScore < 0.15) {
+        L.warn("pdfValidator", "trusted_domain_unrelated_filename — falling through to full validation", {
+          url:  pdfUrl.slice(0, 80),
+          book: bookName.slice(0, 50),
+          score: filenameScore.toFixed(2),
+        });
+        // (Falls through to the 64KB read + Mistral path below.)
+      } else {
+        L.info("pdfValidator", "Trusted domain — informative URL with filename match, no search title, skipping validation", {
+          url: pdfUrl.slice(0, 80),
+          score: filenameScore.toFixed(2),
+        });
+        redis.incr(TEL_ACCEPTED).catch(() => {});
+        return {
+          accepted: true,
+          score: 1,
+          event: "candidate_accepted_title_match",
+          mistralUsed: false,
+          metaTitle: searchTitle,
+        };
+      }
     }
   }
 
