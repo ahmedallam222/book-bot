@@ -87,7 +87,7 @@ export async function handleSummaryCallback(
     const cached = await getCachedSummary(bookName);
     if (cached) {
       await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
-      await sendSummaryMessage(bot, chatId, bookName, cached);
+      await deliverSummary(bot, chatId, bookName, cached);
       return;
     }
 
@@ -114,26 +114,54 @@ export async function handleSummaryCallback(
     }
 
     // Acknowledge the click immediately; the orchestrator may take
-    // 5–15s and Telegram complains if we don't ack within ~3s.
+    // 5–30s and Telegram complains if we don't ack within ~3s.
     await bot.answerCallbackQuery(callbackQueryId, {
-      text: "⏳ جاري إعداد الملخص...",
+      text: "⏳ جاري تجهيز الملخص...",
     }).catch(() => {});
 
-    // Visible "typing…" cue while we run.
-    await bot.sendChatAction(chatId, "typing").catch(() => {});
+    // Send a *visible, persistent* placeholder so the user sees the bot is
+    // working. PDF-tier summaries can take 25–30s; the toast disappears
+    // in ~5s and Telegram's typing action only lasts ~5s as well.
+    const placeholderText =
+      `⏳ *جاري تجهيز الملخص...*\n` +
+      `📚 *${escMd(bookName)}*\n\n` +
+      `_البوت يقرأ الكتاب ويجهّز لك ملخصًا مفصّلًا. قد يستغرق حتّى دقيقة._`;
+    let placeholderMsgId: number | undefined;
+    try {
+      const sent = await bot.sendMessage(chatId, placeholderText, {
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+      });
+      placeholderMsgId = sent.message_id;
+    } catch {
+      // If the placeholder fails (rare), we fall back to sendMessage on
+      // success below — the user just won't see a status update.
+    }
 
+    // Refresh "typing…" every 4s while we run — Telegram clears the
+    // indicator after ~5s, so a one-shot call isn't enough for 25s+ PDFs.
+    await bot.sendChatAction(chatId, "typing").catch(() => {});
+    const typingInterval = setInterval(() => {
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+    }, 4_000);
+
+    let resp: SummaryResponse;
     const t0 = Date.now();
-    const resp = await getBookSummary(bookName, {
-      pdfUrl:  sourceUrl,
-      premium,
-    });
+    try {
+      resp = await getBookSummary(bookName, {
+        pdfUrl:  sourceUrl,
+        premium,
+      });
+    } finally {
+      clearInterval(typingInterval);
+    }
     L.info("summaryHandler", "summary delivered", {
       book:     bookName.slice(0, 50),
       provider: resp.providerName,
       ms:       Date.now() - t0,
       bookType: resp.bookType,
     });
-    await sendSummaryMessage(bot, chatId, bookName, resp);
+    await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId);
   } catch (e: any) {
     L.warn("summaryHandler", "summary failed", {
       book: bookName.slice(0, 50),
@@ -149,11 +177,16 @@ export async function handleSummaryCallback(
   }
 }
 
-async function sendSummaryMessage(
-  bot:      TelegramBot,
-  chatId:   number,
-  bookName: string,
-  resp:     SummaryResponse,
+// Render the final summary into the placeholder message (edit-in-place
+// when possible, send a fresh message otherwise). Editing keeps the chat
+// clean and gives the user the impression of one continuous "loading →
+// done" interaction instead of two separate messages.
+async function deliverSummary(
+  bot:               TelegramBot,
+  chatId:            number,
+  bookName:          string,
+  resp:              SummaryResponse,
+  placeholderMsgId?: number,
 ): Promise<void> {
   const header = pickHeader(resp);
   // Trim very long bodies to stay safely under Telegram's 4096-char
@@ -169,15 +202,39 @@ async function sendSummaryMessage(
     `\n${escMd(body)}\n` +
     `\n${footer}`;
 
+  const plainFallback =
+    `${header.replace(/[*_]/g, "")}\n${bookName}\n\n${body}\n\n${footer.replace(/[*_]/g, "")}`;
+
+  if (placeholderMsgId !== undefined) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id:                  chatId,
+        message_id:                placeholderMsgId,
+        parse_mode:               "Markdown",
+        disable_web_page_preview: true,
+      });
+      return;
+    } catch {
+      // Markdown parse error or message-too-old — try a plain edit.
+      try {
+        await bot.editMessageText(plainFallback, {
+          chat_id:                  chatId,
+          message_id:                placeholderMsgId,
+          disable_web_page_preview: true,
+        });
+        return;
+      } catch {
+        // Edit completely failed — fall through to sending a fresh message.
+      }
+    }
+  }
+
   await bot.sendMessage(chatId, text, {
-    parse_mode: "Markdown",
+    parse_mode:               "Markdown",
     disable_web_page_preview: true,
   }).catch(async () => {
-    // If Markdown parsing failed (unbalanced asterisks in summary),
-    // resend as plain text — better degraded delivery than failure.
-    await bot.sendMessage(chatId,
-      `${header.replace(/[*_]/g, "")}\n${bookName}\n\n${body}\n\n${footer.replace(/[*_]/g, "")}`,
-      { disable_web_page_preview: true },
-    ).catch(() => {});
+    await bot.sendMessage(chatId, plainFallback, {
+      disable_web_page_preview: true,
+    }).catch(() => {});
   });
 }
