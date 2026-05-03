@@ -96,7 +96,7 @@ export const TIMEOUT_AI_PROVIDER = parseInt(
 // unmetered (routed to you.com which is paid). Set to 0 to disable
 // the rate limit.
 export const SUMMARY_DAILY_LIMIT_FREE = parseInt(
-  process.env.SUMMARY_DAILY_LIMIT_FREE || "5",
+  process.env.SUMMARY_DAILY_LIMIT_FREE || "3",
   10,
 );
 
