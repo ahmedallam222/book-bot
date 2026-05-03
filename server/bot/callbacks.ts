@@ -23,6 +23,7 @@ import { normalizeForCache, normalizeArabic, buildResetTime } from "./text.js";
 import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
 } from "./wishlist.js";
+import { handleSummaryCallback } from "./summaryHandler.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
@@ -56,7 +57,8 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
                        data === "wishlist_view"           ||
                        data === "wishlist_clear"          ||
                        data.startsWith("wishlist_add:")   ||
-                       data.startsWith("wishlist_del:");
+                       data.startsWith("wishlist_del:")   ||
+                       data.startsWith("sum:");
     if (needsDedup) processingCallbacks.add(dedupKey);
 
     L.debug("bot", `Callback`, { userId, data: data.slice(0, 50) });
@@ -214,6 +216,15 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         L.error("payment", "sendInvoice error", { err: String(e).slice(0, 100) });
         await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
       }
+      return;
+    }
+
+    // ── summary ───────────────────────────────────
+    // The "📘 ملخص الكتاب" button under a delivered file. Heavy
+    // path (Wikipedia + AI providers + Redis cache) lives in
+    // summaryHandler.ts to keep this dispatcher slim.
+    if (data.startsWith("sum:")) {
+      await handleSummaryCallback(bot, chatId, userId, data, query.id);
       return;
     }
 

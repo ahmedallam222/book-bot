@@ -1,7 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import type { BookResult } from "./types.js";
 import { escMd } from "./text.js";
-import { storeRetryKey, storeFeedbackUrl } from "./session.js";
+import { storeRetryKey, storeFeedbackUrl, storeSummaryKey } from "./session.js";
 
 // ══════════════════════════════════════════════════════════════
 //  KEYBOARDS — خلاصة الكتب v6
@@ -52,8 +52,17 @@ export function kbAfterSuccess(
   bookName: string,
   sourceUrl: string
 ): TelegramBot.InlineKeyboardMarkup {
-  const retryK = storeRetryKey(bookName);
+  const retryK   = storeRetryKey(bookName);
+  const summaryK = storeSummaryKey(bookName, sourceUrl || undefined);
+  // Top row: the action the user is most likely to want immediately
+  // after seeing the file — get a quick AI summary before reading.
+  // Label is generic ("ملخص الكتاب"); the callback handler decides at
+  // runtime whether to render with spoiler-protection framing based on
+  // the AI-detected book type.
   const rows: TelegramBot.InlineKeyboardButton[][] = [
+    [
+      { text: "📘  ملخص الكتاب",    callback_data: safeCb(`sum:${summaryK}`) },
+    ],
     [
       { text: "🔍  كتاب آخر",      callback_data: "new_search"  },
       { text: "🔖  احفظ للاحقاً",  callback_data: safeCb(`wishlist_add:${retryK}`) },
@@ -65,7 +74,7 @@ export function kbAfterSuccess(
 
   if (sourceUrl) {
     const fbKey = storeFeedbackUrl(sourceUrl, bookName);
-    rows[1].push({ text: "⚠️  ملف خاطئ؟", callback_data: safeCb(`bad_file:${fbKey}`) });
+    rows[2].push({ text: "⚠️  ملف خاطئ؟", callback_data: safeCb(`bad_file:${fbKey}`) });
   }
 
   rows.push([
