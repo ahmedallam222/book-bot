@@ -529,7 +529,19 @@ async function performFullSearch(
         result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
       }
       if (!result.ok) {
-        trackSourceAttempt(dlDomain, false).catch(() => {});
+        // BUG FIX: Mistral content-mismatch ≠ source failure.
+        // The source successfully delivered a real PDF; the search ranker
+        // just picked a wrong-book URL on this domain. Counting it as a
+        // source `fail` would (and historically did) auto-disable healthy
+        // libraries like Hindawi (1 ok / 29 fail = 3% rate, where most of
+        // those "fails" were Mistral rejections of unrelated candidate PDFs).
+        // Track these separately so operators retain visibility without
+        // poisoning the auto-disable signal.
+        if (result.rejectedContent) {
+          trackSourceMistralReject(dlDomain).catch(() => {});
+        } else {
+          trackSourceAttempt(dlDomain, false).catch(() => {});
+        }
       }
       // Track only Mistral-driven rejections; HTTP failures, timeouts, or
       // heuristic-only rejects don't count toward the streak (they're not
