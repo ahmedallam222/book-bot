@@ -16,6 +16,7 @@ import {
   getBookSummary,
   getCachedSummary,
   checkAndConsumeUsage,
+  GlobalSummaryLimitError,
 } from "./summary.js";
 import type { SummaryResponse } from "./aiProviders/types.js";
 import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
@@ -198,11 +199,22 @@ export async function handleSummaryCallback(
     });
     await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId);
   } catch (e: any) {
-    L.warn("summaryHandler", "summary failed", {
-      book: bookName.slice(0, 50),
-      err:  String(e).slice(0, 200),
-    });
-    await deliverError(bot, chatId, bookName, placeholderMsgId);
+    // Distinguish bot-wide cap exhaustion from a generic failure so
+    // the user gets actionable wording ("try later") instead of a
+    // confusing "something went wrong".
+    if (e instanceof GlobalSummaryLimitError) {
+      L.warn("summaryHandler", "global cap reached", {
+        book:   bookName.slice(0, 50),
+        userId,
+      });
+      await deliverGlobalCapMessage(bot, chatId, bookName, placeholderMsgId);
+    } else {
+      L.warn("summaryHandler", "summary failed", {
+        book: bookName.slice(0, 50),
+        err:  String(e).slice(0, 200),
+      });
+      await deliverError(bot, chatId, bookName, placeholderMsgId);
+    }
   } finally {
     // Defensive cleanup — normally these are already cleared in the
     // try block, but if anything threw between setup and the inner
@@ -212,6 +224,39 @@ export async function handleSummaryCallback(
     // Release the inflight lock so a subsequent retry is allowed.
     redis.del(lockKey).catch(() => {});
   }
+}
+
+// Replace the placeholder when the bot-wide daily AI ceiling has been
+// hit. Worded explicitly as a temporary, time-based limit (not a user
+// quota issue and not a generic error) so the user knows retrying
+// later will work — no upgrade path is offered because Premium also
+// shares the same global Gemini pool on a busy day.
+async function deliverGlobalCapMessage(
+  bot:               TelegramBot,
+  chatId:            number,
+  bookName:          string,
+  placeholderMsgId?: number,
+): Promise<void> {
+  const text =
+    `🌙 *البوت وصل لحد الملخصات اليومي*\n` +
+    `📚 *${escMd(bookName)}*\n\n` +
+    `_عدد كبير من الناس طلبوا ملخصات اليوم. جرّب بعد قليل أو غدًا — الكتب اللي تم تلخيصها قبل كده هتفضل تشتغل عادي._`;
+  if (placeholderMsgId !== undefined) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id:                  chatId,
+        message_id:               placeholderMsgId,
+        parse_mode:               "Markdown",
+        disable_web_page_preview: true,
+      });
+      return;
+    } catch {
+      // Fall through to sendMessage if edit fails.
+    }
+  }
+  await bot.sendMessage(chatId, text, {
+    parse_mode: "Markdown",
+  }).catch(() => {});
 }
 
 // Replace the placeholder with a clear error message instead of leaving
