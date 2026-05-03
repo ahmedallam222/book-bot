@@ -525,7 +525,11 @@ export async function downloadAndSend(
               });
               safeDeleteTemp(tempPath);
               clearTimeout(timer);
-              return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true);
+              // Forward skipMistral + searchResultTitle so the recursive
+              // call honors both the Mistral early-stop streak and the
+              // new title-gate / metaTitle fallback. Without these the
+              // L1/L4 fixes are bypassed for any HTML-redirect PDF.
+              return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true, skipMistral, searchResultTitle);
             }
           }
         } catch { /* HTML غير قابل للقراءة → نكمل للفشل الطبيعي */ }
