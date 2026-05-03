@@ -7,6 +7,30 @@
 
 ---
 
+## [31.3.5] — 2026-05-03
+
+### 🚨 إصلاح حرج — direct-mode send كان يتخطّى pdfValidator بالكامل
+
+السياق: لما البوت يقدر يستخدم Telegram-fetches-URL (direct mode، أسرع من local download)، الـ server **مش بيحمّل** الـ PDF محلياً. النتيجة: `validatePdfContent` ما بيتشغّلش على الإطلاق. أي URL "موثوق" لأي slug كان يصل للمستخدم بدون تحقق من المحتوى.
+
+سيناريو production مؤكد (search_logs id=498، user 8180806508):
+- المستخدم طلب: "الموجز في فن التفاوض" (كتاب مدفوع، مش متوفر مجاناً)
+- البوت بعت: `dn790006.ca.archive.org/0/items/dalilkuwa-s2021-a/dalilkuwa-s2021-a.pdf` = "الدليل إلى القوة والدهاء" (لمى ابراهيم فياض، كتاب مختلف خالص)
+- trace: `phase=download_done filenameScore=0` (تم حسابها بعد الإرسال — كانت لمنع caching فقط، مش لإلغاء الإرسال)
+- لا candidate_accepted/rejected events → دليل أن pdfValidator ما اشتغلش
+
+الإصلاح في طبقتين:
+
+1. **`server/bot/download.ts`**: helper جديد `directSendUnsafe(book, url)` بيرجع true لو `urlFilenameRelevance < 0.15`. لو unsafe → نتخطّى direct mode ونـ fall through لـ local download (اللي بيشغّل full pdfValidator + Mistral).
+
+2. **`server/bot/pdfValidator.ts`**: في الـ trusted-domain branch، لما المُرسَل مفهوش search title لكن الـ filename "informative-looking" (مش digit-only)، كان بيقبل blindly. النا أضفنا filename relevance check — لو 0 token overlap مع bookName → fall through للـ full validation.
+
+تأثير: اتنين دفاعات تلقائية ضد أي archive.org/trusted-domain slug غير ذي صلة.
+
+اختبارات: `test-direct-send-safety.mjs` (11 سيناريو، PASS): T1 production case، T2 arabic-slug match، T3 digit-only neutral، T4 Latin slug، T5 directory-only word، T5.b filename match، T6 edge cases، T7 numeric scoring.
+
+---
+
 ## [31.3.4] — 2026-05-03
 
 ### 🐛 إصلاح — parseBookName كان يحذف "قراءة" من وسط عنوان الكتاب
