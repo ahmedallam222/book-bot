@@ -148,6 +148,14 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
 // (libgen-class hosts only resolve the requested ID to a binary, so a
 // content mismatch would imply a deliberately-wrong upload, not a
 // search-ranker mistake.)
+//
+// downloads.hindawi.org belongs here because Hindawi serves PDFs by
+// numeric ID (e.g. /books/62575295.pdf) — there is no filename slug
+// for the validator to score, and Mistral's URL-hint rule rejects all
+// digit-only filenames. The PDF metadata's /Title sits beyond the
+// 64KB scan window in their files. The numeric ID resolves
+// 1-to-1 to a published book in their public-domain Arabic catalog,
+// so the failure mode (search-ranker mismatch) is the same as libgen.
 export const TRUSTED_PDF_DOMAINS: string[] = [
   "dl.waqfeya.net",
   "books-library.net",
@@ -157,6 +165,7 @@ export const TRUSTED_PDF_DOMAINS: string[] = [
   "libgen.st",
   "library.lol",
   "z-lib.org",
+  "downloads.hindawi.org",
 ];
 
 // ── Filename-trusted PDF domains ──────────────
