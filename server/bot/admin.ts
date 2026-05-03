@@ -9,6 +9,7 @@ import { getPdfValidationStats }                 from "./pdfValidator.js";
 import { getDailyStats, getTotalStats, getTopBooks, getSourceStats, getFunnelStats, getWeeklyStats } from "./analytics.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
+import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
 
 // ══════════════════════════════════════════════
 // ADMIN — لوحة تحكم المشرفين (كاملة)
@@ -483,7 +484,16 @@ export async function handleAdminCallback(
         if (isMaint === "1") {
           await redis.del(MAINTENANCE_KEY);
           L.adminAction(userId, "maintenance OFF");
-          await bot.sendMessage(chatId, `✅ تم إيقاف وضع الصيانة.`).catch(() => {});
+          await bot.sendMessage(chatId,
+            `✅ *تم إيقاف وضع الصيانة.*\n\n_جارٍ إرسال إعلان للجروبات…_`,
+            { parse_mode: "Markdown" }
+          ).catch(() => {});
+          // FIX (maintenance-announce): لما المشرف يطفي الصيانة، البوت يعلن
+          // تلقائياً في كل الجروبات المعروفة. fire-and-forget عشان ما يوقفش
+          // الـ callback handler لو الإرسال طوّل.
+          announceMaintenanceEnd(bot).catch((e) =>
+            L.error("admin", "announceMaintenanceEnd failed", { err: String(e).slice(0, 100) })
+          );
         } else {
           await redis.set(MAINTENANCE_KEY, "1");
           L.adminAction(userId, "maintenance ON");
