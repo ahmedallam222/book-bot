@@ -573,9 +573,10 @@ async function askMistral(
  * @returns PdfValidationResult — accepted:true → أرسل | false → جرّب التالي
  */
 export async function validatePdfContent(
-  filePath: string,
-  bookName: string,
-  pdfUrl:   string = "",
+  filePath:    string,
+  bookName:    string,
+  pdfUrl:      string = "",
+  skipMistral: boolean = false,
 ): Promise<PdfValidationResult> {
   const t0 = Date.now();
 
@@ -759,33 +760,31 @@ export async function validatePdfContent(
     return { accepted: false, score, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle };
   }
 
-  // ── Filename-trusted bypass ──────────────────────────
-  // Before paying for Mistral on an ambiguous score, check whether the
-  // source is a curated library where filename match alone is reliable.
-  // E.g. archive.org/details/atomic-habits-arabic-translation/atomic-habits.pdf
-  // requested for "العادات الذرية" — cross-language so wordOverlapScore=0,
-  // but filename relevance picks up the slug match → high-confidence accept.
-  // Only fires when both: domain is filename-trusted AND filename score
-  // is at/above MISTRAL_BYPASS_FILENAME_THRESHOLD. Falls through to Mistral
-  // otherwise, so wrong-book candidates from these sources still get vetted.
-  if (pdfUrl && isFilenameTrustedDomain(pdfUrl)) {
-    const fnScore = urlFilenameRelevance(bookName, pdfUrl);
-    if (fnScore >= MISTRAL_BYPASS_FILENAME_THRESHOLD) {
-      redis.incr(TEL_ACCEPTED).catch(() => {});
-      L.info("pdfValidator", "Filename-trusted bypass — accepted without Mistral", {
-        book: bookName.slice(0, 50),
-        url: pdfUrl.slice(0, 80),
-        filenameScore: fnScore.toFixed(2),
-        metaTitle: metaTitle.slice(0, 60),
-      });
-      return {
-        accepted: true,
-        score: Math.max(score, fnScore),
-        event: "candidate_accepted_title_match",
-        mistralUsed: false,
-        metaTitle,
-      };
-    }
+  // ── Mistral early-stop ───────────────────────────────
+  // The caller (bookRequest.ts) sets skipMistral=true once it has seen
+  // MISTRAL_NO_STREAK_LIMIT consecutive Mistral NO verdicts for the
+  // current request, to stop burning API budget on a query Mistral has
+  // already failed to validate. In this branch we trust heuristics only:
+  // the score-based ACCEPT path above didn't fire and the score-based
+  // REJECT path also didn't fire (otherwise we'd have returned earlier),
+  // so the candidate is genuinely ambiguous. Without Mistral the safest
+  // choice on an ambiguous candidate is to reject — false-accepts here
+  // would send the wrong book to the user, whereas false-rejects just
+  // move on to the next candidate.
+  if (skipMistral) {
+    redis.incr(TEL_REJECTED).catch(() => {});
+    L.warn("pdfValidator", "Mistral skipped (early-stop) — rejecting ambiguous candidate", {
+      book:      bookName.slice(0, 50),
+      score:     score.toFixed(2),
+      metaTitle: metaTitle.slice(0, 60),
+    });
+    return {
+      accepted:    false,
+      score,
+      event:       "candidate_rejected_title_mismatch",
+      mistralUsed: false,
+      metaTitle,
+    };
   }
 
   // ── منطقة غامضة → Mistral ───────────────────────────
