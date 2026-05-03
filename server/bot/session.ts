@@ -60,3 +60,15 @@ export function storeFeedbackUrl(url: string, bookName: string): string {
   _sessions.set(key, { url, bookName, ts: Date.now() });
   return key;
 }
+
+// Stores both bookName and the source URL the file was delivered from,
+// so the summary callback can re-download the PDF for AI analysis.
+// `url` is optional — for cache-served deliveries we may not have a
+// fresh sourceUrl, in which case the summary path falls back to text-
+// only providers using Wikipedia context.
+export function storeSummaryKey(bookName: string, url?: string): string {
+  enforceLimit();
+  const key = newKey();
+  _sessions.set(key, { bookName, url, ts: Date.now() });
+  return key;
+}
