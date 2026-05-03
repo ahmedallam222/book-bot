@@ -14,8 +14,15 @@ import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
-import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS, MISTRAL_NO_STREAK_LIMIT } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject } from "./analytics.js";
+import {
+  MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY,
+  DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS,
+  MISTRAL_NO_STREAK_LIMIT,
+  MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
+  MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
+  LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
+} from "./config.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
@@ -476,8 +483,14 @@ async function performFullSearch(
   // الحل: دمج 3 معايير:
   //   (1) صلة اسم الملف بالكتاب المطلوب (الأهم — يمنع إرسال ملف خاطئ)
   //   (2) أداء المصدر التاريخي من analytics
-  //   (3) عقوبة المواقع غير الموثوقة (مثل noor-book.com)
+  //   (3) عقوبة الموثوقية: hard لـ UNRELIABLE_DOMAINS، soft للمصادر
+  //       اللي success rate < LOW_SUCCESS_RATE_PENALTY_THRESHOLD (مثل
+  //       Hindawi 16% أو foulabook 25%) عشان يطلعوا بعد المصادر الأقوى.
   if (validUrls.length > 1) {
+    // Kept inside the multi-URL guard so single-/zero-candidate
+    // requests don't pay for `redis.keys("stats:source:*")` +
+    // N×HGETALL (Devin Review #32 caught this when the init was
+    // briefly hoisted).
     let srcRateMap = new Map<string, number>();
     try {
       const srcStats = await getSourceStats();
@@ -486,13 +499,27 @@ async function performFullSearch(
 
     validUrls.sort((a, b) => {
       const scoreUrl = (url: string): number => {
-        const domain = url.split("/")[2] || "";
+        const domain = sanitizeDomainKey(url.split("/")[2] || "");
         // (1) صلة اسم الملف — 0 لـ 1، وزن 50%
         const filenameScore = urlFilenameRelevance(bookName, url);
         // (2) أداء المصدر التاريخي — 0 لـ 1، وزن 30%
         const sourceRate = srcRateMap.get(domain) ?? 0.5;
-        // (3) عقوبة المواقع غير الموثوقة — وزن 20%
-        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? -1 : 1;
+        // (3) عقوبة الموثوقية — وزن 20%
+        //   * UNRELIABLE_DOMAINS (block-list ثابت): -1 (عقوبة قوية ثابتة)
+        //   * Low actual rate (لدينا ≥1 attempt + < threshold): -0.5 (soft)
+        //   * Otherwise: +1 (محايد/إيجابي)
+        let reliablePenalty: number;
+        if (UNRELIABLE_DOMAINS.some(d => domain.includes(d))) {
+          reliablePenalty = -1;
+        } else if (
+          LOW_SUCCESS_RATE_PENALTY_THRESHOLD > 0 &&
+          srcRateMap.has(domain) &&
+          sourceRate < LOW_SUCCESS_RATE_PENALTY_THRESHOLD
+        ) {
+          reliablePenalty = -0.5;
+        } else {
+          reliablePenalty = 1;
+        }
         return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
       };
       return scoreUrl(b) - scoreUrl(a);
@@ -530,9 +557,69 @@ async function performFullSearch(
   // will then reject ambiguous candidates without paying for Mistral.
   let mistralNoStreak = 0;
 
+  // Download attempt accounting (find-to-send loss mitigation).
+  // - `attemptedDownloads` counts URLs we've actually tried (including
+  //   internal retry-after-back-off, which we treat as one attempt).
+  // - `attemptsByDomain` enforces the per-host cap so a low-success
+  //   source can't crowd the loop with all of its URLs while higher-
+  //   ranked alternatives go untried.
+  // See config.ts MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST and
+  // MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN. 0 disables the corresponding cap.
+  let attemptedDownloads = 0;
+  const attemptsByDomain = new Map<string, number>();
+  let globalCapReached = false;
+  let domainCapHits = 0;
+
   try {
     for (const pdfUrl of validUrls) {
-      const dlDomain   = pdfUrl.split("/")[2] || "";
+      const dlDomain   = sanitizeDomainKey(pdfUrl.split("/")[2] || "");
+
+      // Global cap: stop trying entirely. Future URLs are abandoned;
+      // the request falls through to the "links_only" / paid-book
+      // path so the user gets a useful response instead of a timeout.
+      if (
+        MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST > 0 &&
+        attemptedDownloads >= MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST
+      ) {
+        globalCapReached = true;
+        L.info("bot", "global download cap reached — abandoning remaining candidates", {
+          book: bookName.slice(0, 50),
+          attempted: attemptedDownloads,
+          remaining: validUrls.length - attemptedDownloads,
+          cap: MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
+        });
+        redis.incr("tel:dl:global_cap_reached").catch(() => {});
+        trace.phase("download_global_cap_reached", {
+          attempted: attemptedDownloads,
+          remaining: validUrls.length - attemptedDownloads,
+        });
+        break;
+      }
+
+      // Per-domain cap: skip this URL but keep iterating so we reach
+      // URLs from other domains. Common case is 5 Hindawi URLs in a
+      // row — historically all 5 got tried; now we stop after 2.
+      const domainAttempts = attemptsByDomain.get(dlDomain) ?? 0;
+      if (
+        MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN > 0 &&
+        dlDomain &&
+        domainAttempts >= MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN
+      ) {
+        domainCapHits++;
+        L.info("bot", "per-domain download cap reached — skipping URL", {
+          book: bookName.slice(0, 50),
+          domain: dlDomain,
+          attempted: domainAttempts,
+          cap: MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
+          url: pdfUrl.slice(0, 80),
+        });
+        redis.incr("tel:dl:per_domain_capped").catch(() => {});
+        continue;
+      }
+
+      attemptsByDomain.set(dlDomain, domainAttempts + 1);
+      attemptedDownloads++;
+
       const skipMistral = MISTRAL_NO_STREAK_LIMIT > 0 &&
                           mistralNoStreak >= MISTRAL_NO_STREAK_LIMIT;
       if (skipMistral) {
@@ -581,7 +668,7 @@ async function performFullSearch(
         sentFileId    = result.fileId;
         sentSizeMB    = result.sizeMB;
         sentSourceUrl = pdfUrl;
-        sentDomain    = pdfUrl.split("/")[2] || "";
+        sentDomain    = dlDomain; // already sanitized for stat key consistency
         sentSendMode = result.sendMode ?? "local";
 
         // FIX-WRONG-FILE: تحقق من صلة الملف المُرسَل بالكتاب المطلوب
@@ -658,6 +745,20 @@ async function performFullSearch(
       sendMode:      null,
       sendSuccess:   false,
     });
+    // Telemetry: "found something but couldn't deliver". This is the
+    // metric the 2026-05-03 audit flagged at 44%; tracking it lets
+    // operators measure the impact of the download-cap mitigations.
+    if (results.length > 0) {
+      redis.incr("tel:dl:found_no_send").catch(() => {});
+      L.warn("bot", "found_no_send — search returned results but no PDF was delivered", {
+        book: bookName.slice(0, 50),
+        results: results.length,
+        candidates: validUrls.length,
+        attempted: attemptedDownloads,
+        domainCapHits,
+        globalCapReached,
+      });
+    }
     // Paid-book detection: when EVERY candidate failed and the search
     // returned at least one result classified as paid/protected, tell
     // the user explicitly. This prevents the silent "no PDF" outcome on
