@@ -22,7 +22,10 @@ async function callCloudflare(req: SummaryRequest): Promise<SummaryResponse> {
       { role: "system", content: SYSTEM_INSTRUCTION },
       { role: "user",   content: buildUserPrompt(req.bookName, req.context) },
     ],
-    max_tokens: 1024,
+    // Bumped 1024 → 2048 to fit the structured non-fiction format
+    // (4 sections + bullets + paragraph). Arabic tokens 1.5-2×
+    // English so the old budget truncated mid-output.
+    max_tokens: 2048,
     temperature: 0.3,
   };
 
