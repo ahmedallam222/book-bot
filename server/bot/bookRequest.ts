@@ -10,6 +10,7 @@ import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
+import { hasUninformativeFilename } from "./pdfValidator.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
@@ -689,12 +690,25 @@ async function performFullSearch(
           ms:       Date.now() - t0,
           filenameScore: sentFilenameScore,
         });
-        // لا نُضيف للكاش إذا كان الملف مشبوهاً
-        if (sentFileId && !isSuspectFile) {
+        // لا نُضيف للكاش إذا كان الملف مشبوهاً.
+        // PR #33: نرفض كذلك الـ cache write للروابط بأسماء ملفات معتمة
+        // (digit-only — مثل Hindawi /books/<id>.pdf). لو الـ validator
+        // قبلهم بسبب bypass، نضمن أن الـ entry ما تتخزن لأن الـ cache
+        // hit بيرسل الـ telegramFileId مباشرة بدون أيّ re-validation —
+        // فلو كان غلط، يتسبب في "wrong-file delivered to many users"
+        // (10 entries مسممة شُوهدت في production 2026-05-03).
+        const opaqueUrl = hasUninformativeFilename(pdfUrl);
+        if (sentFileId && !isSuspectFile && !opaqueUrl) {
           storage.cacheBook({
             bookQuery: bookName, bookQueryNormalized: normalizeForCache(bookName),
             telegramFileId: sentFileId, fileName: `${bookName}.pdf`, bookName, sourceUrl: pdfUrl,
           }).catch(() => {});
+        } else if (sentFileId && opaqueUrl) {
+          redis.incr("tel:cache:opaque_url_skipped").catch(() => {});
+          L.info("cache", "Skipping cache write — opaque source URL (digit-only filename)", {
+            book: bookName.slice(0, 50),
+            url:  pdfUrl.slice(0, 80),
+          });
         }
         Promise.all([
           storage.incrementDailyDownload(userId),

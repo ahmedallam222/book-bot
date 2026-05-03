@@ -25,6 +25,25 @@ function isFilenameTrustedDomain(url: string): boolean {
   return FILENAME_TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
 }
 
+// True when the URL's filename is opaque (digit-only id, e.g. Hindawi's
+// `/books/14168605.pdf`). On hosts whose search ranker we can't trust,
+// these URLs carry zero title signal — neither the URL nor (typically)
+// the PDF metadata's `/Title` (Hindawi wraps it past the 64KB scan).
+// Production audit on 2026-05-03 found 10 cache entries poisoned with
+// wrong Hindawi PDFs because the trusted-domain bypass fired even with
+// no search title to validate against. Exported so the cache writer
+// (`bookRequest.ts`) can refuse to persist file_ids tied to opaque URLs.
+export function hasUninformativeFilename(url: string): boolean {
+  try {
+    const filename = decodeURIComponent(
+      new URL(url).pathname.split("/").pop()?.split("?")[0] || "",
+    ).replace(/\.pdf$/i, "").trim();
+    return filename.length > 0 && /^\d+$/.test(filename);
+  } catch {
+    return false;
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 //  PDF CONTENT VALIDATOR — Anti False-Positive Layer
 //
@@ -617,11 +636,17 @@ export async function validatePdfContent(
     : "";
 
   // ── trusted domains — نقبل مباشرة بدون validation ────────
-  // BUT: if the search-result title is available AND clearly mismatches
+  // PR #31: if the search-result title is available AND clearly mismatches
   // bookName, reject. This catches cases like Firecrawl returning an
   // unrelated Hindawi book ("ملك وامرأة وإله") for a query the catalog
-  // doesn't actually have ("تحت مسمى الرجولة"), which used to slip
-  // through because the bypass skipped all title checks.
+  // doesn't actually have ("تحت مسمى الرجولة").
+  //
+  // PR #33 (cache-poison defense): when there is *no* search title AND
+  // the URL filename is opaque (digit-only id), do NOT bypass — fall
+  // through to full PDF metadata + Mistral validation. Without this gate,
+  // Hindawi numeric URLs got accepted and cached even when Firecrawl
+  // returned no title to verify against (10 poisoned entries observed
+  // in production on 2026-05-03).
   if (pdfUrl && isTrustedDomain(pdfUrl)) {
     if (searchTitle) {
       const titleScore = wordOverlapScore(bookName, searchTitle);
@@ -646,17 +671,36 @@ export async function validatePdfContent(
         searchTitle: searchTitle.slice(0, 60),
         score: titleScore.toFixed(2),
       });
-    } else {
-      L.info("pdfValidator", "Trusted domain — no search title, skipping validation", { url: pdfUrl.slice(0, 80) });
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      return {
+        accepted: true,
+        score: 1,
+        event: "candidate_accepted_title_match",
+        mistralUsed: false,
+        metaTitle: searchTitle,
+      };
     }
-    redis.incr(TEL_ACCEPTED).catch(() => {});
-    return {
-      accepted: true,
-      score: 1,
-      event: "candidate_accepted_title_match",
-      mistralUsed: false,
-      metaTitle: searchTitle,
-    };
+
+    if (hasUninformativeFilename(pdfUrl)) {
+      // No search title to verify AND the URL itself carries no title
+      // signal. We can't tell if the search ranker resolved the right
+      // book — fall through to full validation (metadata + Mistral).
+      L.warn("pdfValidator", "trusted_domain_opaque_url_no_title — falling through to full validation", {
+        url:  pdfUrl.slice(0, 80),
+        book: bookName.slice(0, 50),
+      });
+      // (Falls through to the 64KB read + Mistral path below.)
+    } else {
+      L.info("pdfValidator", "Trusted domain — informative URL, no search title, skipping validation", { url: pdfUrl.slice(0, 80) });
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      return {
+        accepted: true,
+        score: 1,
+        event: "candidate_accepted_title_match",
+        mistralUsed: false,
+        metaTitle: searchTitle,
+      };
+    }
   }
 
   // ── قراءة أول 64KB — كافٍ لأي PDF metadata ──────────────

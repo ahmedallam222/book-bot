@@ -7,6 +7,49 @@
 
 ---
 
+## [31.2.0] — 2026-05-03
+
+### 🐛 إصلاحات حرجة — Cache Poisoning Defense
+
+السياق: تدقيق إنتاج (نفس اليوم بعد PR #32) كشف **10 entries مسممة** في `cached_books` كلها `downloads.hindawi.org/books/<numeric>.pdf` لكتب لا علاقة لها بمحتوى Hindawi:
+
+| id | الاستعلام | الـ URL المخزّن (غلط) |
+|----|-----------|----------------------|
+| 117 | تحت مسمى الرجولة | hindawi.org/books/14168605.pdf |
+| 122 | أزمة رجولة | hindawi.org/books/58379627.pdf |
+| 116 | لخصلي كتاب حوار مع صديقي الملحد | hindawi.org/books/31475247.pdf |
+| 115 | مذكرات لينين | hindawi.org/books/28158282.pdf |
+| 113/114 | زقاق المدق | hindawi.org/books/62575295.pdf |
+| ... | ... 5 إضافية ... | |
+
+السبب الجذري: title-gate في PR #31 (`pdfValidator.ts:625-660`) يفحص فقط لمّا `searchTitle` (HTML title من Firecrawl) **مش فاضي**. لمّا Firecrawl يرجّع title فاضي / URL خام لـ Hindawi `/books/<id>.pdf`، الـ trusted-domain bypass كان يقبل بدون أي فحص → الملف الغلط يتسلّم للمستخدم **و** يتخزّن في الكاش. كل طلب لاحق لنفس اسم الكتاب كان يُسلَّم نفس الملف الغلط من الكاش (بدون re-validation).
+
+#### الإصلاحات:
+
+1. **Validator bypass tightened** (`pdfValidator.ts`):
+   - أضفت `hasUninformativeFilename(url)` يكتشف الـ filenames الرقمية البحتة (digit-only).
+   - لو URL trusted + opaque + `searchTitle` فاضي → ما نـ bypass، نعدّي الـ full validation (metadata + Mistral).
+   - Mistral عندها قاعدة موجودة "rejects all digit-only filenames"، فالـ Hindawi mismatches الآن تُرفض حتى بدون searchTitle.
+
+2. **Cache write guard** (`bookRequest.ts:701`):
+   - حتى لو الـ validator قَبِل بسبب bug مستقبلي، الـ cache write يرفض persisting أي source_url له digit-only filename.
+   - دفاع في عمق: حتى لو wrong-file اتسلم مرّة واحدة، ما يلوّث الكاش لباقي المستخدمين.
+
+3. **Production cleanup**:
+   - حذفنا الـ 10 entries المسممة من `cached_books` (DELETE 10).
+   - مسحنا الـ search-result cache المرتبط (`sc:*` keys للأسماء المتأثرة).
+
+#### Telemetry جديد:
+- `tel:cache:opaque_url_skipped` — عدد المرّات اللي رفض فيها الـ guard كاش entry.
+
+#### اختبار:
+- 36/36 deterministic probes pass (`test-cache-poison-defense.mjs`):
+  - D1: helper على 13 URL pattern (digit-only / slug / edge cases)
+  - D2: cache-write guard logic على 6 سيناريوهات (legacy vs fixed)
+  - D3: validator bypass decision tree على 5 سيناريوهات
+
+---
+
 ## [31.1.0] — 2026-05-03
 
 ### 🐛 إصلاحات حرجية — Find-to-Send Loss Mitigation
