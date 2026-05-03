@@ -7,6 +7,18 @@
 
 ---
 
+## [31.3.1] — 2026-05-03
+
+### 🔒 أمان — patch transitive vulnerabilities + Dockerfile fix
+
+- **package.json overrides**: تثبيت `form-data ^2.5.4` و `qs ^6.14.1` و `tough-cookie ^4.1.3` و `uuid ^14.0.0` لإغلاق ثغرات منقولة (transitive) كانت تأتي من `node-telegram-bot-api → @cypress/request-promise → request-promise-core → request@deprecated`.
+- **node-telegram-bot-api**: `0.66.0 → 0.67.0` (minor، non-breaking).
+- **نتيجة `npm audit`**: من 15 ثغرة (2 critical + 1 high + 12 moderate) إلى 10 (0 critical + 1 high + 9 moderate). الـ 2 critical (`form-data`) إتقفلوا.
+- **متبقّي وموثَّق**: ثغرة drizzle-orm SQL identifier injection (HIGH — fix يحتاج upgrade من 0.30 إلى 0.45 بـ breaking changes؛ البوت لا يمرر identifiers مُتحكَّم بها من المستخدم → الفجوة لا تنطبق عملياً)، ثغرات esbuild dev-server (moderate — esbuild يُستخدم وقت البناء فقط مش وقت التشغيل)، ثغرة `request` SSRF transitive (moderate — لا تنطبق على Telegram-only outbound calls).
+- **Dockerfile**: إضافة `COPY --from=builder /app/script ./script` لكي تكون scripts العمليات (مثل `migrate-premium-to-manual.mjs`) متاحة عبر `docker compose exec bot node script/<file>.mjs`.
+
+---
+
 ## [31.3.0] — 2026-05-03
 
 ### 🐛 إصلاحات حرجة — Premium TTL expiration (billing)
