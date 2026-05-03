@@ -100,6 +100,17 @@ export const SUMMARY_DAILY_LIMIT_FREE = parseInt(
   10,
 );
 
+// Global, bot-wide daily ceiling on AI summary calls (cache hits do
+// not count). Exists to protect the free Gemini quota (1500/day) from
+// a viral spike or abuse — once we hit this number, new requests
+// receive a "try again tomorrow" message while cached summaries keep
+// flowing. Default 1200 = 80% of Gemini's free tier with 300-call
+// headroom for retries / failover noise. Set to 0 to disable.
+export const SUMMARY_DAILY_LIMIT_GLOBAL = parseInt(
+  process.env.SUMMARY_DAILY_LIMIT_GLOBAL || "1200",
+  10,
+);
+
 // How long to keep generated summaries in Redis. The same book
 // always yields the same summary, so caching effectively eliminates
 // repeat-cost — most production traffic should be cache hits after
