@@ -91,7 +91,11 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
 );
 
 // ── Trusted PDF domains ───────────────────────
-// Domains whose download/dl paths are known to serve real PDFs
+// Aggregators / mirrors. Anything served from these download/dl paths
+// is assumed to be the requested book — we skip Mistral entirely.
+// (libgen-class hosts only resolve the requested ID to a binary, so a
+// content mismatch would imply a deliberately-wrong upload, not a
+// search-ranker mistake.)
 export const TRUSTED_PDF_DOMAINS: string[] = [
   "dl.waqfeya.net",
   "books-library.net",

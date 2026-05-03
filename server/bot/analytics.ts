@@ -47,6 +47,16 @@ export async function trackSourceAttempt(domain: string, ok: boolean): Promise<v
   await redis.hincrby(`stats:source:${dc}`, ok ? "ok" : "fail", 1).catch(() => {});
 }
 
+// Mistral rejected the PDF as content-mismatch (wrong book). The source
+// successfully delivered a real PDF — the search just picked a bad URL on
+// this domain. Track separately so the auto-disable logic doesn't punish
+// a working source for the search ranker's choices.
+export async function trackSourceMistralReject(domain: string): Promise<void> {
+  const dc = domain.replace(/^www\./, "").replace(/[^a-z0-9.-]/gi, "");
+  if (!dc) return;
+  await redis.hincrby(`stats:source:${dc}`, "mistral_rejected", 1).catch(() => {});
+}
+
 // ── Funnel tracking ───────────────────────────
 export interface FunnelEvent {
   searchFound:   boolean;
@@ -117,6 +127,7 @@ export async function getSourceStats(): Promise<{
   domain: string;
   ok: number;
   fail: number;
+  mistralRejected: number;
   total: number;
   successRate: number;
   rate: string;
@@ -128,6 +139,7 @@ export async function getSourceStats(): Promise<{
       domain: string;
       ok: number;
       fail: number;
+      mistralRejected: number;
       total: number;
       successRate: number;
       rate: string;
@@ -138,12 +150,14 @@ export async function getSourceStats(): Promise<{
       const raw    = await redis.hgetall(key);
       const ok = parseInt(raw?.ok || "0", 10);
       const fail = parseInt(raw?.fail || "0", 10);
+      const mistralRejected = parseInt(raw?.mistral_rejected || "0", 10);
       const total = ok + fail;
       const successRate = total > 0 ? ok / total : 0;
       results.push({
         domain,
         ok,
         fail,
+        mistralRejected,
         total,
         successRate,
         rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
