@@ -7,7 +7,7 @@ description: Test the Telegram book-bot production runtime, source quality, and 
 
 ## When to use
 
-Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, or smart cached-PDF behavior.
+Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, smart cached-PDF behavior, or admin-toggle/event-driven features such as maintenance-mode announcements.
 
 ## Devin Secrets Needed
 
@@ -26,11 +26,16 @@ Do not print production `.env` values. Production runtime secrets live in `/home
 - Dashboard/admin API is served by the running bot server on port 5000. Use `DASHBOARD_SECRET` from inside the bot container for authenticated admin API probes.
 - `/home/ubuntu/posts/bot.py` is a separate daily-posting script. Do not modify or delete it during book-bot tests.
 
-## Critical safety rule
+## Critical safety rules
 
 Do **not** run `node -e 'require("/app/dist/index.cjs")'` or otherwise import the bundled production entrypoint inside the running bot container. Importing the entrypoint starts a second Telegram polling process and can cause `ETELEGRAM 409 Conflict` errors.
 
-Instead, test through the already-running process using:
+The bot container does **not** include `curl` — only `wget` (used by the healthcheck) is available inside it. For HTTP probes, either:
+
+- Run `curl` from the host against `http://127.0.0.1:5000` (the bot's port mapping is `5000:5000`), reading `DASHBOARD_SECRET` via `docker compose exec -T bot printenv DASHBOARD_SECRET`, or
+- Use the embedded-`node` snippet pattern shown in the health check below.
+
+Instead of importing the bundle, test through the already-running process using:
 
 ```bash
 cd /home/ubuntu/book-bot
@@ -121,6 +126,85 @@ docker compose logs --since="$START_TS" bot 2>&1 | grep -E 'uncaughtException|Fi
 
 Expected: no matches after test recovery. Historical 409 lines may exist if a previous session accidentally started a second polling process; final state should still show one actual Node process and no recent 409s.
 
+## Testing event-driven announcements (e.g. maintenance toggle)
+
+For features that listen to admin actions (Telegram inline button, dashboard `PUT`) and dispatch side-effects through process events (e.g. `bot:maintenance_ended` → `announceMaintenanceEnd(bot)`), the cheapest end-to-end verification path is to drive the dashboard PUT with the `DASHBOARD_SECRET` and watch logs + Redis state. No Telegram admin session needed.
+
+### Pattern: dashboard PUT triggers async event
+
+```bash
+cd /home/ubuntu/book-bot
+TOKEN=$(sudo docker compose exec -T bot printenv DASHBOARD_SECRET | tr -d '\r\n')
+
+# Toggle ON
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":true}'
+
+sleep 2
+
+# Toggle OFF — this is the transition that fires the announcement
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":false}'
+```
+
+Expected log sequence (within a few seconds):
+
+```
+[admin] 🔧maintenance OFF {"who":"dashboard"}
+[maintenanceAnnounce] Announcing maintenance end {"targets":N,"known":K,"env":E}
+[maintenanceAnnounce] Done {"sent":N,"failed":0,"removed":0,"total":N}
+```
+
+### Pattern: simulate "known group" without involving the user
+
+The groupTracker (`bot:known_groups` Redis SET) is normally populated when a user posts in a group. To test the announcement path immediately, inject the admin's own bot DM chatId so the test message lands in the tester's own Telegram conversation with the bot:
+
+```bash
+ADMIN_DM_CHAT_ID='<positive-numeric-id>'   # e.g. the admin who runs /start
+sudo docker compose exec -T redis redis-cli SADD bot:known_groups "$ADMIN_DM_CHAT_ID"
+sudo docker compose exec -T redis redis-cli HSET bot:known_groups:meta "$ADMIN_DM_CHAT_ID" \
+  '{"title":"Admin DM (synthetic test target)","lastSeen":0}'
+```
+
+Then run the toggle pattern above. The bot will deliver the announcement to that DM — verifiable with a single screenshot.
+
+Alternatively, use `MAINTENANCE_ANNOUNCE_CHAT_IDS=<csv>` in the prod `.env` to pin permanent broadcast targets without touching Redis.
+
+### Pattern: testing the 60-second NX lock for idempotence
+
+The routes.ts handler only emits the event on a real ON→OFF transition (it reads `wasActive` before the toggle). To force a *second* `announceMaintenanceEnd` call within the lock window, manually flip the flag back to ON via Redis between PUT calls:
+
+```bash
+# After the first OFF (which has already fired the announcement), the lock
+# `maintenance:announce:lock` is set with TTL up to 60s.
+sudo docker compose exec -T redis redis-cli TTL maintenance:announce:lock
+sudo docker compose exec -T redis redis-cli SET flag:maintenance 1   # bypass routes.ts guard
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":false}'
+```
+
+Expected log line: `[maintenanceAnnounce] Skipping — another announcement in flight`. The lock value should be **unchanged** — proving `SET ... NX` refused to overwrite.
+
+Clean up after testing:
+
+```bash
+sudo docker compose exec -T redis redis-cli DEL bot:known_groups bot:known_groups:meta maintenance:announce:lock flag:maintenance
+```
+
+### Critical gotcha: `docker compose restart` does NOT reload `.env`
+
+If you add or change an env var in `/home/ubuntu/book-bot/.env`, a plain `docker compose restart bot` will **not** pick it up — the variable will appear empty inside the container. To reload env vars you must recreate the container:
+
+```bash
+cd /home/ubuntu/book-bot
+sudo docker compose up -d bot
+sleep 8
+sudo docker compose exec -T bot printenv MY_NEW_ENV_VAR   # verify it loaded
+```
+
 ## Reporting limitations
 
-If no logged-in Telegram Web/test-chat session is available, explicitly mark literal chat UI testing as untested. Ask Ahmed to send messages while logs are monitored, or provide a test Telegram session, if full chat UI proof is required.
+If no logged-in Telegram Web/test-chat session is available, explicitly mark literal chat UI testing as untested. Ask Ahmed to send messages while logs are monitored, or provide a test Telegram session, if full chat UI proof is required. For event-driven side-effect features (announcements, alerts), a single visual confirmation from the user is usually enough — the dashboard-PUT pattern above proves the dispatch logic without involving Telegram.
