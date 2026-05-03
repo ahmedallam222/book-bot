@@ -463,6 +463,7 @@ async function askMistral(
   bookName:  string,
   metaTitle: string,
   urlHint:   string,
+  explicitFilenameHint: string = "",
 ): Promise<boolean> {
   // FIX: fail-closed بدون مفتاح — بدل fail-open
   // بدون Mistral، كل الحالات الغامضة يجب أن تُرفَض لا أن تُقبَل
@@ -477,7 +478,14 @@ async function askMistral(
   // ملاحظة: pdfUrl يُمرَّر هنا عبر المعامل urlHint الأصلي للدالة
   // لتجنب تغيير signature الدالة، نستخدم urlHint كما هو لكن بعد SHA-256 على القيمة الكاملة
   // (urlHint = pdfUrl كاملاً من الـ caller في validatePdfContent)
-  const cacheKey = `mv:${createHash("sha256").update(`${urlHint}|${bookName}`).digest("hex").slice(0, 16)}`;
+  // FIX (CD-filename): cache key بيشمل اسم الـ Content-Disposition عشان verdicts قديمة
+  //   كانت بتبقى "NO" قبل ما نضيف الـ header لازم تـ invalidate لما الـ header
+  //   يبدأ يوصل (مثلاً Hindawi numeric URL: نفس الـ pdfUrl لكن CD فيها اسم الكتاب
+  //   الحقيقي → verdict جديد).
+  const cacheSeed = explicitFilenameHint
+    ? `${urlHint}|${bookName}|cd:${explicitFilenameHint}`
+    : `${urlHint}|${bookName}`;
+  const cacheKey = `mv:${createHash("sha256").update(cacheSeed).digest("hex").slice(0, 16)}`;
   try {
     const cached = await redis.get(cacheKey);
     if (cached !== null) {
@@ -488,12 +496,20 @@ async function askMistral(
 
   // FIX: نفك ترميز الـ URL slug (مثلاً %D8%A2%D9%86%D8%A7 → آنا) قبل ما نوريه لـ Mistral.
   // مع الـ URL الخام كان Mistral بيشوف "غير مفهوم" ويرفض حتى لو الـ slug فيه اسم الكتاب الكامل.
+  // FIX (CD-filename): لو الـ caller مرّر اسم ملف صريح (من Content-Disposition) نستخدمه
+  //   مباشرة. هو ده اللي بيحل مشكلة الـ hosts اللي بتخدّم URLs رقمية بدون أسماء
+  //   (Hindawi /books/62575295.pdf، foulabook /book/downloading/123، إلخ) لكن
+  //   بترسل اسم الكتاب الحقيقي في الـ HTTP header.
   let promptFilename = urlHint;
-  try {
-    const decoded = decodeURIComponent(new URL(urlHint).pathname.split("/").pop() || "");
-    const cleaned = decoded.replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim();
-    if (cleaned.length > 1) promptFilename = cleaned;
-  } catch { /* urlHint مش URL → نسيبه زي ما هو */ }
+  if (explicitFilenameHint && explicitFilenameHint.trim().length > 1) {
+    promptFilename = explicitFilenameHint.trim();
+  } else {
+    try {
+      const decoded = decodeURIComponent(new URL(urlHint).pathname.split("/").pop() || "");
+      const cleaned = decoded.replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim();
+      if (cleaned.length > 1) promptFilename = cleaned;
+    } catch { /* urlHint مش URL → نسيبه زي ما هو */ }
+  }
 
   // FIX: Prompt متوازن — صارم بشكل كافٍ يرفض كتب مختلفة تماماً، ومرن بشكل كافٍ
   // يقبل التطابق بالـ slug/الترجمة/الـ transliteration.
@@ -570,6 +586,12 @@ async function askMistral(
  * @param filePath  مسار الملف المؤقت على الديسك
  * @param bookName  اسم الكتاب الذي طلبه المستخدم
  * @param pdfUrl    URL المصدر — يُستخدم كـ cache key لـ Mistral + filename hint
+ * @param skipMistral  لو true بيـ skip الـ Mistral validation (early-stop)
+ * @param contentDispositionFilename  اسم الملف المستخرج من HTTP `Content-Disposition`
+ *   header. ضروري للـ hosts اللي بتخدّم URL رقمي بحت (مثلاً Hindawi
+ *   `/books/62575295.pdf` أو foulabook `/book/downloading/<id>`) لكن بترسل اسم
+ *   الكتاب الحقيقي في الـ header. لو فاضي، الـ validator بيرجع للـ URL filename
+ *   كما كان قبل (سلوك متوافق).
  * @returns PdfValidationResult — accepted:true → أرسل | false → جرّب التالي
  */
 export async function validatePdfContent(
@@ -577,6 +599,7 @@ export async function validatePdfContent(
   bookName:    string,
   pdfUrl:      string = "",
   skipMistral: boolean = false,
+  contentDispositionFilename: string = "",
 ): Promise<PdfValidationResult> {
   const t0 = Date.now();
 
@@ -632,11 +655,37 @@ export async function validatePdfContent(
       .replace(/\.pdf$/i, "").replace(/[-_+]/g, " ").trim();
   } catch { /* URL غير صالح → تجاهل */ }
 
+  // اسم الملف من Content-Disposition — أصدق من الـ URL لما الـ host بيخدّم
+  // معرّف رقمي في الـ pathname (مثلاً Hindawi /books/62575295.pdf، foulabook
+  // /book/downloading/123). لو فاضي، نستخدم اسم الـ URL.
+  let cdFilename = "";
+  if (contentDispositionFilename) {
+    cdFilename = contentDispositionFilename
+      .replace(/\.pdf$/i, "")
+      .replace(/[-_+]/g, " ")
+      .trim();
+  }
+
+  // اختر الأفضل: CD لو فيه أحرف حقيقية وURL ضعيف (رقم بحت، فاضي، أو قصير
+  // جداً ASCII). بعكس ذلك نسيب URL filename لأنه بيكون فيه slug عربي/إنجليزي
+  // مفيد (مثل foulabook /ar/book/<slug-of-book>).
+  const urlHasLetters = /[a-zA-Z\u0600-\u06FF]/.test(urlFilename);
+  const cdHasLetters  = /[a-zA-Z\u0600-\u06FF]/.test(cdFilename);
+  const filenameHint  = (cdHasLetters && (!urlHasLetters || urlFilename.length < 4))
+    ? cdFilename
+    : urlFilename;
+  const filenameSource = filenameHint === cdFilename && cdFilename
+    ? "content-disposition"
+    : "url";
+
   L.info("pdfValidator", "Extracted metadata", {
-    book:      bookName.slice(0, 50),
-    metaTitle: metaTitle.slice(0, 80) || "(empty)",
-    filename:  urlFilename.slice(0, 60) || "(empty)",
-    ms:        Date.now() - t0,
+    book:           bookName.slice(0, 50),
+    metaTitle:      metaTitle.slice(0, 80) || "(empty)",
+    filename:       filenameHint.slice(0, 60) || "(empty)",
+    filenameSource,
+    urlFilename:    urlFilename.slice(0, 30) || "(empty)",
+    cdFilename:     cdFilename.slice(0, 30) || "(empty)",
+    ms:             Date.now() - t0,
   });
 
   // ── لا metaTitle → تحقق من اسم الملف أولاً ─────────
@@ -653,7 +702,10 @@ export async function validatePdfContent(
     //  - خلط حروف+أرقام ≤8 بدون _ أو - (عشوائي مثل xK9mP2) = رفض
     //  - اسم له كلمات (فيه _ أو - أو أحرف فقط بدون أرقام) = يمر حتى لو قصير
     //  - رقمي بحت (ID موثوق مثل 53814181) = يمر
-    const _fn = urlFilename.replace(/\s/g, "");
+    // FIX (CD-filename): نختبر الـ filenameHint اللي يفضل CD على URL،
+    // مش الـ urlFilename الخام — كده أي host بيخدّم numeric ID لكن header
+    // فيها اسم حقيقي يعدّي الـ meaningless check.
+    const _fn = filenameHint.replace(/\s/g, "");
     const _hasAlpha = /[a-zA-Z]/.test(_fn);
     const _hasDigit = /[0-9]/.test(_fn);
     const _hasSep   = /[_-]/.test(_fn);           // underscore/dash = كلمات منفصلة
@@ -669,15 +721,18 @@ export async function validatePdfContent(
     if (isMeaninglessFilename && MISTRAL_API_KEY) {
       redis.incr(TEL_REJECTED).catch(() => {});
       L.warn("pdfValidator", "candidate_rejected_title_mismatch — no metaTitle + meaningless filename", {
-        book: bookName.slice(0, 50), filename: urlFilename.slice(0, 30),
+        book: bookName.slice(0, 50), filename: filenameHint.slice(0, 30),
       });
       return { accepted: false, score: 0, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle: "" };
     }
 
     if (MISTRAL_API_KEY) {
-      L.info("pdfValidator", "No metaTitle — delegating to Mistral", { book: bookName.slice(0, 50) });
+      L.info("pdfValidator", "No metaTitle — delegating to Mistral", {
+        book: bookName.slice(0, 50),
+        filenameSource,
+      });
       redis.incr(TEL_MISTRAL).catch(() => {});
-      const accepted = await askMistral(bookName, "", pdfUrl);
+      const accepted = await askMistral(bookName, "", pdfUrl, filenameHint);
       if (accepted) redis.incr(TEL_ACCEPTED).catch(() => {});
       else          redis.incr(TEL_REJECTED).catch(() => {});
       L.info("pdfValidator",
@@ -794,7 +849,8 @@ export async function validatePdfContent(
   });
 
   // BUG FIX: نُمرِّر pdfUrl كاملاً (وليس urlFilename) لضمان uniqueness في الـ cache key
-  const accepted = await askMistral(bookName, metaTitle, pdfUrl);
+  // FIX (CD-filename): نمرّر filenameHint (CD أو URL) كـ explicit filename للـ prompt.
+  const accepted = await askMistral(bookName, metaTitle, pdfUrl, filenameHint);
 
   if (accepted) {
     redis.incr(TEL_ACCEPTED).catch(() => {});
