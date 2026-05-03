@@ -7,6 +7,49 @@
 
 ---
 
+## [31.3.0] — 2026-05-03
+
+### 🐛 إصلاحات حرجة — Premium TTL expiration (billing)
+
+السياق: تدقيق الكود كشف خطأ خطير في منطق Premium بـ`server/bot/userSettings.ts`:
+
+- `isPremium()` كان يفحص `SISMEMBER premium:users` فقط.
+- لمّا اشتراك مدفوع TTL ينتهي (30 يوم)، Redis يمسح مفتاح `premium:exp:{uid}` تلقائياً، **لكن المستخدم يفضل في الـ Set للأبد**.
+- النتيجة: العميل يدفع مرّة واحدة → Premium دائم. خسارة إيرادات مباشرة.
+
+كذلك التجديد عن طريق `setex` كان **يستبدل** الـ TTL بدل ما يـ يمدّده، مخالفاً سلوك README الموثّق ("التجديد يمدّد الصلاحية القائمة").
+
+#### الإصلاحات:
+
+1. **Lazy cleanup في `isPremium()`** (`userSettings.ts`):
+   - منطق جديد: `isPremium = inSet AND (premium:exp موجود OR premium:manual موجود)`
+   - مفتاح ثالث `premium:manual:{uid}` للتمييز بين منحة Admin (بلا انتهاء) واشتراك مدفوع (TTL).
+   - لو user في الـ Set بدون أي من المفتاحين → اشتراك انتهى → SREM فوري (lazy cleanup) + `false`.
+   - الـ pipeline 1 round-trip بدل 3.
+
+2. **Renewal extends instead of replaces** (`userSettings.ts:setPremium`):
+   - يقرأ الـ TTL القائم → يجمع معاه `days*86400` → يكتب الـ TTL الجديد.
+   - عميل عنده 10 أيام باقية يجدد بـ 30 → 40 يوم. كان قبل الإصلاح: 30 يوم (يخسر 10).
+
+3. **Hot path pipeline updated** (`bookRequest.ts`):
+   - الـ pipeline في `handleBookRequest` يضيف `EXISTS premium:exp/manual` بدل `sismember` فقط.
+   - يحسب `isPrem` بنفس المنطق الصحيح + lazy cleanup. لا round-trips إضافية لكنه أصحّ.
+
+4. **Migration script** (`script/migrate-premium-to-manual.mjs`):
+   - يُترَك كل عضو سابق في `premium:users` بدون `premium:exp` كـ admin grant (يُضاف `premium:manual:{uid}`).
+   - يحمي users القدامى من الـ downgrade المفاجئ. يُشغَّل مرّة واحدة بعد الـ deploy.
+
+#### اختبار:
+- 23/23 deterministic probes pass (`test-premium-expiration.mjs`):
+  - T1: paid expires after TTL + lazy cleanup
+  - T2: renewal extends remaining time (10+30=40 days)
+  - T3: admin grant lasts forever, no expiry
+  - T4: revoke clears all 3 keys
+  - T5: lazy cleanup of pre-fix stale entries
+  - T6: paid renewal supersedes manual grant
+
+---
+
 ## [31.2.0] — 2026-05-03
 
 ### 🐛 إصلاحات حرجة — Cache Poisoning Defense
