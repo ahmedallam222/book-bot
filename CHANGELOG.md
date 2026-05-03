@@ -7,6 +7,52 @@
 
 ---
 
+## [31.1.0] — 2026-05-03
+
+### 🐛 إصلاحات حرجية — Find-to-Send Loss Mitigation
+
+السياق: تدقيق إنتاج (2026-05-03) كشف أن **44%** من الطلبات اللي البوت "بيلاقي" فيها كتاب ما بتنتهي بإرسال PDF (82 sent vs 65 found-but-lost في 7 أيام). السبب الجذري: حلقة التحميل في `bookRequest.ts` كانت **بدون أي cap** — كل URL مُرشَّح يتم تجريبه حتى ينجح واحد. مصادر منخفضة النجاح (هنداوي 16%، فولا بوك 25%) كانت تكدّس الحلقة بـ 4-8 محاولات فاشلة لكل طلب، تستهلك ~90 ثانية × N قبل ما المستخدم يحصل على "links_only".
+
+ثلاث طبقات إصلاح متكاملة:
+
+- **Cap عالمي على المحاولات لكل طلب** (`MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST=6`):
+  بعد 6 URLs مجرّبة، الحلقة تتوقف وتُسلّم للمسار الـ "links_only" / paid-book بدل ما تكمل لساعة. يحمي workers الـ queue من الجمود على طلب واحد.
+
+- **Cap لكل دومين داخل الطلب** (`MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN=2`):
+  لو 5 URLs من هنداوي و 2 من bookleaks: قبل التغيير، 5 هنداوي يُجرَّبون كاملين قبل الانتقال. الآن نقف بعد 2 من نفس الدومين ونكمّل بدومين تاني. يضمن إن مصادر متعددة تأخذ فرصة، حتى لو واحد منها مكدّس في القائمة.
+
+- **Soft penalty للمصادر منخفضة النجاح في الـ scoring** (`LOW_SUCCESS_RATE_PENALTY_THRESHOLD=0.30`):
+  `reliablePenalty` كان binary: -1 لـ `UNRELIABLE_DOMAINS` أو +1 لأيّ شيء آخر. هنداوي عند 16% كانت تحصل على +1 (لا عقوبة). الآن لو الـ source rate < 30% (وفيه data كافٍ) → -0.5 (soft). جرب ثلاثي:
+  - Hindawi: 0.398 → **0.097** (تقع لآخر القائمة)
+  - Foulabook: 0.475 (lower because soft penalty + better filename)
+  - Bookleaks: 1.000 (يبقى أوّل اختيار)
+
+### 🔧 إصلاحات داعمة + تنظيف
+
+- `analytics.ts`: استخراج `sanitizeDomainKey()` كنقطة موحّدة للـ normalization. قبل: `trackDownload` كان يكتب الدومين خام (`bookleaks.com` و `www.bookleaks.com` يصيرون رفّين منفصلين)، بينما `trackSourceAttempt` و `trackSourceMistralReject` كانوا ينظّفون. النتيجة: `getSourceStats` يقسم نفس الموقع لرفّين، يضرب signal الـ auto-disable. الآن كل المسارات تستخدم نفس الـ helper، و `getSourceStats` يدمج المفاتيح القديمة الـ `www.*` على القراءة بدون migration.
+- `bookRequest.ts`: استخدام `sanitizeDomainKey()` لكل قراءة دومين من URL (`dlDomain`، `sentDomain`، `srcRateMap` lookup) لضمان consistency بين الـ scoring والـ writes والـ caps.
+- Telemetry جديد لقياس أثر الـ caps:
+  - `tel:dl:per_domain_capped` — عدد URLs اللي تخطيناها لو domain cap اتحط
+  - `tel:dl:global_cap_reached` — عدد الطلبات اللي وصلت للـ global cap
+  - `tel:dl:found_no_send` — عدد الطلبات اللي البوت لاقى نتائج بس ماعرفش يبعث ملف (المتريك الأساسي للتدقيق — قبل/بعد الإصلاح)
+- `L.warn("found_no_send", …)` log structured بـ `book`, `results`, `candidates`, `attempted`, `domainCapHits`, `globalCapReached` لتسهيل البحث في الـ logs عن root cause لكل حادثة فشل.
+
+### 📐 إعدادات قابلة للضبط (env)
+
+- `MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST=6` — 0 يعطّل الـ cap.
+- `MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN=2` — 0 يعطّل الـ cap.
+- `LOW_SUCCESS_RATE_PENALTY_THRESHOLD=0.30` — 0 يعطّل الـ soft penalty.
+
+### 🧪 الاختبار
+
+- `test-source-weighting.mjs`: 20/20 deterministic probes تغطّي:
+  - `sanitizeDomainKey` لـ `www.`, uppercase, ports, empty, whitespace
+  - default values لكل env knob
+  - scoring math مع أرقام الإنتاج الحقيقية (Hindawi 16%, Foulabook 25%, Bookleaks 100%)
+  - simulation للـ loop مع per-domain cap + global cap (3 سيناريوهات: full traffic، global hit، caps disabled)
+
+---
+
 ## [31.0.0] — 2026-05-03
 
 ### 🐛 إصلاحات حرجية — PDF Mismatch + Paid-Book Detection
