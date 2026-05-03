@@ -32,7 +32,11 @@ import { L } from "./logger.js";
 let _browserPromise: Promise<Browser> | null = null;
 let _browserCloseTimer: NodeJS.Timeout | null = null;
 
-const NOORBOOK_RESOLVE_TIMEOUT_MS = Number(process.env.NOORBOOK_TIMEOUT_MS || 90_000);
+// Default 30s — fail fast on books whose JS-token flow stalls
+// (e.g. is_user_ready never set, internal_download_link never injected),
+// so the worker can fall back to other sources instead of burning ~3 min
+// on Playwright retries. Override via NOORBOOK_TIMEOUT_MS for slower hosts.
+const NOORBOOK_RESOLVE_TIMEOUT_MS = Number(process.env.NOORBOOK_TIMEOUT_MS || 30_000);
 const NOORBOOK_DOWNLOAD_TIMEOUT_MS = Number(process.env.NOORBOOK_DOWNLOAD_TIMEOUT_MS || 120_000);
 // Idle browser → اقفله بعد 5 دقائق عشان مايحطش RAM
 const BROWSER_IDLE_CLOSE_MS = Number(process.env.NOORBOOK_BROWSER_IDLE_MS || 5 * 60_000);
@@ -186,7 +190,9 @@ export async function downloadNoorBookPdf(
     });
 
     // ننتظر <a class="internal_download_link"> يظهر في .download-body
-    // ده بيظهر بعد ما POST /book/get_download_links يرجع HTML
+    // ده بيظهر بعد ما POST /book/get_download_links يرجع HTML.
+    // Bound by NOORBOOK_RESOLVE_TIMEOUT_MS so a stuck page fails fast instead
+    // of holding the worker for the previous hardcoded 60s.
     const internalUrl: string = await page
       .waitForFunction(
         () => {
@@ -195,7 +201,7 @@ export async function downloadNoorBookPdf(
           ) as HTMLAnchorElement | null;
           return a && a.href ? a.href : null;
         },
-        { timeout: 60_000 },
+        { timeout: NOORBOOK_RESOLVE_TIMEOUT_MS },
       )
       .then((h) => h.jsonValue() as Promise<string>);
 
