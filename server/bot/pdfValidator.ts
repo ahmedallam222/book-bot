@@ -1,7 +1,7 @@
 import * as fsPromises from "fs/promises";
 import { createHash }  from "crypto";
 import { L } from "./logger.js";
-import { normalizeArabic } from "./text.js";
+import { normalizeArabic, urlFilenameRelevance } from "./text.js";
 import { redis } from "./redis.js";
 import {
   MISTRAL_API_KEY,
@@ -9,11 +9,20 @@ import {
   PDF_VALIDATE_REJECT_THRESHOLD,
   TIMEOUT_MISTRAL,
   TRUSTED_PDF_DOMAINS,
+  FILENAME_TRUSTED_PDF_DOMAINS,
+  MISTRAL_BYPASS_FILENAME_THRESHOLD,
 } from "./config.js";
 
 // domains موثوقة — نتخطى الـ validator ونقبل مباشرة
 function isTrustedDomain(url: string): boolean {
   return TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
+}
+
+// Curated content libraries — trust filename match as ground truth.
+// Used to short-circuit Mistral when the filename score is high enough,
+// avoiding paid API calls on PDFs that the URL itself already identifies.
+function isFilenameTrustedDomain(url: string): boolean {
+  return FILENAME_TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
 }
 
 // ══════════════════════════════════════════════════════════════
