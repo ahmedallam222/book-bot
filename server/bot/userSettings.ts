@@ -149,17 +149,30 @@ export async function premiumCount(): Promise<number> {
 const ULIMIT_KEY  = (uid: string) => `ulimit:${uid}`;
 const ULIMIT_NOTE = (uid: string) => `unote:${uid}`;
 
-export async function getUserDailyLimit(userId: string): Promise<number> {
+/**
+ * منطق احتساب الحد اليومي بدون أي round-trip.
+ *   - لو فيه ULIMIT override رقمي صالح → يفوز
+ *   - وإلا: PREMIUM_LIMIT لو premium، DAILY_LIMIT خلاف ذلك
+ */
+export function computeDailyLimit(prem: boolean, override: string | null): number {
+  if (override !== null) {
+    const n = parseInt(override, 10);
+    if (!isNaN(n)) return n;
+  }
+  return prem ? PREMIUM_LIMIT : DAILY_LIMIT;
+}
+
+/**
+ * @param premHint  لو الـ caller حسب isPremium بنفسه فعلاً (مثلاً من pipeline أكبر)،
+ *                  يمرّره هنا عشان ما نـ recall isPremium ونعمل round-trip زائد.
+ */
+export async function getUserDailyLimit(userId: string, premHint?: boolean): Promise<number> {
   try {
     const [prem, override] = await Promise.all([
-      isPremium(userId),
+      premHint !== undefined ? Promise.resolve(premHint) : isPremium(userId),
       redis.get(ULIMIT_KEY(userId)),
     ]);
-    if (override !== null) {
-      const n = parseInt(override, 10);
-      if (!isNaN(n)) return n;
-    }
-    return prem ? PREMIUM_LIMIT : DAILY_LIMIT;
+    return computeDailyLimit(prem, override);
   } catch {
     return DAILY_LIMIT;
   }
