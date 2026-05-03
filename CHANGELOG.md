@@ -7,6 +7,36 @@
 
 ---
 
+## [31.0.0] — 2026-05-03
+
+### 🐛 إصلاحات حرجية — PDF Mismatch + Paid-Book Detection
+
+السياق: مستخدم طلب "تحت مسمى الرجولة" (نوال السعداوي — كتاب مدفوع، غير منشور رقمياً مجاناً) فأرسل البوت ملف "ملك وامرأة وإله" (نفس المؤلفة، نشر هنداوي) باسم ملف مزوّر `تحت_مسمى_الرجولة.pdf`. أربع طبقات حماية تمنع تكرار الحادثة:
+
+- **L1 — title-gate حتى على الـ trusted domains** (`pdfValidator.ts`):
+  قبل: `isTrustedDomain(url)` كان يقبل أيّ PDF من `downloads.hindawi.org` بـ `score=1` بدون أيّ فحص للعنوان. هذا تعليق قديم في الكود (`config.ts:152-169`) كان يعترف بالخطر: "the failure mode (search-ranker mismatch) is the same as libgen". الآن `validatePdfContent` تستقبل `searchResultTitle` (HTML `<title>` من Firecrawl) وتفحص `wordOverlapScore(bookName, searchResultTitle)`. لو أقل من `PDF_VALIDATE_REJECT_THRESHOLD` تُرجع event جديد `trusted_domain_title_mismatch` وتقفز للمرشح التالي.
+
+- **L2 — اسم الملف يطابق المحتوى الفعلي** (`download.ts`):
+  قبل: `cleanBookName = bookName.replace(...)` ثم `fname = "${cleanBookName}.pdf"` يستخدم نصّ المستخدم الخام دائماً. النتيجة في الحادثة: ملف اسمه `تحت_مسمى_الرجولة.pdf` يحتوي "ملك وامرأة وإله" (تضليل صريح). أضيف `buildPdfFilename(bookName, validation.metaTitle)` يفضّل العنوان الحقيقي من `/Title` metadata لو متاح ومختلف عن طلب المستخدم. كذلك `buildCaption(bookName, metaTitle)` يُضيف سطر "📖 _<العنوان الفعلي>_" تحت طلب المستخدم لما العنوانان مختلفان — المستخدم يرى الفرق فوراً قبل فتح الملف.
+
+- **L3 — رسالة كتاب مدفوع واضحة** (`bookRequest.ts` + `ui.ts`):
+  قبل: لو فشل كل المرشّحين، البوت يبعث `buildFailMessage` (روابط لمواقع البحث) — يبدو كأنه bug. الآن `performFullSearch` يعدّ نتائج Firecrawl المصنّفة `access: "protected_page"` (المُكتشفة بأنماط `PROTECTED_ACCESS_PATTERNS` مثل "اشترِ"، "buy now"، "premium"). لو `paidSignalCount > 0` و كل التحميلات فشلت → `buildPaidBookMessage(bookName)`: "📕 *كتاب مدفوع أو غير متوفر مجاناً* … قد يكون مدفوعاً، أو متاحاً للقراءة فقط على موقع الناشر، أو غير منشور رقمياً بعد".
+
+- **L4 — استخدام الـ search title كـ fallback لـ metaTitle** (`pdfValidator.ts`):
+  بعض الهوستات (هنداوي تحديداً) تضع `/Title` بعد أول 64KB من PDF فلا يستخرجه الـ validator. قبل: غياب `metaTitle` → fallback لـ Mistral مع `metaTitle=""` (يخمّن من الـ URL وحده). الآن لو `searchResultTitle` متاح وصالح، يصير `effectiveMetaTitle` لكامل المنطق التالي (الـ score الموضعي + cross-language detection + Mistral). يقلل false-rejects على هنداوي ويعطي Mistral سياقاً صادقاً.
+
+### 🔧 تحسينات تقنية
+- `BookResult.title` (موجود سلفاً من `engine.ts:271` — `doc.metadata.title`) يُمرَّر الآن عبر `urlSearchTitle: Map<string, string>` في `performFullSearch`، ثم لـ `downloadAndSend(..., searchResultTitle)`، ثم `validatePdfContent(..., searchResultTitle)`. تمرير عبر التواقيع فقط — لا تغيير في bookmarks الـ public API.
+- معالجة fallback لـ `r.title` لما يكون مساوياً للـ URL (engine.ts يعطي fallback url لو `<title>` مفقود) — نتعامل معه كـ "" لتجنّب لخبطة الـ wordOverlapScore.
+- اسم الملف الجديد يستخدم نفس `sanitizePdfBaseName` لكنه يفضّل `metaTitle` عند الاختلاف الحقيقي. caption يضيف سطر العنوان الفعلي بصياغة italic لما يفرق.
+
+### 🧪 اختبارات
+- `test-pdf-validator-titlegate.mjs`: 3 سيناريوهات (trusted + mismatch → reject، trusted + match → accept، trusted + no title → legacy bypass) — كلها تمر.
+- `test-filename-builder.mjs`: 5 سيناريوهات (bug repro، تطابق، fallback، sanitization، عنوان قصير) — كلها تمر.
+- بعد الـ build: `dist/index.cjs` نما من 406.8kb → 412.2kb (+5.4kb، +1.3%).
+
+---
+
 ## [30.0.1] — 2026-05-03
 
 ### 🐛 إصلاحات
