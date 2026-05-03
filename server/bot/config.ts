@@ -192,6 +192,46 @@ export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
   process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
 );
 
+// ── Download attempt caps (find-to-send loss mitigation) ──
+// Production audit (2026-05-03) showed 44% of "found" searches never
+// deliver a PDF. Root cause: the download loop in bookRequest.ts had
+// NO cap — every candidate URL was tried until one succeeded. Low-
+// success domains (Hindawi 16%, foulabook 25%) crowded the loop with
+// 4-8 doomed attempts each, burning ~90s × N per request before the
+// user got "links_only".
+//
+// Two caps mitigate this without changing existing success paths:
+//
+//   * MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST — global ceiling on URL
+//     attempts per single book request. After this many tries we
+//     stop and surface "links_only" instead of timing out.
+//   * MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN — per-domain ceiling within
+//     one request. Once we've tried this many URLs from the same
+//     host and they all failed, we skip remaining URLs from that
+//     host and move to the next domain.
+//
+// Tunable via env. Set to 0 to disable a cap entirely.
+export const MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST = parseInt(
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "6",
+  10,
+);
+export const MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN = parseInt(
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "2",
+  10,
+);
+
+// Soft penalty for domains whose observed success rate (over recent
+// requests) is below this threshold. Applied in URL ranking — a low-
+// rate domain still appears in the candidate list, but gets pushed
+// behind higher-rate alternatives. Distinct from UNRELIABLE_DOMAINS
+// which is a static block-list with a hard penalty.
+//
+// Default 0.30 = "domains succeeding less than 30% of the time get
+// soft-penalized in scoring". Set to 0 to disable the soft penalty.
+export const LOW_SUCCESS_RATE_PENALTY_THRESHOLD = parseFloat(
+  process.env.LOW_SUCCESS_RATE_PENALTY_THRESHOLD || "0.30",
+);
+
 // After this many consecutive Mistral NO verdicts on the same book
 // request, stop calling Mistral for the remaining candidates and fall
 // back to heuristics (metadata title score + filename relevance).
