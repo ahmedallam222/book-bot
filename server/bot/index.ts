@@ -8,6 +8,7 @@ import { processBookRequest }         from "./bookRequest.js";
 import { cleanOldTempFiles }          from "./tempFiles.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
 import { storage }                    from "../storage.js";
+import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import type { QueueJob }              from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -63,6 +64,16 @@ export async function startBot(): Promise<void> {
     message: string; parse_mode?: string
   }) => {
     await broadcastToAll(payload.message, payload.parse_mode || "Markdown");
+  });
+
+  // استماع لإنهاء الصيانة من الـ dashboard — يبعث إعلان للجروبات
+  (process as NodeJS.EventEmitter).on("bot:maintenance_ended", async () => {
+    if (!_bot) return;
+    try {
+      await announceMaintenanceEnd(_bot);
+    } catch (e) {
+      L.error("bot", "announceMaintenanceEnd (event) failed", { err: String(e).slice(0, 100) });
+    }
   });
 
   // FIX v29: استرجاع الـ jobs العالقة من الـ restart السابق
