@@ -45,7 +45,13 @@ async function callGemini(
     generationConfig: {
       response_mime_type: "application/json",
       temperature:        0.3,
-      maxOutputTokens:    1024,
+      maxOutputTokens:    2048,
+      // Disable Gemini 2.5's "thinking" mode. Without this, 2.5
+      // Flash spends ~95% of the token budget on internal thoughts
+      // and the actual JSON response gets truncated to ~70 chars
+      // (finishReason=MAX_TOKENS). thinkingBudget=0 is a no-op for
+      // 2.0 Flash and earlier (which don't have thinking).
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
@@ -98,11 +104,14 @@ function makeGeminiProvider(
   };
 }
 
-// Three Gemini variants share the same key but maintain separate quotas
-// upstream — registering all three effectively triples our PDF budget.
-// 2.5 Flash is newest/best-quality; 1.5/2.0 stay as deeper failover.
+// Gemini variants share the same key but maintain separate quotas
+// upstream — registering multiple variants multiplies our PDF budget.
+// 2.5 Flash is newest/best-quality; 2.0 Flash + flash-lite-latest stay
+// as deeper failover. (gemini-1.5-flash was retired by Google and now
+// 404s on v1beta — replaced with gemini-flash-lite-latest, an alias
+// that always points to the latest stable lite model.)
 export const geminiProviders: AIProvider[] = [
-  makeGeminiProvider("gemini-2.5-flash",  "gemini-2.5-flash",  1),
-  makeGeminiProvider("gemini-2.0-flash",  "gemini-2.0-flash",  2),
-  makeGeminiProvider("gemini-1.5-flash",  "gemini-1.5-flash",  3),
+  makeGeminiProvider("gemini-2.5-flash",       "gemini-2.5-flash",       1),
+  makeGeminiProvider("gemini-2.0-flash",       "gemini-2.0-flash",       2),
+  makeGeminiProvider("gemini-flash-lite-latest", "gemini-flash-lite-latest", 3),
 ];
