@@ -486,13 +486,17 @@ async function performFullSearch(
   //   (3) عقوبة الموثوقية: hard لـ UNRELIABLE_DOMAINS، soft للمصادر
   //       اللي success rate < LOW_SUCCESS_RATE_PENALTY_THRESHOLD (مثل
   //       Hindawi 16% أو foulabook 25%) عشان يطلعوا بعد المصادر الأقوى.
-  let srcRateMap = new Map<string, number>();
-  try {
-    const srcStats = await getSourceStats();
-    srcRateMap = new Map(srcStats.map((s) => [s.domain, s.ok / Math.max(s.ok + s.fail, 1)]));
-  } catch {}
-
   if (validUrls.length > 1) {
+    // Kept inside the multi-URL guard so single-/zero-candidate
+    // requests don't pay for `redis.keys("stats:source:*")` +
+    // N×HGETALL (Devin Review #32 caught this when the init was
+    // briefly hoisted).
+    let srcRateMap = new Map<string, number>();
+    try {
+      const srcStats = await getSourceStats();
+      srcRateMap = new Map(srcStats.map((s) => [s.domain, s.ok / Math.max(s.ok + s.fail, 1)]));
+    } catch {}
+
     validUrls.sort((a, b) => {
       const scoreUrl = (url: string): number => {
         const domain = sanitizeDomainKey(url.split("/")[2] || "");
