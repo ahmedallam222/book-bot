@@ -63,9 +63,10 @@ export function registerCommands(
       }
     }
     try {
-      const [prem, limit, dlRaw] = await Promise.all([
-        isPremium(userId),
-        getUserDailyLimit(userId),
+      // BUG-FIX: getUserDailyLimit بتنده isPremium جواها → كان بيتعمل مرتين. دلوقتي نمرّر prem.
+      const prem  = await isPremium(userId);
+      const [limit, dlRaw] = await Promise.all([
+        getUserDailyLimit(userId, prem),
         storage.getDailyDownloadCount(userId).catch(() => 0),
       ]);
       const remaining = Math.max(0, limit - dlRaw);
@@ -122,9 +123,10 @@ export function registerCommands(
     const userId = String(msg.from?.id || "");
     if (!userId) return;
     try {
-      const [prem, limit, dlCount] = await Promise.all([
-        isPremium(userId),
-        getUserDailyLimit(userId),
+      // BUG-FIX: getUserDailyLimit بتنده isPremium جواها. نمرّر prem تجنباً للتكرار.
+      const prem  = await isPremium(userId);
+      const [limit, dlCount] = await Promise.all([
+        getUserDailyLimit(userId, prem),
         storage.getDailyDownloadCount(userId).catch(() => 0),
       ]);
       const remaining = Math.max(0, limit - dlCount);
@@ -396,13 +398,17 @@ export function registerCommands(
 
     const prem = await isPremium(userId);
     if (prem) {
-      const expiry = await getPremiumExpiry(userId);
+      // BUG-FIX: نمرّر prem لـ getUserDailyLimit عشان ما يستدعي isPremium تاني.
+      const [expiry, limit] = await Promise.all([
+        getPremiumExpiry(userId),
+        getUserDailyLimit(userId, prem),
+      ]);
       const expiryLine = expiry
         ? `_ينتهي في: ${expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long", year: "numeric" })}_ 📅`
         : `_اشتراك دائم_ ♾️`;
       await bot.sendMessage(chatId,
         `⭐ *أنت مشترك في Premium!*\n\n` +
-        `📥 لديك *${await getUserDailyLimit(userId)}* تحميل يومياً\n` +
+        `📥 لديك *${limit}* تحميل يومياً\n` +
         expiryLine,
         { parse_mode: "Markdown", reply_markup: kbMain() }
       ).catch(() => {});
