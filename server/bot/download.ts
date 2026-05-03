@@ -56,6 +56,50 @@ function shouldSkipDirect(url: string): boolean {
   return SKIP_DIRECT_DOMAINS.some((d) => url.includes(d));
 }
 
+// ══════════════════════════════════════════════
+// CONTENT-DISPOSITION FILENAME PARSER
+// HTTP `Content-Disposition` header بيحمل اسم الملف الحقيقي حتى لو الـ URL
+// pathname رقم بحت (مثلاً Hindawi /books/62575295.pdf، foulabook
+// /book/downloading/123). الـ header بيكون بصيغتين:
+//   1. RFC 5987: filename*=UTF-8''<percent-encoded>   ← الأصدق (Unicode-safe)
+//   2. RFC 2616: filename="..." أو filename=...        ← fallback (ASCII)
+// لو الاتنين موجودين، RFC 6266 بيقول نفضّل filename* لأنها بتدعم Unicode.
+// ══════════════════════════════════════════════
+function parseContentDispositionFilename(header: string | null): string {
+  if (!header) return "";
+
+  // RFC 5987 — filename*=charset'lang'percent-encoded-value
+  // مثال: filename*=UTF-8''%D8%B2%D9%82%D8%A7%D9%82_%D8%A7%D9%84%D9%85%D8%AF%D9%82.pdf
+  const ext = /filename\*\s*=\s*([^']*)'[^']*'([^;]+)/i.exec(header);
+  if (ext) {
+    try {
+      const charset = (ext[1] || "utf-8").trim().toLowerCase();
+      // strip optional surrounding quotes
+      const raw = ext[2].trim().replace(/^"|"$/g, "");
+      // نفك ترميز الـ percent-encoding. لو charset غير UTF-8 (نادر جداً)
+      // decodeURIComponent ممكن يفشل → نسيب الـ value الخام بدون encoding.
+      if (charset === "utf-8" || charset === "utf8") {
+        return decodeURIComponent(raw);
+      }
+      return raw;
+    } catch { /* fallback to filename= */ }
+  }
+
+  // RFC 2616 — filename="..." (مع مسافات داخلية محتملة) أو filename=token (بدون quotes)
+  const basic = /filename\s*=\s*("([^"]+)"|([^;]+))/i.exec(header);
+  if (basic) {
+    const value = (basic[2] ?? basic[3] ?? "").trim();
+    // بعض الـ servers بترسل filename=ASCII-version بصيغة percent-encoded حتى من
+    // غير filename*. نحاول decode لو فيه %xx.
+    if (/%[0-9A-Fa-f]{2}/.test(value)) {
+      try { return decodeURIComponent(value); } catch { /* return as-is */ }
+    }
+    return value;
+  }
+
+  return "";
+}
+
 function isSlowArchiveUrl(url: string): boolean {
   return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
 }
@@ -391,6 +435,18 @@ export async function downloadAndSend(
 
     const ct = r.headers.get("content-type") || "";
 
+    // FIX (CD-filename): اسم الملف الحقيقي من HTTP `Content-Disposition` header.
+    // مهم للـ hosts بتخدّم URL رقمي بحت (مثلاً Hindawi /books/62575295.pdf،
+    // foulabook /book/downloading/123) لكن بترسل الاسم الفعلي في الـ header.
+    // بدون ده الـ Mistral validator بيرفضها لأن الـ URL مفهوش معلومة.
+    const cdFilename = parseContentDispositionFilename(r.headers.get("content-disposition"));
+    if (cdFilename) {
+      L.debug("download", "Got Content-Disposition filename", {
+        filename: cdFilename.slice(0, 60),
+        url:      pdfUrl.slice(0, 60),
+      });
+    }
+
     // ── HTML response → ابحث عن رابط PDF داخله ─
     if (ct.includes("html")) {
       if (!_noFollow) {
@@ -486,7 +542,9 @@ export async function downloadAndSend(
     // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
     // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
     // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
-    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
+    // FIX (CD-filename): cdFilename بيغطّي الحالة اللي originalUrl نفسه ميحملش
+    // slug (مثلاً Hindawi /books/62575295.pdf لـ "زقاق المدق").
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, cdFilename);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
