@@ -18,6 +18,7 @@ import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
 } from "./config.js";
 import { redis } from "./redis.js";
+import { recordGroup } from "./groupTracker.js";
 // FIX: wishlist module مستقل بدل global.__kholasaWishlist anti-pattern
 import {
   getWishlist, saveWishlist,
@@ -477,6 +478,13 @@ export function registerMessageHandler(
     const userId  = String(msg.from?.id || "");
     const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
     if (!userId) return;
+
+    // FIX: نسجّل الجروب في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
+    // انتهاء الصيانة. fire-and-forget عشان ما يأخّرش الـ message handling.
+    if (isGroup) {
+      recordGroup(chatId, msg.chat.title || "").catch(() => {});
+    }
+
     if (text.startsWith("/")) return;
 
     let bookName = "";
