@@ -14,8 +14,8 @@ import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
-import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject } from "./analytics.js";
+import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS, MISTRAL_NO_STREAK_LIMIT } from "./config.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
@@ -500,18 +500,33 @@ async function performFullSearch(
   // قبل: يُحسَب مرتين (داخل الحلقة + بعدها) — نتيجتان قد تختلفان لو تغيّر المنطق
   let sentFilenameScore = 0.5; // neutral حتى يُضبط بعد التحميل الناجح
 
+  // Mistral early-stop: count consecutive NO verdicts on this query and
+  // skip Mistral for remaining candidates once the streak crosses
+  // MISTRAL_NO_STREAK_LIMIT. Resets on any success. The pdfValidator
+  // will then reject ambiguous candidates without paying for Mistral.
+  let mistralNoStreak = 0;
+
   try {
     for (const pdfUrl of validUrls) {
-      const dlDomain = pdfUrl.split("/")[2] || "";
+      const dlDomain   = pdfUrl.split("/")[2] || "";
+      const skipMistral = MISTRAL_NO_STREAK_LIMIT > 0 &&
+                          mistralNoStreak >= MISTRAL_NO_STREAK_LIMIT;
+      if (skipMistral) {
+        L.info("bot", "Mistral early-stop active for this request", {
+          book: bookName.slice(0, 50),
+          streak: mistralNoStreak,
+          url: pdfUrl.slice(0, 80),
+        });
+      }
       trace.phase("download_started", { url: pdfUrl.slice(0, 80), domain: dlDomain });
-      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token);
+      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
       // BUG FIX: كان يُعيد المحاولة حتى عند rejectedContent=true
       // عندما يُرفض الـ PDF بسبب عدم تطابق المحتوى، إعادة التحميل ستُعطي نفس الـ bytes
       // → نفس النتيجة → هدر 90 ثانية + استهلاك bandwidth بلا فائدة
       // الحل: تجاوز الـ retry إذا كان الرفض بسبب المحتوى أو إذا كان permanent
       if (!result.ok && !result.permanent && !result.rejectedContent) {
         await sleep(500); // M4 FIX: 500ms كافٍ للـ back-off — 2000ms كانت تعطّل الـ worker
-        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token);
+        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
       }
       if (!result.ok) {
         // BUG FIX: Mistral content-mismatch ≠ source failure.
@@ -527,6 +542,14 @@ async function performFullSearch(
         } else {
           trackSourceAttempt(dlDomain, false).catch(() => {});
         }
+      }
+      // Track only Mistral-driven rejections; HTTP failures, timeouts, or
+      // heuristic-only rejects don't count toward the streak (they're not
+      // signals about Mistral disagreeing with the search ranker).
+      if (result.mistralRejected) {
+        mistralNoStreak++;
+      } else if (result.ok) {
+        mistralNoStreak = 0;
       }
       if (result.ok) {
         sent          = true;
