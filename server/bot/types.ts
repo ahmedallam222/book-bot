@@ -29,6 +29,11 @@ export interface DownloadResult {
   sendMode?:        "direct" | "local";
   permanent?:       boolean;
   rejectedContent?: boolean;
+  // True when validatePdfContent's NO verdict came from Mistral (paid call).
+  // Used by bookRequest.ts to count consecutive Mistral rejections per query
+  // and short-circuit further Mistral calls once the streak crosses a
+  // threshold — see MISTRAL_NO_STREAK_LIMIT in config.ts.
+  mistralRejected?: boolean;
 }
 
 export interface QueueJob {
