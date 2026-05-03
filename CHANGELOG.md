@@ -7,6 +7,25 @@
 
 ---
 
+## [31.3.2] — 2026-05-03
+
+### ⚡ أداء — حذف استدعاءات Redis مكررة في hot-path
+
+- `userSettings.ts`:
+  - **جديد**: `computeDailyLimit(prem, override)` — منطق pure synchronous بدون Redis.
+  - `getUserDailyLimit(userId, premHint?)` — لو الـ caller حسب `isPremium` فعلاً وعنده النتيجة، يمرّرها بدل ما الدالة تنده `isPremium` مرة تانية داخلياً.
+- `wishlist.ts`:
+  - `getWishlistMax(userId, premHint?)` يقبل قيمة محسوبة مسبقاً.
+  - `sendWishlist`: تجيب `prem` مرة واحدة وتمرّرها (بدل استدعاء `isPremium` صريح + جوّه `getWishlistMax`).
+- `bookRequest.ts.processBookRequest`: كان بيعمل **3** استدعاءات `isPremium` لنفس الـ user (handleBookRequest pipeline + Promise.all + getUserDailyLimit الداخلي). دلوقتي **1** استدعاء واحد + قراءة `ulimit:{uid}` + حساب `dailyLimit` synchronously.
+- `commands.ts` (`/start`, `/stats`, `/premium`) و `callbacks.ts` (`main_menu`, `my_stats`): مرّروا `prem` لـ `getUserDailyLimit`.
+
+**التأثير**: لكل request إلى hot-path → **توفير 3 Redis ops** (1 sismember + 2 exists) كل ما الـ user يـ start/stats/main_menu/my_stats/premium/wishlist. على 14 طلب/يوم على production = ~42 Redis op/يوم؛ يكبر مع نمو القاعدة.
+
+اختبارات: `test-dedup-isPremium.mjs` (20 سيناريو، PASS).
+
+---
+
 ## [31.3.1] — 2026-05-03
 
 ### 🔒 أمان — patch transitive vulnerabilities + Dockerfile fix

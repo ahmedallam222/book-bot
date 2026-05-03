@@ -13,7 +13,7 @@ import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
-import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
+import { getUserNote, isPremium, computeDailyLimit } from "./userSettings.js";
 import { redis } from "./redis.js";
 import {
   MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY,
@@ -121,6 +121,8 @@ export async function handleBookRequest(
     redis.srem(PREMIUM_SET_KEY, userId).catch(() => {});
     L.info("premium", "Lazy cleanup: removed expired user from set", { userId });
   }
+  // الـ ULIMIT override جاي من الـ pipeline الأصلي → نحسب الحد بدون أي Redis call إضافي.
+  // قبل الإصلاح: getUserDailyLimit(userId) كانت تعيد استدعاء isPremium + redis.get(ulimit) من تاني.
   const limitVal     = limitOverrideResult?.[1] as string | null;
   // IMP-1 FIX: parseInt قد يُعيد NaN إذا كانت قيمة Redis تالفة
   // NaN > 0 = false → يُعامَل كـ unlimited → المستخدم لا يُحجب أبداً
@@ -195,13 +197,16 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
   const trace = new RequestTrace(job.id, userId, bookName, job.retries);
   trace.phase("request_started", { book: bookName.slice(0, 50), priority: job.priority });
 
-  // دمج getUserDailyLimit + getDailyDownloadCount في Promise.all — توفير serial round-trip
-  const [dailyLimit, dlCountRaw, isPrem] = await Promise.all([
-    getUserDailyLimit(userId),
-    storage.getDailyDownloadCount(userId).catch(() => 0),
+  // BUG-FIX: قبل ده كان فيه 3 isPremium calls على نفس الـ userId في requesti واحد:
+  //   (1) handleBookRequest pipeline (parent caller)  (2) Promise.all هنا  (3) getUserDailyLimit
+  // الآن نقرا isPrem + ulimit من Redis مرة واحدة هنا، ونحسب dailyLimit بشكل synchronous.
+  const [isPrem, ulimitOverride, dlCountRaw] = await Promise.all([
     isPremium(userId).catch(() => false),
+    redis.get(`ulimit:${userId}`).catch(() => null),
+    storage.getDailyDownloadCount(userId).catch(() => 0),
   ]);
-  const dlCount = dlCountRaw;
+  const dailyLimit = computeDailyLimit(isPrem, ulimitOverride);
+  const dlCount    = dlCountRaw;
 
   if (dailyLimit > 0 && dlCount >= dailyLimit && !isAdmin(userId)) {
     await bot.sendMessage(
