@@ -71,15 +71,27 @@ export async function handleSummaryCallback(
   const sourceUrl = entry.url;
 
   // In-flight guard: if the user double-tapped, the second call
-  // sees the lock and we just acknowledge without re-running.
+  // sees the lock and we just acknowledge without re-running. This
+  // prevents duplicate AI calls (and double quota consumption) when
+  // the user spams the button. The lock is keyed on (userId,
+  // sessionKey) so different users — or the same user requesting
+  // a different delivered book — are unaffected.
   const lockKey = inflightKey(userId, sessionKey);
   const locked  = await redis.set(lockKey, "1", "EX", INFLIGHT_TTL, "NX").catch(() => null);
   if (!locked) {
+    L.info("summaryHandler", "double-tap blocked", { userId, sessionKey });
     await bot.answerCallbackQuery(callbackQueryId, {
       text: "⏳ الملخص جاري تجهيزه...",
     }).catch(() => {});
     return;
   }
+
+  // Tracking state across try/catch/finally — the watchdog & placeholder
+  // need to be visible to the error path so we can edit-in-place rather
+  // than leave the user staring at a stale "loading" message.
+  let placeholderMsgId: number | undefined;
+  let watchdogTimer:    NodeJS.Timeout | undefined;
+  let typingInterval:   NodeJS.Timeout | undefined;
 
   try {
     // Cache fast-path — skip the quota check entirely for cached
@@ -126,7 +138,6 @@ export async function handleSummaryCallback(
       `⏳ *جاري تجهيز الملخص...*\n` +
       `📚 *${escMd(bookName)}*\n\n` +
       `_البوت يقرأ الكتاب ويجهّز لك ملخصًا مفصّلًا. قد يستغرق حتّى دقيقة._`;
-    let placeholderMsgId: number | undefined;
     try {
       const sent = await bot.sendMessage(chatId, placeholderText, {
         parse_mode: "Markdown",
@@ -138,10 +149,29 @@ export async function handleSummaryCallback(
       // success below — the user just won't see a status update.
     }
 
+    // Watchdog: if the orchestrator runs longer than 30s (PDF tier on a
+    // big book), edit the placeholder so the user knows the bot isn't
+    // frozen — it's just slow. Replaced again by the final summary
+    // edit, or by the error path edit, whichever happens first.
+    if (placeholderMsgId !== undefined) {
+      watchdogTimer = setTimeout(() => {
+        const longerText =
+          `⏳ *العملية تأخذ وقتًا أطول من المتوقّع...*\n` +
+          `📚 *${escMd(bookName)}*\n\n` +
+          `_البوت لسّه شغّال على الملخص. شكرًا لصبرك._`;
+        bot.editMessageText(longerText, {
+          chat_id:                  chatId,
+          message_id:               placeholderMsgId!,
+          parse_mode:               "Markdown",
+          disable_web_page_preview: true,
+        }).catch(() => {});
+      }, 30_000);
+    }
+
     // Refresh "typing…" every 4s while we run — Telegram clears the
     // indicator after ~5s, so a one-shot call isn't enough for 25s+ PDFs.
     await bot.sendChatAction(chatId, "typing").catch(() => {});
-    const typingInterval = setInterval(() => {
+    typingInterval = setInterval(() => {
       bot.sendChatAction(chatId, "typing").catch(() => {});
     }, 4_000);
 
@@ -154,6 +184,11 @@ export async function handleSummaryCallback(
       });
     } finally {
       clearInterval(typingInterval);
+      typingInterval = undefined;
+      if (watchdogTimer) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = undefined;
+      }
     }
     L.info("summaryHandler", "summary delivered", {
       book:     bookName.slice(0, 50),
@@ -167,14 +202,47 @@ export async function handleSummaryCallback(
       book: bookName.slice(0, 50),
       err:  String(e).slice(0, 200),
     });
-    await bot.sendMessage(chatId,
-      `😔 تعذّر إنتاج ملخص لكتاب *${escMd(bookName)}* الآن. حاول بعد قليل.`,
-      { parse_mode: "Markdown" },
-    ).catch(() => {});
+    await deliverError(bot, chatId, bookName, placeholderMsgId);
   } finally {
+    // Defensive cleanup — normally these are already cleared in the
+    // try block, but if anything threw between setup and the inner
+    // finally we'd leak a timer. Calling clear* on undefined is safe.
+    if (typingInterval) clearInterval(typingInterval);
+    if (watchdogTimer)  clearTimeout(watchdogTimer);
     // Release the inflight lock so a subsequent retry is allowed.
     redis.del(lockKey).catch(() => {});
   }
+}
+
+// Replace the placeholder with a clear error message instead of leaving
+// the user staring at a stale "loading" indicator. Falls back to a
+// fresh sendMessage if the edit fails or no placeholder exists.
+async function deliverError(
+  bot:               TelegramBot,
+  chatId:            number,
+  bookName:          string,
+  placeholderMsgId?: number,
+): Promise<void> {
+  const errorText =
+    `❌ *تعذّر إنتاج الملخص*\n` +
+    `📚 *${escMd(bookName)}*\n\n` +
+    `_حدث خطأ أثناء توليد الملخص. حاول مرّة أخرى بعد قليل._`;
+  if (placeholderMsgId !== undefined) {
+    try {
+      await bot.editMessageText(errorText, {
+        chat_id:                  chatId,
+        message_id:               placeholderMsgId,
+        parse_mode:               "Markdown",
+        disable_web_page_preview: true,
+      });
+      return;
+    } catch {
+      // Fall through to sendMessage if edit fails (rare).
+    }
+  }
+  await bot.sendMessage(chatId, errorText, {
+    parse_mode: "Markdown",
+  }).catch(() => {});
 }
 
 // Render the final summary into the placeholder message (edit-in-place
