@@ -10,7 +10,7 @@ import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
-import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification } from "./ui.js";
+import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
@@ -394,21 +394,45 @@ async function performFullSearch(
   const seenPdfUrls   = new Set<string>();
   const seenPageUrls  = new Set<string>();
   const seenDownloadPages = new Set<string>();
+  // url → search-result HTML <title> from Firecrawl. Threaded to
+  // downloadAndSend → validatePdfContent so the validator can title-gate
+  // even on trusted domains and recover the title when PDF /Title is
+  // unreadable. Strip URL-only fallbacks (engine.ts uses url as title
+  // when the page has no <title> tag).
+  const urlSearchTitle = new Map<string, string>();
+  // Count results flagged as paid/protected by classifyAccess() in
+  // engine.ts. When all download attempts fail AND the search returned
+  // ANY paid signals, we tell the user the book is paid rather than
+  // sending the generic "no PDF" message that misleads them.
+  let paidSignalCount = 0;
   for (const r of results) {
+    const cleanTitle = (r.title && !r.title.startsWith("http")) ? r.title : "";
+    if (r.access === "protected_page") paidSignalCount++;
     if (r.directPdfUrl) {
       if (!seenPdfUrls.has(r.directPdfUrl)) {
         seenPdfUrls.add(r.directPdfUrl);
         allPdfUrls.push(r.directPdfUrl);
+      }
+      // Don't overwrite a title from an earlier result for the same URL
+      // — first match wins (typically the highest-scored search hit).
+      if (cleanTitle && !urlSearchTitle.has(r.directPdfUrl)) {
+        urlSearchTitle.set(r.directPdfUrl, cleanTitle);
       }
     } else if (r.url && r.access === "download_page") {
       if (!seenDownloadPages.has(r.url)) {
         seenDownloadPages.add(r.url);
         downloadablePageFallbacks.push(r.url);
       }
+      if (cleanTitle && !urlSearchTitle.has(r.url)) {
+        urlSearchTitle.set(r.url, cleanTitle);
+      }
     } else if (r.url) {
       if (!seenPageUrls.has(r.url)) {
         seenPageUrls.add(r.url);
         pageUrlFallbacks.push(r.url);
+      }
+      if (cleanTitle && !urlSearchTitle.has(r.url)) {
+        urlSearchTitle.set(r.url, cleanTitle);
       }
     }
   }
@@ -519,14 +543,15 @@ async function performFullSearch(
         });
       }
       trace.phase("download_started", { url: pdfUrl.slice(0, 80), domain: dlDomain });
-      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
+      const srcTitle = urlSearchTitle.get(pdfUrl) ?? "";
+      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral, srcTitle);
       // BUG FIX: كان يُعيد المحاولة حتى عند rejectedContent=true
       // عندما يُرفض الـ PDF بسبب عدم تطابق المحتوى، إعادة التحميل ستُعطي نفس الـ bytes
       // → نفس النتيجة → هدر 90 ثانية + استهلاك bandwidth بلا فائدة
       // الحل: تجاوز الـ retry إذا كان الرفض بسبب المحتوى أو إذا كان permanent
       if (!result.ok && !result.permanent && !result.rejectedContent) {
         await sleep(500); // M4 FIX: 500ms كافٍ للـ back-off — 2000ms كانت تعطّل الـ worker
-        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
+        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral, srcTitle);
       }
       if (!result.ok) {
         // BUG FIX: Mistral content-mismatch ≠ source failure.
@@ -633,10 +658,26 @@ async function performFullSearch(
       sendMode:      null,
       sendSuccess:   false,
     });
-    await bot.sendMessage(chatId, buildFailMessage(bookName, results, 0), {
-      parse_mode: "Markdown", disable_web_page_preview: true,
-      reply_markup: kbAfterFail(bookName, results, 0),
-    });
+    // Paid-book detection: when EVERY candidate failed and the search
+    // returned at least one result classified as paid/protected, tell
+    // the user explicitly. This prevents the silent "no PDF" outcome on
+    // genuinely paid books like تحت مسمى الرجولة from looking like a
+    // bot bug (and stops the user retrying endlessly).
+    if (paidSignalCount > 0) {
+      L.info("bot", "Sending paid-book message — all candidates failed and paid signals present", {
+        book: bookName.slice(0, 50),
+        paidSignalCount,
+      });
+      await bot.sendMessage(chatId, buildPaidBookMessage(bookName), {
+        parse_mode: "Markdown", disable_web_page_preview: true,
+        reply_markup: kbNoResults(bookName),
+      });
+    } else {
+      await bot.sendMessage(chatId, buildFailMessage(bookName, results, 0), {
+        parse_mode: "Markdown", disable_web_page_preview: true,
+        reply_markup: kbAfterFail(bookName, results, 0),
+      });
+    }
   }
 }
 
