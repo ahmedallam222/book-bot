@@ -91,7 +91,11 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
 );
 
 // ── Trusted PDF domains ───────────────────────
-// Domains whose download/dl paths are known to serve real PDFs
+// Aggregators / mirrors. Anything served from these download/dl paths
+// is assumed to be the requested book — we skip Mistral entirely.
+// (libgen-class hosts only resolve the requested ID to a binary, so a
+// content mismatch would imply a deliberately-wrong upload, not a
+// search-ranker mistake.)
 export const TRUSTED_PDF_DOMAINS: string[] = [
   "dl.waqfeya.net",
   "books-library.net",
@@ -102,6 +106,34 @@ export const TRUSTED_PDF_DOMAINS: string[] = [
   "library.lol",
   "z-lib.org",
 ];
+
+// ── Filename-trusted PDF domains ──────────────
+// Curated content libraries that reliably serve real PDFs but host
+// many unrelated books too (so a search ranker mistake is plausible).
+// We trust filename match as ground truth on these and skip Mistral
+// only when urlFilenameRelevance(bookName, pdfUrl) is high enough —
+// see MISTRAL_BYPASS_FILENAME_THRESHOLD below.
+//
+// Selection criteria (post-deploy of #14, observed on prod):
+//   - 100% historical success rate over 10+ deliveries, AND
+//   - filenames carry the book title (not opaque numeric IDs only).
+// Sources whose filenames are pure numeric IDs (e.g. archive.org
+// item paths like /details/20200914_20200914_0831) won't pass the
+// filename threshold anyway — urlFilenameRelevance returns 0.3 for
+// those, below the 0.5 default — so they fall through to Mistral.
+export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
+  "archive.org",
+  "bookleaks.com",
+  "book-shadow.com",
+];
+
+// Above this filename-relevance score, a FILENAME_TRUSTED domain
+// short-circuits the Mistral call. 0.5 means "≥ half of the book's
+// content words appear in the filename" — strong evidence the source
+// indexed the right title.
+export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
+  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
+);
 
 // ── Viewer-only domains — لا PDF قابل للتحميل منها أبداً ──
 // هذه منصات عرض فقط — المحاولة معها دائماً تفشل وتهدر 90 ثانية لكل رابط
