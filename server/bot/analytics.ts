@@ -9,6 +9,20 @@ function todayKey(): string {
   return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 }
 
+// Normalize a hostname into a Redis-key-safe domain identifier.
+// Single source of truth — historically `trackDownload` wrote raw
+// hostnames (so `bookleaks.com` and `www.bookleaks.com` ended up in
+// separate `stats:source:*` keys) while `trackSourceAttempt` /
+// `trackSourceMistralReject` already normalized. The split made
+// `getSourceStats` over-report distinct sources and skewed the
+// auto-disable signal. All write paths now go through this helper.
+export function sanitizeDomainKey(domain: string): string {
+  return (domain || "")
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .replace(/[^a-z0-9.-]/g, "");
+}
+
 // ── Search tracking ───────────────────────────
 export async function trackSearch(userId: string): Promise<void> {
   const day = todayKey();
@@ -34,15 +48,17 @@ export async function trackDownload(
     // أكثر الكتب تحميلاً
     pipe.zincrby("stats:top_books", 1, bookName.slice(0, 100));
     // أداء المصادر
-    if (domain) pipe.hincrby(`stats:source:${domain}`, "ok", 1);
+    const dc = sanitizeDomainKey(domain || "");
+    if (dc) pipe.hincrby(`stats:source:${dc}`, "ok", 1);
   } else if (!found && domain) {
-    pipe.hincrby(`stats:source:${domain}`, "fail", 1);
+    const dc = sanitizeDomainKey(domain);
+    if (dc) pipe.hincrby(`stats:source:${dc}`, "fail", 1);
   }
   await pipe.exec().catch(() => {});
 }
 
 export async function trackSourceAttempt(domain: string, ok: boolean): Promise<void> {
-  const dc = domain.replace(/^www\./, "").replace(/[^a-z0-9.-]/gi, "");
+  const dc = sanitizeDomainKey(domain);
   if (!dc) return;
   await redis.hincrby(`stats:source:${dc}`, ok ? "ok" : "fail", 1).catch(() => {});
 }
@@ -52,7 +68,7 @@ export async function trackSourceAttempt(domain: string, ok: boolean): Promise<v
 // this domain. Track separately so the auto-disable logic doesn't punish
 // a working source for the search ranker's choices.
 export async function trackSourceMistralReject(domain: string): Promise<void> {
-  const dc = domain.replace(/^www\./, "").replace(/[^a-z0-9.-]/gi, "");
+  const dc = sanitizeDomainKey(domain);
   if (!dc) return;
   await redis.hincrby(`stats:source:${dc}`, "mistral_rejected", 1).catch(() => {});
 }
@@ -135,6 +151,24 @@ export async function getSourceStats(): Promise<{
 }[]> {
   try {
     const keys = await redis.keys("stats:source:*");
+    // Aggregate by sanitized domain so legacy `www.*` keys merge
+    // with their canonical counterparts. Going forward all writes go
+    // through `sanitizeDomainKey()`; this read-side merge cleans up
+    // historical splits without requiring a migration.
+    const agg = new Map<string, { ok: number; fail: number; mistralRejected: number }>();
+    for (const key of keys) {
+      const rawDomain = key.replace("stats:source:", "");
+      const domain = sanitizeDomainKey(rawDomain) || rawDomain;
+      const raw = await redis.hgetall(key);
+      const ok = parseInt(raw?.ok || "0", 10);
+      const fail = parseInt(raw?.fail || "0", 10);
+      const mistralRejected = parseInt(raw?.mistral_rejected || "0", 10);
+      const cur = agg.get(domain) ?? { ok: 0, fail: 0, mistralRejected: 0 };
+      cur.ok += ok;
+      cur.fail += fail;
+      cur.mistralRejected += mistralRejected;
+      agg.set(domain, cur);
+    }
     const results: {
       domain: string;
       ok: number;
@@ -145,19 +179,14 @@ export async function getSourceStats(): Promise<{
       rate: string;
       autoDisabled: boolean;
     }[] = [];
-    for (const key of keys) {
-      const domain = key.replace("stats:source:", "");
-      const raw    = await redis.hgetall(key);
-      const ok = parseInt(raw?.ok || "0", 10);
-      const fail = parseInt(raw?.fail || "0", 10);
-      const mistralRejected = parseInt(raw?.mistral_rejected || "0", 10);
-      const total = ok + fail;
-      const successRate = total > 0 ? ok / total : 0;
+    for (const [domain, c] of agg) {
+      const total = c.ok + c.fail;
+      const successRate = total > 0 ? c.ok / total : 0;
       results.push({
         domain,
-        ok,
-        fail,
-        mistralRejected,
+        ok: c.ok,
+        fail: c.fail,
+        mistralRejected: c.mistralRejected,
         total,
         successRate,
         rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
