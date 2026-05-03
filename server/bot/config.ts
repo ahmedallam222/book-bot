@@ -103,6 +103,20 @@ export const TRUSTED_PDF_DOMAINS: string[] = [
   "z-lib.org",
 ];
 
+// After this many consecutive Mistral NO verdicts on the same book
+// request, stop calling Mistral for the remaining candidates and fall
+// back to heuristics (metadata title score + filename relevance).
+// Rationale: prod logs showed up to 5 Mistral calls in a single 20s
+// window for one book request — every NO costs API budget without
+// changing the answer (when 3 candidates already failed Mistral, the
+// 4th is unlikely to flip; we should let the heuristics decide and
+// either reject quickly or fail-open without the paid round-trip).
+// 0 disables the early-stop entirely.
+export const MISTRAL_NO_STREAK_LIMIT = parseInt(
+  process.env.MISTRAL_NO_STREAK_LIMIT || "3",
+  10,
+);
+
 // ── Viewer-only domains — لا PDF قابل للتحميل منها أبداً ──
 // هذه منصات عرض فقط — المحاولة معها دائماً تفشل وتهدر 90 ثانية لكل رابط
 // يُصفَّر هذه الروابط في verify.ts قبل حلقة التحميل
