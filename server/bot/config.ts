@@ -107,32 +107,18 @@ export const TRUSTED_PDF_DOMAINS: string[] = [
   "z-lib.org",
 ];
 
-// ── Filename-trusted PDF domains ──────────────
-// Curated content libraries that reliably serve real PDFs but host
-// many unrelated books too (so a search ranker mistake is plausible).
-// We trust filename match as ground truth on these and skip Mistral
-// only when urlFilenameRelevance(bookName, pdfUrl) is high enough —
-// see MISTRAL_BYPASS_FILENAME_THRESHOLD below.
-//
-// Selection criteria (post-deploy of #14, observed on prod):
-//   - 100% historical success rate over 10+ deliveries, AND
-//   - filenames carry the book title (not opaque numeric IDs only).
-// Sources whose filenames are pure numeric IDs (e.g. archive.org
-// item paths like /details/20200914_20200914_0831) won't pass the
-// filename threshold anyway — urlFilenameRelevance returns 0.3 for
-// those, below the 0.5 default — so they fall through to Mistral.
-export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
-  "archive.org",
-  "bookleaks.com",
-  "book-shadow.com",
-];
-
-// Above this filename-relevance score, a FILENAME_TRUSTED domain
-// short-circuits the Mistral call. 0.5 means "≥ half of the book's
-// content words appear in the filename" — strong evidence the source
-// indexed the right title.
-export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
-  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
+// After this many consecutive Mistral NO verdicts on the same book
+// request, stop calling Mistral for the remaining candidates and fall
+// back to heuristics (metadata title score + filename relevance).
+// Rationale: prod logs showed up to 5 Mistral calls in a single 20s
+// window for one book request — every NO costs API budget without
+// changing the answer (when 3 candidates already failed Mistral, the
+// 4th is unlikely to flip; we should let the heuristics decide and
+// either reject quickly or fail-open without the paid round-trip).
+// 0 disables the early-stop entirely.
+export const MISTRAL_NO_STREAK_LIMIT = parseInt(
+  process.env.MISTRAL_NO_STREAK_LIMIT || "3",
+  10,
 );
 
 // ── Viewer-only domains — لا PDF قابل للتحميل منها أبداً ──
