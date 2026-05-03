@@ -7,6 +7,23 @@
 
 ---
 
+## [31.3.3] — 2026-05-03
+
+### 🐛 إصلاح — telemetry:traces self-trim
+
+السياق: `telemetry:traces` (Redis list) كانت بتجمّع IDs بدون أي TTL، بينما `telemetry:trace:{id}` (المفتاح الفردي) عنده TTL = 1h. النتيجة: بعد ساعة، الـ list فيها 50+ ID ميت، و `getRecentTraces` ترجع `[]` لأن `mget` كل الـ IDs ترجع null. على production الحالية: list len=51، live keys=1.
+
+الإصلاح في `server/bot/telemetry.ts`:
+
+1. **`expire(TRACES_LIST, 2 * TRACE_TTL_SEC)`** يضاف للـ pipeline في كل `finish()` → الـ list نفسها تختفي بعد ساعتين سكون.
+2. **Self-trim في `getRecentTraces`**: بعد `mget` نحدد الـ stale IDs (raw === null أو parse فشل) ونستدعي `pruneStaleTraceIds` (fire-and-forget):
+   - لو كل الـ window stale → `DEL telemetry:traces` (أرخص من LREM متعدد).
+   - وإلا → pipeline من `LREM 0` لكل stale ID.
+
+اختبارات: `test-telemetry-self-trim.mjs` (18 سيناريو، PASS): T1 list TTL، T2 all-stale prune via DEL، T3 partial-stale prune via LREM، T4 empty list no-op، T5 all-alive no-prune.
+
+---
+
 ## [31.3.2] — 2026-05-03
 
 ### ⚡ أداء — حذف استدعاءات Redis مكررة في hot-path
