@@ -13,6 +13,7 @@ Use this skill when testing the Telegram book-bot production deployment for sear
 
 - `FIRECRAWL_API_KEY` — needed for local/dev Firecrawl-backed searches if running the bot outside production.
 - `AWS_UBUNTU_SSH_PRIVATE_KEY` or an equivalent SSH key provisioned at `$HOME/.ssh/devin_aws_ubuntu_key` — needed to access the production Ubuntu server.
+- For the AI summary engine: `GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SAMBANOVA_API_KEY`, `OPENROUTER_API_KEY`, `GITHUB_MODELS_TOKEN`, `MISTRAL_API_KEY`, `CLOUDFLARE_AI_ACCOUNT_ID`, `CLOUDFLARE_AI_API_TOKEN`, `YOU_COM_API_KEY`. All optional except Gemini — the registry degrades gracefully.
 
 Do not print production `.env` values. Production runtime secrets live in `/home/ubuntu/book-bot/.env` on the server.
 
@@ -61,6 +62,39 @@ npm run build
 ```
 
 Expected for smart cached-PDF query matching: Arabic spelling variants and generic request wrappers such as `تحميل كتاب ... pdf` should resolve to the same canonical cache key. If storage cache behavior changes, also verify reads remain backward-compatible with legacy `book_query_normalized` rows.
+
+## Testing the AI summary engine offline (no Telegram needed)
+
+The summary feature (PR #19) ships a 9-provider AI failover stack. Before deploying engine-level changes (new providers, prompt edits, cache TTL changes, quota tweaks), run an adversarial harness against a local Redis with the real provider HTTP APIs. This validates the engine without sending a single Telegram message.
+
+### Setup
+
+```bash
+# Start a throwaway Redis (port 6379).
+docker run -d --name test-redis-summary -p 6379:6379 redis:7-alpine
+
+# Register only the AI keys you have (the registry skips unconfigured providers).
+export REDIS_URL=redis://127.0.0.1:6379
+# GEMINI_API_KEY, GROQ_API_KEY, etc. should already be in your env from the secrets store.
+```
+
+### Pattern: tsx harness importing the engine directly
+
+Write a small `_test_summary.ts` at the repo root that imports `getBookSummary`, `checkAndConsumeUsage`, `kbAfterSuccess`, `normalizeForCache`, and `SUMMARY_DAILY_LIMIT_FREE`. Run with `npx tsx _test_summary.ts`. Cover at least these six cases — each is designed so a broken implementation produces visibly different output:
+
+1. **PDF tier success** — send a known Hindawi PDF URL (e.g. `https://downloads.hindawi.org/books/61851406.pdf` for كليلة ودمنة). Assert `source==='pdf'`, `providerName.startsWith('gemini-')`, summary 600–3500 chars, ≥100 Arabic chars (`/[\u0600-\u06FF]/g`), `bookType !== 'unknown'`, latency < 60s, and that the Redis cache key `summary:v1:<normalizeForCache(book)>` exists after the call.
+2. **Novel spoiler-protection** — request `آنا كارنينا` with no PDF (forces text-tier through Wikipedia context). Assert `bookType==='novel'`, `spoilerLevel ∈ {critical, moderate}`, summary does NOT contain `/تنتحر|انتحار|قطار|ألقت\s*بنفسها/`, `source ∈ {context, wikipedia_only}`. Verify the keyboard would render `📖 *ملخص الرواية* — _بدون أي حرق_` for `spoilerLevel='critical'` or `📖 *ملخص الرواية*` for moderate.
+3. **Cache hit** — call `getBookSummary` twice for the same book. L2 must be < 200ms (typically 0–1ms), L2/L1 < 0.05, summaries deeply equal, providerName equal, Redis TTL between 2.5M–2.592M seconds (~30 days).
+4. **Failover** — set `ai:breaker:gemini-2.5-flash`, `ai:breaker:gemini-2.0-flash`, and `ai:breaker:gemini-flash-lite-latest` to `1` with TTL 600 in Redis, then call. Assert providerName is NOT a `gemini-*` and is one of the text-tier set (groq, cerebras, sambanova, openrouter, github-models, mistral, cloudflare, wikipedia-fallback). Always clean up the breaker keys afterward.
+5. **Keyboard wiring** — call `kbAfterSuccess(book, sessionId)` and assert `inline_keyboard[0].length === 1`, text matches exactly `📘  ملخص الكتاب` (note the double-space — deliberate), callback_data matches `/^sum:[0-9a-f]{12}$/`, and `Buffer.byteLength(callback_data, 'utf8') <= 64`.
+6. **Quota cap** — with a fresh user id, call `checkAndConsumeUsage(uid, false)` `limit + 1` times. The first `limit` must return `blocked=false` with the counter incrementing 1..limit. The `limit + 1`th must return `blocked=true` with the Redis counter rolled back to `limit` (NOT `limit + 1`). One more call with `premium=true` must return `blocked=false` without changing the counter.
+
+### Gemini-API gotchas (May 2026)
+
+- **`gemini-2.5-flash` requires `thinkingConfig: { thinkingBudget: 0 }`.** With the default thinking budget, Gemini 2.5 Flash spends ~95% of `maxOutputTokens` on internal reasoning (`thoughtsTokenCount` in `usageMetadata`), leaving only a few tokens for the actual response. The JSON arrives truncated mid-string and the response parser falls back to `bookType: 'unknown'` — which silently breaks novel spoiler-protection. Always set `thinkingBudget: 0` for non-reasoning tasks like JSON extraction. Also set `maxOutputTokens >= 2048` for safety margin.
+- **`gemini-1.5-flash` was retired from `v1beta`** and now returns `HTTP 404`. Use `gemini-flash-lite-latest` (alias for the latest stable lite Flash) as the deepest Gemini fallback.
+- **`gemini-2.0-flash` may return `RESOURCE_EXHAUSTED` with `limit: 0`** on some accounts — this is a Google billing-tier signal, not a code bug. Don't waste time debugging.
+- **List available models** with `curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"` to verify model names before assuming.
 
 ## Safe runtime test checklist
 
