@@ -15,7 +15,7 @@ import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMe
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
@@ -514,7 +514,19 @@ async function performFullSearch(
         result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token);
       }
       if (!result.ok) {
-        trackSourceAttempt(dlDomain, false).catch(() => {});
+        // BUG FIX: Mistral content-mismatch ≠ source failure.
+        // The source successfully delivered a real PDF; the search ranker
+        // just picked a wrong-book URL on this domain. Counting it as a
+        // source `fail` would (and historically did) auto-disable healthy
+        // libraries like Hindawi (1 ok / 29 fail = 3% rate, where most of
+        // those "fails" were Mistral rejections of unrelated candidate PDFs).
+        // Track these separately so operators retain visibility without
+        // poisoning the auto-disable signal.
+        if (result.rejectedContent) {
+          trackSourceMistralReject(dlDomain).catch(() => {});
+        } else {
+          trackSourceAttempt(dlDomain, false).catch(() => {});
+        }
       }
       if (result.ok) {
         sent          = true;
