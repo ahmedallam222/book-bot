@@ -1,42 +1,57 @@
 import { redis }                    from "./redis.js";
+import { L }                        from "./logger.js";
 import { PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
 
 // ══════════════════════════════════════════════
 // USER SETTINGS — إعدادات المستخدمين
 // ══════════════════════════════════════════════
 
-// ── Premium — مع انتهاء تلقائي بعد 30 يوم ────
+// ── Premium — TTL-based expiration with lazy cleanup ──
 //
-// النظام القديم: redis SADD (بلا انتهاء — يدوم للأبد)
+// التخزين في Redis (3 مفاتيح):
+//   1. PREMIUM_SET_KEY (Set)              — للتوافق مع pipeline sismember في hot path
+//   2. premium:exp:{userId}     (String)  — اشتراك مدفوع. TTL = صلاحية الاشتراك
+//   3. premium:manual:{userId}  (String)  — منحة Admin. بدون TTL = للأبد
 //
-// النظام الجديد: مزدوج:
-//   1. PREMIUM_SET_KEY (Set) — للتوافق مع الكود القديم + pipeline sismember
-//   2. premium:exp:{userId} (String) — TTL 30 يوم، مصدر الحقيقة للانتهاء
+// المستخدم يُعتبر Premium لو:
+//   - موجود في PREMIUM_SET_KEY  AND
+//   - (premium:exp موجود  OR  premium:manual موجود)
 //
-// isPremium يتحقق من الاثنين:
-//   - لو المفتاح المؤقت انتهى → يُزيل المستخدم من الـ Set تلقائياً (lazy cleanup)
-//   - لو موجود في الـ Set بدون مفتاح مؤقت → اشتراك يدوي من Admin (لا ينتهي)
+// لو موجود في الـ Set بدون أي من الاتنين → اشتراك انتهى (Redis مسح exp تلقائياً)
+//   → نعمل lazy cleanup: SREM من الـ Set ونرجع false.
 //
-// setPremium(userId, true, days):
-//   - يضيف للـ Set
-//   - يضع مفتاح TTL (30 يوم للدفع، 0 = يدوي بلا انتهاء)
+// التجديد (setPremium مدفوع): يُمدّد الـ TTL القائم بدل ما يستبدله.
+//   مثال: عميل عنده 10 أيام باقية يجدد → الـ TTL يصبح 10 + 30 = 40 يوم.
+//   هذا هو السلوك الموثّق في README ("التجديد يمدّد الصلاحية القائمة").
+//
+// قبل هذا الإصلاح: setex كان بيـ replace الـ TTL → العميل يخسر الأيام الباقية.
+// وقبل ذلك: مفيش lazy cleanup أصلاً → العميل يدفع مرة → premium للأبد.
 
-const PREMIUM_EXP_KEY = (uid: string) => `premium:exp:${uid}`;
-const PREMIUM_TTL_SEC = 30 * 24 * 3600;  // 30 يوم
+const PREMIUM_EXP_KEY    = (uid: string) => `premium:exp:${uid}`;
+const PREMIUM_MANUAL_KEY = (uid: string) => `premium:manual:${uid}`;
 
 export async function isPremium(userId: string): Promise<boolean> {
   try {
-    // نتحقق من وجود المستخدم في الـ Set فقط
-    // - اشتراك مدفوع: موجود في الـ Set + مفتاح TTL موجود (لم ينته بعد)
-    // - اشتراك يدوي Admin: موجود في الـ Set + لا مفتاح TTL (لا ينتهي)
-    // - منتهي الاشتراك: مفتاح TTL انتهى → Redis حذفه تلقائياً
-    //   لكن المستخدم لا يزال في الـ Set → نحتاج نتحقق
-    //
-    // المنطق: لو في الـ Set ولو مفيش TTL key → يدوي = Premium ✅
-    //         لو في الـ Set وفيه TTL key → مدفوع لسه ساري = Premium ✅
-    //         لو مش في الـ Set → مش Premium ❌
+    // pipeline واحد بدل 3 round-trips
+    const res = await redis.pipeline()
+      .sismember(PREMIUM_SET_KEY, userId)
+      .exists(PREMIUM_EXP_KEY(userId))
+      .exists(PREMIUM_MANUAL_KEY(userId))
+      .exec();
+    if (!res) return false;
 
-    return (await redis.sismember(PREMIUM_SET_KEY, userId)) === 1;
+    const inSet     = (res[0]?.[1] as number) === 1;
+    const hasExp    = (res[1]?.[1] as number) === 1;
+    const hasManual = (res[2]?.[1] as number) === 1;
+
+    if (!inSet) return false;
+    if (hasExp || hasManual) return true;
+
+    // Stale entry: في الـ Set بدون exp ولا manual → اشتراك انتهى.
+    // Lazy cleanup — fire-and-forget عشان ما نأخّرش الـ caller
+    redis.srem(PREMIUM_SET_KEY, userId).catch(() => {});
+    L.info("premium", "Lazy cleanup: removed expired user from set", { userId });
+    return false;
   } catch { return false; }
 }
 
@@ -44,36 +59,75 @@ export async function isPremium(userId: string): Promise<boolean> {
  * تفعيل أو إلغاء Premium لمستخدم
  * @param userId  Telegram user ID
  * @param enable  true = تفعيل | false = إلغاء
- * @param days    عدد الأيام (0 = يدوي بلا انتهاء، 30 = اشتراك مدفوع)
+ * @param days    عدد الأيام:
+ *                  > 0 = اشتراك مدفوع (يُمدّد TTL القائم بهذه الأيام)
+ *                  = 0 = منحة Admin يدوية بلا انتهاء
+ *
+ * Renewal semantics (days > 0):
+ *   - لو فيه TTL باقي → الجديد = القديم + days*86400 (تمديد)
+ *   - لو منتهي/غير موجود → الجديد = days*86400 (اشتراك جديد)
+ *   - لو كان admin grant (manual) → نحذف الـ manual ونحوّل لاشتراك مدفوع
  */
 export async function setPremium(
   userId: string,
   enable: boolean,
   days   = 0,
 ): Promise<void> {
-  if (enable) {
-    const pipe = redis.pipeline().sadd(PREMIUM_SET_KEY, userId);
-    if (days > 0) {
-      // اشتراك مدفوع — ينتهي بعد N يوم
-      pipe.setex(PREMIUM_EXP_KEY(userId), days * 24 * 3600, String(Date.now()));
-    } else {
-      // يدوي من Admin — لا ينتهي (احذف أي TTL قديم)
-      pipe.del(PREMIUM_EXP_KEY(userId));
-    }
-    await pipe.exec();
-  } else {
+  if (!enable) {
+    // إلغاء كامل — احذف من كل مكان
     await redis.pipeline()
       .srem(PREMIUM_SET_KEY, userId)
       .del(PREMIUM_EXP_KEY(userId))
+      .del(PREMIUM_MANUAL_KEY(userId))
       .exec();
+    return;
+  }
+
+  if (days > 0) {
+    // اشتراك مدفوع — مدّد الـ TTL القائم
+    const currentTtl = await redis.ttl(PREMIUM_EXP_KEY(userId));
+    // -2 = key missing, -1 = no TTL (لا يحدث في كودنا), >0 = ثوانٍ متبقية
+    const remainingSec = currentTtl > 0 ? currentTtl : 0;
+    const newTtlSec    = remainingSec + days * 24 * 3600;
+
+    await redis.pipeline()
+      .sadd(PREMIUM_SET_KEY, userId)
+      .set(PREMIUM_EXP_KEY(userId), String(Date.now()), "EX", newTtlSec)
+      // ترقية من admin grant لاشتراك مدفوع — احذف الـ manual flag
+      .del(PREMIUM_MANUAL_KEY(userId))
+      .exec();
+
+    L.info("premium", "Paid premium activated/extended", {
+      userId,
+      addedDays: days,
+      previousRemainingSec: remainingSec,
+      newTtlSec,
+    });
+  } else {
+    // منحة Admin — بدون TTL، تدوم للأبد
+    await redis.pipeline()
+      .sadd(PREMIUM_SET_KEY, userId)
+      .set(PREMIUM_MANUAL_KEY(userId), String(Date.now()))
+      // لو كان عنده اشتراك مدفوع، ما نمسحوش — الـ manual flag كافٍ ليبقى premium
+      // والـ exp يُكمل للحد منتهي. نختار manual فوق exp في عرض expiry لأنها بلا انتهاء.
+      .exec();
+
+    L.info("premium", "Manual admin grant set", { userId });
   }
 }
 
 /**
- * تاريخ انتهاء الاشتراك — null = يدوي بلا انتهاء أو مش premium
+ * تاريخ انتهاء الاشتراك:
+ *   null = منحة Admin (بلا انتهاء)
+ *        OR منتهي/مش premium
+ *   Date = اشتراك مدفوع ساري — التاريخ المتوقّع للانتهاء
  */
 export async function getPremiumExpiry(userId: string): Promise<Date | null> {
   try {
+    // لو فيه manual flag → بلا انتهاء
+    const hasManual = await redis.exists(PREMIUM_MANUAL_KEY(userId));
+    if (hasManual === 1) return null;
+
     const ttl = await redis.ttl(PREMIUM_EXP_KEY(userId));
     if (ttl <= 0) return null;
     const expMs = Date.now() + ttl * 1000;
@@ -132,4 +186,3 @@ export async function setUserNote(userId: string, note: string): Promise<void> {
 export async function clearUserNote(userId: string): Promise<void> {
   await redis.del(ULIMIT_NOTE(userId));
 }
-
