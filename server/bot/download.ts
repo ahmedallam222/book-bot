@@ -218,12 +218,13 @@ async function expandFoulabookUrl(url: string): Promise<string | null> {
 // MAIN — downloadAndSend
 // ══════════════════════════════════════════════
 export async function downloadAndSend(
-  bot:      TelegramBot,
-  chatId:   number,
-  pdfUrl:   string,
-  bookName: string,
-  token:    string,
-  _noFollow = false
+  bot:         TelegramBot,
+  chatId:      number,
+  pdfUrl:      string,
+  bookName:    string,
+  token:       string,
+  _noFollow    = false,
+  skipMistral  = false,
 ): Promise<DownloadResult> {
   if (isSlowArchiveUrl(pdfUrl)) {
     L.warn("download", "Skipping slow archive.org URL", { url: pdfUrl.slice(0, 80) });
@@ -270,7 +271,7 @@ export async function downloadAndSend(
   // ممكن يحمّل الـ PDF — لازم browser session كامل.
   // noorBookDownload بتحمّل لـ tempPath ثم بنكمل بنفس validate + sendDocument.
   if (/(?:^|\.)noor-book\.com\//i.test(pdfUrl)) {
-    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl);
+    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral);
   }
 
   L.dlStart(pdfUrl, bookName);
@@ -485,7 +486,7 @@ export async function downloadAndSend(
     // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
     // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
     // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
-    const validation = await validatePdfContent(tempPath, bookName, originalUrl);
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
@@ -496,7 +497,13 @@ export async function downloadAndSend(
         mistral:   validation.mistralUsed,
       });
       safeDeleteTemp(tempPath);
-      return { ok: false, rejectedContent: true };
+      return {
+        ok: false,
+        rejectedContent: true,
+        // Surface to bookRequest.ts so it can count consecutive Mistral NOs
+        // and short-circuit further paid calls on this query.
+        mistralRejected: validation.mistralUsed,
+      };
     }
 
     // ── اسم الملف ─────────────────────────────────
@@ -580,6 +587,7 @@ async function noorBookDownloadAndSend(
   bookName:    string,
   _token:      string,
   originalUrl: string,
+  skipMistral  = false,
 ): Promise<DownloadResult> {
   L.dlStart(pdfUrl, bookName);
   const t0 = Date.now();
@@ -630,7 +638,7 @@ async function noorBookDownloadAndSend(
 
   // ── content validation ───────────────────────
   // originalUrl فيه slug الكتاب — مفيد لـ Mistral
-  const validation = await validatePdfContent(tempPath, bookName, originalUrl);
+  const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
   if (!validation.accepted) {
     L.warn("download", "noor-book PDF rejected — content mismatch", {
       book:      bookName.slice(0, 50),
@@ -641,7 +649,11 @@ async function noorBookDownloadAndSend(
       mistral:   validation.mistralUsed,
     });
     safeDeleteTemp(tempPath);
-    return { ok: false, rejectedContent: true };
+    return {
+      ok: false,
+      rejectedContent: true,
+      mistralRejected: validation.mistralUsed,
+    };
   }
 
   // ── sendDocument ─────────────────────────────

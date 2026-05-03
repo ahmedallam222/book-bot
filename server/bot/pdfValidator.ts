@@ -564,9 +564,10 @@ async function askMistral(
  * @returns PdfValidationResult — accepted:true → أرسل | false → جرّب التالي
  */
 export async function validatePdfContent(
-  filePath: string,
-  bookName: string,
-  pdfUrl:   string = "",
+  filePath:    string,
+  bookName:    string,
+  pdfUrl:      string = "",
+  skipMistral: boolean = false,
 ): Promise<PdfValidationResult> {
   const t0 = Date.now();
 
@@ -748,6 +749,33 @@ export async function validatePdfContent(
       metaTitle: metaTitle.slice(0, 60),
     });
     return { accepted: false, score, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle };
+  }
+
+  // ── Mistral early-stop ───────────────────────────────
+  // The caller (bookRequest.ts) sets skipMistral=true once it has seen
+  // MISTRAL_NO_STREAK_LIMIT consecutive Mistral NO verdicts for the
+  // current request, to stop burning API budget on a query Mistral has
+  // already failed to validate. In this branch we trust heuristics only:
+  // the score-based ACCEPT path above didn't fire and the score-based
+  // REJECT path also didn't fire (otherwise we'd have returned earlier),
+  // so the candidate is genuinely ambiguous. Without Mistral the safest
+  // choice on an ambiguous candidate is to reject — false-accepts here
+  // would send the wrong book to the user, whereas false-rejects just
+  // move on to the next candidate.
+  if (skipMistral) {
+    redis.incr(TEL_REJECTED).catch(() => {});
+    L.warn("pdfValidator", "Mistral skipped (early-stop) — rejecting ambiguous candidate", {
+      book:      bookName.slice(0, 50),
+      score:     score.toFixed(2),
+      metaTitle: metaTitle.slice(0, 60),
+    });
+    return {
+      accepted:    false,
+      score,
+      event:       "candidate_rejected_title_mismatch",
+      mistralUsed: false,
+      metaTitle,
+    };
   }
 
   // ── منطقة غامضة → Mistral ───────────────────────────
