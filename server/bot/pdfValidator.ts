@@ -1,7 +1,7 @@
 import * as fsPromises from "fs/promises";
 import { createHash }  from "crypto";
 import { L } from "./logger.js";
-import { normalizeArabic } from "./text.js";
+import { normalizeArabic, urlFilenameRelevance } from "./text.js";
 import { redis } from "./redis.js";
 import {
   MISTRAL_API_KEY,
@@ -9,11 +9,20 @@ import {
   PDF_VALIDATE_REJECT_THRESHOLD,
   TIMEOUT_MISTRAL,
   TRUSTED_PDF_DOMAINS,
+  FILENAME_TRUSTED_PDF_DOMAINS,
+  MISTRAL_BYPASS_FILENAME_THRESHOLD,
 } from "./config.js";
 
 // domains موثوقة — نتخطى الـ validator ونقبل مباشرة
 function isTrustedDomain(url: string): boolean {
   return TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
+}
+
+// Curated content libraries — trust filename match as ground truth.
+// Used to short-circuit Mistral when the filename score is high enough,
+// avoiding paid API calls on PDFs that the URL itself already identifies.
+function isFilenameTrustedDomain(url: string): boolean {
+  return FILENAME_TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -748,6 +757,35 @@ export async function validatePdfContent(
       metaTitle: metaTitle.slice(0, 60),
     });
     return { accepted: false, score, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle };
+  }
+
+  // ── Filename-trusted bypass ──────────────────────────
+  // Before paying for Mistral on an ambiguous score, check whether the
+  // source is a curated library where filename match alone is reliable.
+  // E.g. archive.org/details/atomic-habits-arabic-translation/atomic-habits.pdf
+  // requested for "العادات الذرية" — cross-language so wordOverlapScore=0,
+  // but filename relevance picks up the slug match → high-confidence accept.
+  // Only fires when both: domain is filename-trusted AND filename score
+  // is at/above MISTRAL_BYPASS_FILENAME_THRESHOLD. Falls through to Mistral
+  // otherwise, so wrong-book candidates from these sources still get vetted.
+  if (pdfUrl && isFilenameTrustedDomain(pdfUrl)) {
+    const fnScore = urlFilenameRelevance(bookName, pdfUrl);
+    if (fnScore >= MISTRAL_BYPASS_FILENAME_THRESHOLD) {
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      L.info("pdfValidator", "Filename-trusted bypass — accepted without Mistral", {
+        book: bookName.slice(0, 50),
+        url: pdfUrl.slice(0, 80),
+        filenameScore: fnScore.toFixed(2),
+        metaTitle: metaTitle.slice(0, 60),
+      });
+      return {
+        accepted: true,
+        score: Math.max(score, fnScore),
+        event: "candidate_accepted_title_match",
+        mistralUsed: false,
+        metaTitle,
+      };
+    }
   }
 
   // ── منطقة غامضة → Mistral ───────────────────────────
