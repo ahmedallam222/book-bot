@@ -11,7 +11,7 @@ import {
 import { L } from "./logger.js";
 import { isBlacklisted, recordUrlFailure, recordUrlSuccess } from "./blacklist.js";
 import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
-import { escMd } from "./text.js";
+import { escMd, urlFilenameRelevance } from "./text.js";
 import { validatePdfContent } from "./pdfValidator.js";
 import { downloadNoorBookPdf } from "./noorBookResolver.js";
 import type { DownloadResult } from "./types.js";
@@ -54,6 +54,39 @@ const SKIP_DIRECT_DOMAINS = [
 
 function shouldSkipDirect(url: string): boolean {
   return SKIP_DIRECT_DOMAINS.some((d) => url.includes(d));
+}
+
+// ══════════════════════════════════════════════
+// DIRECT-SEND SAFETY GATE
+//
+// Direct mode (Telegram fetches the URL itself via sendDocument with a
+// remote URL) is faster but **completely bypasses pdfValidator**: there
+// is no local file to inspect for /Title metadata, no Mistral re-rank,
+// no metaTitle vs bookName check. Without a content-side gate, any
+// trusted-but-unrelated URL the search ranker hands us can be delivered
+// to the user verbatim.
+//
+// Production incident 2026-05-03: user requested "الموجز في فن التفاوض";
+// the bot direct-sent archive.org URL
+// `dn790006.ca.archive.org/.../dalilkuwa-s2021-a.pdf` (= "الدليل إلى
+// القوة والدهاء", a completely different book). The url's slug is
+// informative-looking (not digit-only) so neither the direct path's
+// pre-validate step nor pdfValidator's trusted-domain bypass would have
+// caught it — but they never ran anyway because direct mode skipped
+// validation entirely.
+//
+// Returns true when direct mode is unsafe and the caller must fall
+// through to local-download + full pdfValidator + Mistral.
+//
+// Heuristic: if the URL filename has zero/near-zero token overlap with
+// the requested book name, we have no signal that the URL is the right
+// book. The 0.15 threshold matches the existing
+// `bestFilenameScore < 0.15` warning in bookRequest.ts; digit-only
+// neutral filenames (score 0.3) still pass — they're handled by the
+// trusted-domain branch in pdfValidator after local download.
+function directSendUnsafe(bookName: string, pdfUrl: string): boolean {
+  const score = urlFilenameRelevance(bookName, pdfUrl);
+  return score < 0.15;
 }
 
 // ══════════════════════════════════════════════
@@ -379,7 +412,18 @@ export async function downloadAndSend(
   // ══════════════════════════════════════════════
   // محاولة 1: URL مباشر لـ Telegram
   // ══════════════════════════════════════════════
-  if (!shouldSkipDirect(pdfUrl)) {
+  // مهم: direct mode بيتخطّى pdfValidator بالكامل لأن السيرفر مش
+  // بيحمّل الملف محلياً. نضيف gate قبل: لو اسم الملف ما يطابقش اسم
+  // الكتاب أبداً → نسقط للـ local download (اللي بيشغّل validation
+  // كامل: metaTitle + Mistral). شوف directSendUnsafe أعلاه للتفصيل.
+  const directUnsafe = directSendUnsafe(bookName, pdfUrl);
+  if (directUnsafe) {
+    L.warn("download", "direct_send_skipped — filename has no overlap with book; using local download for full validation", {
+      url: pdfUrl.slice(0, 80),
+      book: bookName.slice(0, 50),
+    });
+  }
+  if (!shouldSkipDirect(pdfUrl) && !directUnsafe) {
     const preValid = await preValidatePdfUrl(pdfUrl);
     if (!preValid) {
       L.warn("download", "preValidate: not a PDF — skipping permanently", {
