@@ -325,9 +325,10 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     switch (data) {
       case "main_menu": {
         const name = query.from.first_name || "صديقي";
-        const [prem, limit, dlRaw] = await Promise.all([
-          isPremium(userId),
-          getUserDailyLimit(userId),
+        // BUG-FIX: getUserDailyLimit بتنده isPremium جواها. نمرّر prem.
+        const prem  = await isPremium(userId);
+        const [limit, dlRaw] = await Promise.all([
+          getUserDailyLimit(userId, prem),
           storage.getDailyDownloadCount(userId).catch(() => 0),
         ]);
         const remaining = Math.max(0, limit - dlRaw);
@@ -346,9 +347,10 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         break;
 
       case "my_stats": {
-        const [prem, limit, dlCount, expiry] = await Promise.all([
-          isPremium(userId),
-          getUserDailyLimit(userId),
+        // BUG-FIX: getUserDailyLimit و getPremiumExpiry تنادي Redis لـ manual flag → نجيب prem أولاً.
+        const prem  = await isPremium(userId);
+        const [limit, dlCount, expiry] = await Promise.all([
+          getUserDailyLimit(userId, prem),
           storage.getDailyDownloadCount(userId).catch(() => 0),
           getPremiumExpiry(userId),
         ]);
