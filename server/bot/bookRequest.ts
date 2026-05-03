@@ -42,9 +42,14 @@ export async function handleBookRequest(
   userName?: string | null
 ): Promise<void> {
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
-  let bannedResult: [Error|null, unknown]|undefined;
-  let maintenanceResult: [Error|null, unknown]|undefined;
-  let premiumResult: [Error|null, unknown]|undefined;
+  // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
+  // ندعم انتهاء الاشتراك الصحيح + lazy cleanup. كلهم في نفس الـ pipeline
+  // عشان نحافظ على round-trip واحد. شاهد server/bot/userSettings.ts للتوثيق.
+  let bannedResult:        [Error|null, unknown]|undefined;
+  let maintenanceResult:   [Error|null, unknown]|undefined;
+  let premiumSetResult:    [Error|null, unknown]|undefined;
+  let premiumExpResult:    [Error|null, unknown]|undefined;
+  let premiumManualResult: [Error|null, unknown]|undefined;
   let limitOverrideResult: [Error|null, unknown]|undefined;
   let pipelineOk = false;
 
@@ -53,10 +58,13 @@ export async function handleBookRequest(
       .sismember("bans", userId)
       .get(MAINTENANCE_KEY)
       .sismember(PREMIUM_SET_KEY, userId)
+      .exists(`premium:exp:${userId}`)
+      .exists(`premium:manual:${userId}`)
       .get(`ulimit:${userId}`)
       .exec();
     if (pipelineRes) {
-      [bannedResult, maintenanceResult, premiumResult, limitOverrideResult] =
+      [bannedResult, maintenanceResult, premiumSetResult, premiumExpResult,
+       premiumManualResult, limitOverrideResult] =
         pipelineRes as [Error|null, unknown][];
       pipelineOk = true;
     }
@@ -102,8 +110,18 @@ export async function handleBookRequest(
   }
 
   // ── Daily limit ───────────────────────────────
-  const isPrem     = (premiumResult?.[1] as number) === 1;
-  const limitVal   = limitOverrideResult?.[1] as string | null;
+  // Premium = في الـ Set AND (اشتراك مدفوع ساري OR منحة Admin يدوية)
+  // لو في الـ Set بدون exp ولا manual → اشتراك انتهى → lazy cleanup
+  const inPremiumSet = (premiumSetResult?.[1]    as number) === 1;
+  const hasExp       = (premiumExpResult?.[1]    as number) === 1;
+  const hasManual    = (premiumManualResult?.[1] as number) === 1;
+  const isPrem       = inPremiumSet && (hasExp || hasManual);
+  if (inPremiumSet && !hasExp && !hasManual) {
+    // Stale — اشتراك مدفوع انتهى TTL بتاعه. fire-and-forget cleanup
+    redis.srem(PREMIUM_SET_KEY, userId).catch(() => {});
+    L.info("premium", "Lazy cleanup: removed expired user from set", { userId });
+  }
+  const limitVal     = limitOverrideResult?.[1] as string | null;
   // IMP-1 FIX: parseInt قد يُعيد NaN إذا كانت قيمة Redis تالفة
   // NaN > 0 = false → يُعامَل كـ unlimited → المستخدم لا يُحجب أبداً
   // الحل: إضافة isNaN check مع fallback للقيمة الصحيحة
