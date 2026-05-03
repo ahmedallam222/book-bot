@@ -105,6 +105,60 @@ function isSlowArchiveUrl(url: string): boolean {
 }
 
 // ══════════════════════════════════════════════
+// FILENAME / CAPTION BUILDERS
+// Use the actual book title from PDF metadata (or, when extraction fails,
+// the search-result title) instead of the user's raw query for the file
+// name shown in Telegram. This prevents the "file labeled X but contains Y"
+// deception that occurred when the trusted-domain validator bypass let
+// unrelated PDFs through. The caption keeps the user's query so they see
+// what they asked for AND what they got side-by-side when the two differ.
+// ══════════════════════════════════════════════
+function sanitizePdfBaseName(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 80);
+}
+
+// metaTitle from validatePdfContent is the *real* book title (or empty
+// for trusted-domain fast-path with no search title). When it is present
+// and meaningfully different from bookName, prefer it for the filename
+// so the file's identity is honest.
+export function buildPdfFilename(bookName: string, metaTitle: string): string {
+  const sanitizedBook = sanitizePdfBaseName(bookName);
+  const cleanMeta = (metaTitle || "")
+    .replace(/\.pdf$/i, "")
+    .trim();
+  if (cleanMeta && cleanMeta.length >= 4) {
+    const sanitizedMeta = sanitizePdfBaseName(cleanMeta);
+    if (sanitizedMeta && sanitizedMeta !== sanitizedBook) {
+      return `${sanitizedMeta}.pdf`;
+    }
+  }
+  return `${sanitizedBook || "book"}.pdf`;
+}
+
+// Caption shown in Telegram. Always includes user query so they see
+// what they asked for. If validation surfaced a different real title,
+// surface it explicitly so users can spot mismatches before opening.
+export function buildCaption(bookName: string, metaTitle: string): string {
+  const cleanMeta = (metaTitle || "").trim();
+  // Show the actual title only when it diverges meaningfully from the
+  // requested name (case- and whitespace-insensitive) so we don't add
+  // noise on perfect matches.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const showActual = cleanMeta &&
+                     cleanMeta.length >= 4 &&
+                     norm(cleanMeta) !== norm(bookName);
+  if (showActual) {
+    return `📚 *${escMd(bookName)}*\n📖 _${escMd(cleanMeta)}_\n\n✅ من خلاصة الكتب`;
+  }
+  return `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`;
+}
+
+// ══════════════════════════════════════════════
 // PRE-VALIDATE
 // يفحص 5 bytes فقط — هل الـ URL يُقدّم PDF حقيقي؟
 // fail-open: أي خطأ شبكي → true (جرّب الإرسال)
@@ -262,13 +316,14 @@ async function expandFoulabookUrl(url: string): Promise<string | null> {
 // MAIN — downloadAndSend
 // ══════════════════════════════════════════════
 export async function downloadAndSend(
-  bot:         TelegramBot,
-  chatId:      number,
-  pdfUrl:      string,
-  bookName:    string,
-  token:       string,
-  _noFollow    = false,
-  skipMistral  = false,
+  bot:               TelegramBot,
+  chatId:            number,
+  pdfUrl:            string,
+  bookName:          string,
+  token:             string,
+  _noFollow          = false,
+  skipMistral        = false,
+  searchResultTitle  = "",
 ): Promise<DownloadResult> {
   if (isSlowArchiveUrl(pdfUrl)) {
     L.warn("download", "Skipping slow archive.org URL", { url: pdfUrl.slice(0, 80) });
@@ -315,7 +370,7 @@ export async function downloadAndSend(
   // ممكن يحمّل الـ PDF — لازم browser session كامل.
   // noorBookDownload بتحمّل لـ tempPath ثم بنكمل بنفس validate + sendDocument.
   if (/(?:^|\.)noor-book\.com\//i.test(pdfUrl)) {
-    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral);
+    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral, searchResultTitle);
   }
 
   L.dlStart(pdfUrl, bookName);
@@ -345,9 +400,11 @@ export async function downloadAndSend(
           body: JSON.stringify({
             chat_id:    chatId,
             document:   pdfUrl,
-            caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
+            // For direct send we don't have PDF /Title yet — Telegram
+            // fetches the file itself. Pass searchResultTitle so the
+            // caption can flag it when the search-result page title
+            // diverges from the user's query.
+            caption:    buildCaption(bookName, searchResultTitle),
             parse_mode: "Markdown",
           }),
         });
@@ -544,7 +601,10 @@ export async function downloadAndSend(
     // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
     // FIX (CD-filename): cdFilename بيغطّي الحالة اللي originalUrl نفسه ميحملش
     // slug (مثلاً Hindawi /books/62575295.pdf لـ "زقاق المدق").
-    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, cdFilename);
+    // searchResultTitle = HTML <title> from Firecrawl, used as a title-mismatch
+    // gate even on trusted domains and as metaTitle fallback for hosts whose
+    // /Title sits beyond the validator's 64KB scan window.
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, cdFilename, searchResultTitle);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
@@ -565,13 +625,12 @@ export async function downloadAndSend(
     }
 
     // ── اسم الملف ─────────────────────────────────
-    const cleanBookName = bookName
-      .replace(/[/\\:*?"<>|]/g, "_")
-      .replace(/\s+/g, "_")
-      .replace(/_+/g, "_")
-      .replace(/^_|_$/g, "")
-      .slice(0, 80);
-    const fname = `${cleanBookName || "book"}.pdf`;
+    // Use the actual book title from validation (PDF metadata or search result)
+    // when it diverges meaningfully from the user query. Prevents the
+    // "file labeled 'X' but contains Y" deception that the trusted-domain
+    // bypass used to enable. The user query stays in the caption so the
+    // user knows what they asked for.
+    const fname = buildPdfFilename(bookName, validation.metaTitle);
 
     // ── إرسال لـ Telegram ─────────────────────────
     let sent: TelegramBot.Message;
@@ -582,9 +641,7 @@ export async function downloadAndSend(
           chatId,
           tempPath,
           {
-            caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
+            caption:    buildCaption(bookName, validation.metaTitle),
             parse_mode: "Markdown",
           },
           { filename: fname, contentType: "application/pdf" }
@@ -639,13 +696,14 @@ export async function downloadAndSend(
 // بعد ما الـ PDF موجود محلياً، نكمل بنفس validate + send.
 // ══════════════════════════════════════════════
 async function noorBookDownloadAndSend(
-  bot:         TelegramBot,
-  chatId:      number,
-  pdfUrl:      string,
-  bookName:    string,
-  _token:      string,
-  originalUrl: string,
-  skipMistral  = false,
+  bot:               TelegramBot,
+  chatId:            number,
+  pdfUrl:            string,
+  bookName:          string,
+  _token:            string,
+  originalUrl:       string,
+  skipMistral        = false,
+  searchResultTitle  = "",
 ): Promise<DownloadResult> {
   L.dlStart(pdfUrl, bookName);
   const t0 = Date.now();
@@ -696,7 +754,7 @@ async function noorBookDownloadAndSend(
 
   // ── content validation ───────────────────────
   // originalUrl فيه slug الكتاب — مفيد لـ Mistral
-  const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
+  const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, "", searchResultTitle);
   if (!validation.accepted) {
     L.warn("download", "noor-book PDF rejected — content mismatch", {
       book:      bookName.slice(0, 50),
@@ -715,13 +773,7 @@ async function noorBookDownloadAndSend(
   }
 
   // ── sendDocument ─────────────────────────────
-  const cleanBookName = bookName
-    .replace(/[/\\:*?"<>|]/g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/g, "")
-    .slice(0, 80);
-  const fname = `${cleanBookName || "book"}.pdf`;
+  const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
 
   let sent: TelegramBot.Message;
@@ -732,9 +784,7 @@ async function noorBookDownloadAndSend(
         chatId,
         tempPath,
         {
-          caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
+          caption:    buildCaption(bookName, validation.metaTitle),
           parse_mode: "Markdown",
         },
         { filename: fname, contentType: "application/pdf" },

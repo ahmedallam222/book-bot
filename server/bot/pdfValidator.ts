@@ -186,6 +186,7 @@ const ARABIC_STOPWORDS = new Set<string>([
 export type PdfValidationEvent =
   | "candidate_accepted_title_match"
   | "candidate_rejected_title_mismatch"
+  | "trusted_domain_title_mismatch"
   | "mistral_rerank_used"
   | "no_metadata_accepted"
   | "empty_file"
@@ -600,13 +601,62 @@ export async function validatePdfContent(
   pdfUrl:      string = "",
   skipMistral: boolean = false,
   contentDispositionFilename: string = "",
+  searchResultTitle: string = "",
 ): Promise<PdfValidationResult> {
   const t0 = Date.now();
 
+  // searchResultTitle = HTML <title> from the search engine (Firecrawl)
+  // for the page that linked to this PDF. Used as an additional title
+  // signal when the PDF metadata is unavailable (e.g. Hindawi PDFs whose
+  // /Title sits beyond the 64KB scan window) AND as a sanity check on
+  // trusted domains — see the trusted-domain branch below.
+  // Strip common URL-only fallbacks: engine.ts falls back to the raw URL
+  // when the HTML <title> tag is missing.
+  const searchTitle = (searchResultTitle && !searchResultTitle.startsWith("http"))
+    ? searchResultTitle.trim()
+    : "";
+
   // ── trusted domains — نقبل مباشرة بدون validation ────────
+  // BUT: if the search-result title is available AND clearly mismatches
+  // bookName, reject. This catches cases like Firecrawl returning an
+  // unrelated Hindawi book ("ملك وامرأة وإله") for a query the catalog
+  // doesn't actually have ("تحت مسمى الرجولة"), which used to slip
+  // through because the bypass skipped all title checks.
   if (pdfUrl && isTrustedDomain(pdfUrl)) {
-    L.info("pdfValidator", "Trusted domain — skipping validation", { url: pdfUrl.slice(0, 80) });
-    return { accepted: true, score: 1, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle: "" };
+    if (searchTitle) {
+      const titleScore = wordOverlapScore(bookName, searchTitle);
+      if (titleScore < PDF_VALIDATE_REJECT_THRESHOLD) {
+        redis.incr(TEL_REJECTED).catch(() => {});
+        L.warn("pdfValidator", "trusted_domain_title_mismatch — search title doesn't match book", {
+          url: pdfUrl.slice(0, 80),
+          book: bookName.slice(0, 50),
+          searchTitle: searchTitle.slice(0, 80),
+          score: titleScore.toFixed(2),
+        });
+        return {
+          accepted: false,
+          score: titleScore,
+          event: "trusted_domain_title_mismatch",
+          mistralUsed: false,
+          metaTitle: searchTitle,
+        };
+      }
+      L.info("pdfValidator", "Trusted domain — title-gate passed, accepting", {
+        url: pdfUrl.slice(0, 80),
+        searchTitle: searchTitle.slice(0, 60),
+        score: titleScore.toFixed(2),
+      });
+    } else {
+      L.info("pdfValidator", "Trusted domain — no search title, skipping validation", { url: pdfUrl.slice(0, 80) });
+    }
+    redis.incr(TEL_ACCEPTED).catch(() => {});
+    return {
+      accepted: true,
+      score: 1,
+      event: "candidate_accepted_title_match",
+      mistralUsed: false,
+      metaTitle: searchTitle,
+    };
   }
 
   // ── قراءة أول 64KB — كافٍ لأي PDF metadata ──────────────
@@ -688,8 +738,27 @@ export async function validatePdfContent(
     ms:             Date.now() - t0,
   });
 
-  // ── لا metaTitle → تحقق من اسم الملف أولاً ─────────
-  if (!metaTitle) {
+  // searchTitle promotion: when the PDF metadata title is missing but the
+  // search-result <title> is available and looks like a real book title
+  // (≥ 4 chars, has letters), use it as the effective metaTitle. This
+  // gives downstream wordOverlapScore + Mistral a real signal instead of
+  // falling back to numeric-ID filename guesses. Critical for hosts like
+  // Hindawi where /Title sits beyond the 64KB scan window.
+  let effectiveMetaTitle = metaTitle;
+  let metaTitleSource: "pdf" | "search" = "pdf";
+  if (!effectiveMetaTitle && searchTitle &&
+      searchTitle.length >= 4 &&
+      /[a-zA-Z\u0600-\u06FF]/.test(searchTitle)) {
+    effectiveMetaTitle = searchTitle;
+    metaTitleSource = "search";
+    L.info("pdfValidator", "PDF metaTitle missing — using search-result title", {
+      book: bookName.slice(0, 50),
+      searchTitle: searchTitle.slice(0, 60),
+    });
+  }
+
+  // ── لا metaTitle (ولا searchTitle بديل) → تحقق من اسم الملف أولاً ─
+  if (!effectiveMetaTitle) {
     redis.incr(TEL_EXTRACT_FAILED).catch(() => {});
 
     // v25 FIX: اسم الملف العشوائي/الرقمي مع غياب metaTitle = صفر معلومة
@@ -750,21 +819,26 @@ export async function validatePdfContent(
   }
 
   // ── حساب score ─────────────────────────────────────────
-  const score = wordOverlapScore(bookName, metaTitle);
+  // We use effectiveMetaTitle (PDF /Title or, when missing, the search-result
+  // title) so hosts whose /Title is unreadable (e.g. beyond the 64KB scan window)
+  // can still be scored against a real title rather than failing to extract.
+  const score = wordOverlapScore(bookName, effectiveMetaTitle);
 
   L.debug("pdfValidator", "Local score", {
     book:      bookName.slice(0, 50),
     score:     score.toFixed(2),
-    metaTitle: metaTitle.slice(0, 60),
+    metaTitle: effectiveMetaTitle.slice(0, 60),
+    titleSrc:  metaTitleSource,
   });
 
   // ── قرار واضح: قبول ──────────────────────────────────
   if (score >= PDF_VALIDATE_ACCEPT_THRESHOLD) {
     redis.incr(TEL_ACCEPTED).catch(() => {});
     L.info("pdfValidator", "candidate_accepted_title_match", {
-      book: bookName.slice(0, 50), score: score.toFixed(2), metaTitle: metaTitle.slice(0, 60),
+      book: bookName.slice(0, 50), score: score.toFixed(2),
+      metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
     });
-    return { accepted: true, score, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle };
+    return { accepted: true, score, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle: effectiveMetaTitle };
   }
 
   // ── قرار واضح: رفض ───────────────────────────────────
@@ -775,9 +849,9 @@ export async function validatePdfContent(
   // FIX: الكتاب العربي "العادات الذرية" ← PDF "Atomic Habits" كانت تُرفض مباشرة
   // لأن الكلمات العربية لا تتطابق مع الإنجليزية → score=0 → REJECT بدون Mistral
   // الحل: إذا bookName عربي وmetaTitle إنجليزي (أو العكس) → منطقة غامضة → Mistral
-  const isClearTitle = metaTitle.length >= 4 && !/^[\d\s_\-\.]+$/.test(metaTitle);
+  const isClearTitle = effectiveMetaTitle.length >= 4 && !/^[\d\s_\-\.]+$/.test(effectiveMetaTitle);
   const bookHasArabicLetters = /[\u0600-\u06FF]/.test(bookName);
-  const metaIsArabic         = /[\u0600-\u06FF]/.test(metaTitle);
+  const metaIsArabic         = /[\u0600-\u06FF]/.test(effectiveMetaTitle);
   // Cross-language bypass: كتاب عربي ← PDF إنجليزي أو العكس = قد يكون ترجمة → Mistral يحكم
   // FIX: الكود القديم كان يفحص Arabic→English فقط (bookHasArabicLetters && !metaIsArabic)
   // الحالة الغائبة: بحث إنجليزي "Atomic Habits" ← PDF عربي "العادات الذرية"
@@ -810,9 +884,10 @@ export async function validatePdfContent(
     L.warn("pdfValidator", "candidate_rejected_title_mismatch", {
       book:      bookName.slice(0, 50),
       score:     score.toFixed(2),
-      metaTitle: metaTitle.slice(0, 60),
+      metaTitle: effectiveMetaTitle.slice(0, 60),
+      titleSrc:  metaTitleSource,
     });
-    return { accepted: false, score, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle };
+    return { accepted: false, score, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle: effectiveMetaTitle };
   }
 
   // ── Mistral early-stop ───────────────────────────────
@@ -831,26 +906,29 @@ export async function validatePdfContent(
     L.warn("pdfValidator", "Mistral skipped (early-stop) — rejecting ambiguous candidate", {
       book:      bookName.slice(0, 50),
       score:     score.toFixed(2),
-      metaTitle: metaTitle.slice(0, 60),
+      metaTitle: effectiveMetaTitle.slice(0, 60),
     });
     return {
       accepted:    false,
       score,
       event:       "candidate_rejected_title_mismatch",
       mistralUsed: false,
-      metaTitle,
+      metaTitle:   effectiveMetaTitle,
     };
   }
 
   // ── منطقة غامضة → Mistral ───────────────────────────
   redis.incr(TEL_MISTRAL).catch(() => {});
   L.info("pdfValidator", "Ambiguous score — delegating to Mistral", {
-    book: bookName.slice(0, 50), score: score.toFixed(2), metaTitle: metaTitle.slice(0, 60),
+    book: bookName.slice(0, 50), score: score.toFixed(2),
+    metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
   });
 
   // BUG FIX: نُمرِّر pdfUrl كاملاً (وليس urlFilename) لضمان uniqueness في الـ cache key
   // FIX (CD-filename): نمرّر filenameHint (CD أو URL) كـ explicit filename للـ prompt.
-  const accepted = await askMistral(bookName, metaTitle, pdfUrl, filenameHint);
+  // Pass effectiveMetaTitle (which may be the search-result title when PDF /Title
+  // was unreadable) so Mistral can reason about a real title rather than "".
+  const accepted = await askMistral(bookName, effectiveMetaTitle, pdfUrl, filenameHint);
 
   if (accepted) {
     redis.incr(TEL_ACCEPTED).catch(() => {});
@@ -860,11 +938,12 @@ export async function validatePdfContent(
   } else {
     redis.incr(TEL_REJECTED).catch(() => {});
     L.warn("pdfValidator", "candidate_rejected_title_mismatch (via Mistral)", {
-      book: bookName.slice(0, 50), score: score.toFixed(2), metaTitle: metaTitle.slice(0, 60),
+      book: bookName.slice(0, 50), score: score.toFixed(2),
+      metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
     });
   }
 
-  return { accepted, score, event: "mistral_rerank_used", mistralUsed: true, metaTitle };
+  return { accepted, score, event: "mistral_rerank_used", mistralUsed: true, metaTitle: effectiveMetaTitle };
 }
 
 // ══════════════════════════════════════════════
