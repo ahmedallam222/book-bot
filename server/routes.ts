@@ -251,8 +251,16 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   }));
   app.put("/api/admin/maintenance",  auth, wrap(async (req, res) => {
     const { active } = req.body as { active: boolean };
+    // FIX (maintenance-announce): نقرأ الحالة قبل التغيير عشان نعرف لو حصل
+    // transition من ON→OFF بالظبط — مش نبعت إعلان لو الـ admin بيتأكد بس
+    // (OFF→OFF) أو لو فعّل الصيانة (any→ON).
+    const wasActive = (await redis.get(MAINTENANCE_KEY).catch(() => null)) === "1";
     active ? await redis.set(MAINTENANCE_KEY, "1") : await redis.del(MAINTENANCE_KEY);
     L.adminAction("dashboard", `maintenance ${active ? "ON" : "OFF"}`);
+    if (wasActive && !active) {
+      // emit event — listener في bot/index.ts يبعت الإعلان فعلياً
+      (process as NodeJS.EventEmitter).emit("bot:maintenance_ended");
+    }
     ok(res, { active });
   }));
 
