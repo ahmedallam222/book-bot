@@ -68,6 +68,47 @@ export const BANNED_USERS = new Set<string>(
 // ── Mistral API key ───────────────────────────
 export const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
 
+// ── AI Summary providers ──────────────────────
+// Multi-provider failover stack for the book-summary feature. Each
+// key is independently optional — missing keys just remove that
+// provider from the rotation; the registry continues with whatever
+// is configured. See server/bot/aiProviders/registry.ts.
+export const GEMINI_API_KEY           = process.env.GEMINI_API_KEY           || "";
+export const GROQ_API_KEY             = process.env.GROQ_API_KEY             || "";
+export const CEREBRAS_API_KEY         = process.env.CEREBRAS_API_KEY         || "";
+export const SAMBANOVA_API_KEY        = process.env.SAMBANOVA_API_KEY        || "";
+export const OPENROUTER_API_KEY       = process.env.OPENROUTER_API_KEY       || "";
+export const GITHUB_MODELS_TOKEN      = process.env.GITHUB_MODELS_TOKEN      || "";
+export const CLOUDFLARE_AI_ACCOUNT_ID = process.env.CLOUDFLARE_AI_ACCOUNT_ID || "";
+export const CLOUDFLARE_AI_API_TOKEN  = process.env.CLOUDFLARE_AI_API_TOKEN  || "";
+// Premium-tier — paid you.com Smart API. Routed only for `isPremium` users.
+export const YOU_COM_API_KEY          = process.env.YOU_COM_API_KEY          || "";
+
+// Per-provider HTTP timeout. Slow providers (Cloudflare, OpenRouter)
+// occasionally exceed 30s; we cap at 45s and let the registry fail
+// over rather than blocking the user any longer.
+export const TIMEOUT_AI_PROVIDER = parseInt(
+  process.env.TIMEOUT_AI_PROVIDER || "45000",
+  10,
+);
+
+// Per-user daily summary quota for free users. Premium users are
+// unmetered (routed to you.com which is paid). Set to 0 to disable
+// the rate limit.
+export const SUMMARY_DAILY_LIMIT_FREE = parseInt(
+  process.env.SUMMARY_DAILY_LIMIT_FREE || "5",
+  10,
+);
+
+// How long to keep generated summaries in Redis. The same book
+// always yields the same summary, so caching effectively eliminates
+// repeat-cost — most production traffic should be cache hits after
+// a warm-up period.
+export const SUMMARY_CACHE_TTL_SECONDS = parseInt(
+  process.env.SUMMARY_CACHE_TTL_SECONDS || String(30 * 24 * 3600),
+  10,
+);
+
 // ── Unreliable domains ────────────────────────
 // FIX-RUNTIME: أضفنا دعم UNRELIABLE_DOMAINS_EXTRA في .env
 export const UNRELIABLE_DOMAINS: string[] = [
@@ -106,6 +147,30 @@ export const TRUSTED_PDF_DOMAINS: string[] = [
   "library.lol",
   "z-lib.org",
 ];
+
+// ── Filename-trusted PDF domains ──────────────
+// (Originally introduced in PR #17. The constants were dropped during
+// the PR #18 merge resolution leaving pdfValidator.ts unable to
+// compile against main; restoring them here.)
+//
+// Curated content libraries that reliably serve real PDFs but host
+// many unrelated books too (so a search ranker mistake is plausible).
+// We trust filename match as ground truth on these and skip Mistral
+// only when urlFilenameRelevance(bookName, pdfUrl) is high enough —
+// see MISTRAL_BYPASS_FILENAME_THRESHOLD below.
+export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
+  "archive.org",
+  "bookleaks.com",
+  "book-shadow.com",
+];
+
+// Above this filename-relevance score, a FILENAME_TRUSTED domain
+// short-circuits the Mistral call. 0.5 means "≥ half of the book's
+// content words appear in the filename" — strong evidence the source
+// indexed the right title.
+export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
+  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
+);
 
 // After this many consecutive Mistral NO verdicts on the same book
 // request, stop calling Mistral for the remaining candidates and fall

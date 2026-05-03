@@ -15,7 +15,7 @@ import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMe
 import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
 import { redis } from "./redis.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS, MISTRAL_NO_STREAK_LIMIT } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt } from "./analytics.js";
+import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import type { QueueJob } from "./types.js";
 
