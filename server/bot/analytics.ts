@@ -4,6 +4,8 @@ import {
   SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
   SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS,
   SOURCE_AUTO_DISABLE_HARD_MAX_RATE,
+  SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS,
+  SOURCE_AUTO_DISABLE_TRUST_MAX_RATE,
 } from "./config.js";
 
 // ══════════════════════════════════════════════
@@ -222,13 +224,24 @@ export interface SourceStat {
   ok: number;
   fail: number;
   mistralRejected: number;
-  total: number;
+  total: number; // ok + fail (بدون mistral_rejected)
+  // إجمالي التفاعلات بما فيها مراجعات Mistral — يمثّل التكلفة الحقيقية
+  // لاستخدام المصدر (ولو Mistral رفضها فهي فشل تجربة مستخدم).
+  totalWithRejects: number;
   successRate: number;
+  // معدّل الثقة (trust): ok / (ok + fail + mistralRejected) — يعكس
+  // احتمال إيصال الكتاب الصحيح للمستخدم من هذا المصدر.
+  // إنتاج Hindawi: 13/(13+34+29) = 17% (vs successRate 27%).
+  trustRate: number;
   rate: string;
   autoDisabled: boolean;
   // Hard-fail tier: مصدر بحد أدنى محاولات صغير ونسبة نجاح صفرية تقريباً —
   // catastrophic. يحجب أسرع من الـ tier العادي.
   hardAutoDisabled: boolean;
+  // Trust tier: مصدر بيرجّع PDFs لكن Mistral بيرفضها بكثافة (أي:
+  // في search-ranker بعرف يحطّ الروابط الغلط من هذا الدومين).
+  // Hindawi: 17% trust rate → يتحجب تلقائياً بـ trust tier.
+  trustAutoDisabled: boolean;
   manuallyDisabled: boolean;
 }
 
@@ -262,21 +275,31 @@ export async function getSourceStats(): Promise<SourceStat[]> {
     const results: SourceStat[] = [];
     for (const [domain, c] of agg) {
       const total = c.ok + c.fail;
+      const totalWithRejects = c.ok + c.fail + c.mistralRejected;
       const successRate = total > 0 ? c.ok / total : 0;
+      const trustRate = totalWithRejects > 0 ? c.ok / totalWithRejects : 0;
       const autoDisabled = total >= SOURCE_AUTO_DISABLE_MIN_ATTEMPTS &&
         successRate <= SOURCE_AUTO_DISABLE_MAX_RATE;
       const hardAutoDisabled = total >= SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS &&
         successRate <= SOURCE_AUTO_DISABLE_HARD_MAX_RATE;
+      // Trust tier: لو المصدر تجاوز الحد الأدنى للمحاولات ووجد mistralRejected
+      // حقيقي (عشان ما نحجبش مصدر سليم بصفر رفض) والثقة تحت العتبة، فاحجب.
+      const trustAutoDisabled = totalWithRejects >= SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS &&
+        c.mistralRejected > 0 &&
+        trustRate <= SOURCE_AUTO_DISABLE_TRUST_MAX_RATE;
       results.push({
         domain,
         ok: c.ok,
         fail: c.fail,
         mistralRejected: c.mistralRejected,
         total,
+        totalWithRejects,
         successRate,
+        trustRate,
         rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
-        autoDisabled: autoDisabled || hardAutoDisabled,
+        autoDisabled: autoDisabled || hardAutoDisabled || trustAutoDisabled,
         hardAutoDisabled,
+        trustAutoDisabled,
         manuallyDisabled: manualOff.has(domain),
       });
     }
@@ -286,8 +309,9 @@ export async function getSourceStats(): Promise<SourceStat[]> {
       if (!agg.has(domain)) {
         results.push({
           domain, ok: 0, fail: 0, mistralRejected: 0,
-          total: 0, successRate: 0, rate: "0%",
-          autoDisabled: false, hardAutoDisabled: false,
+          total: 0, totalWithRejects: 0,
+          successRate: 0, trustRate: 0, rate: "0%",
+          autoDisabled: false, hardAutoDisabled: false, trustAutoDisabled: false,
           manuallyDisabled: true,
         });
       }
