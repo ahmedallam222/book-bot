@@ -7,6 +7,33 @@
 
 ---
 
+## [31.3.6] — 2026-05-04
+
+### 🐛 إصلاح — `^www.` regex في `engine.ts` كان يحذف حرفًا زائدًا
+
+السياق: `engine.ts` كان يستخدم `replace(/^www./, "")` (نقطة غير مهرَّبة) في موقعَين (`isPdfUrl` line 130 و `unifiedSearch` line 263) لتجريد بادئة `www.` من الـ hostname قبل المقارنة. النقطة غير المهرَّبة تطابِق أي حرف، فالـ regex كان يستهلك "www" + حرف رابع أيًا كان. على الـ hostnames الشائعة (مثل `www.example.com`) النتيجة صحيحة بالصدفة لأن الحرف الرابع نقطة فعلاً، لكن في الحالات الحدّية مثل `wwwa-foo.com` كان الـ result `-foo.com` (سلوك غير متوقَّع، يكسر مطابقة الـ trusted-domain).
+
+الإصلاح: تهريب النقطة في الموقعَين (`/^www\./, ""`) — يطابق الموقع الثالث في نفس الملف (line 72) الذي كان مهرَّبًا أصلاً.
+
+### 🛠 صيانة — `deploy.sh` يستخدم `docker compose` v2
+
+السياق: `deploy.sh` كان يستخدم `docker-compose` (v1 plugin) بينما `docs/RUNBOOK.md` و `docs/PRODUCTION.md` و `.agents/skills/testing-book-bot/SKILL.md` كلها تستخدم `docker compose` (v2 subcommand). على Docker Engine الحديث، `docker-compose` (v1) قد لا يكون مثبتًا — التشغيل كان يفشل بـ `command not found`.
+
+التحسينات:
+1. **`docker-compose` → `docker compose`** في كل الأوامر.
+2. **`set -euo pipefail`** بدل `set -e` فقط — يمنع تجاهل الأخطاء في الـ pipelines والـ unset variables.
+3. **`SUDO=…` متغير اختياري** بدل sudo ثابت — على السيرفر `ubuntu` user داخل `docker` group، فلا حاجة لـ sudo افتراضيًا.
+4. **`git pull --ff-only`** بدل `git pull` — يمنع merge commits غير متوقَّعة على main.
+5. **`up -d --build --force-recreate bot`** بدل `down` ثم `up --build` — يحافظ على شغل الـ db و redis (zero downtime على الـ stateful services). هذا يطابق نمط النشر الموثَّق في `RUNBOOK.md`.
+6. **`sleep 30`** بدل `sleep 5` — يطابق healthcheck `start_period=30s` في `docker-compose.yml`.
+7. **`docker compose logs --tail=20 bot`** بدل البحث عن container name يدويًا — أبسط وأكثر مقاومة للتغييرات في naming.
+
+### 📝 توثيق — `README.md` يستخدم `docker compose`
+
+تحديث المراجع في `README.md` لتطابق بقية الـ docs (`docker-compose up` → `docker compose up`، إلخ).
+
+---
+
 ## [31.3.5] — 2026-05-03
 
 ### 🚨 إصلاح حرج — direct-mode send كان يتخطّى pdfValidator بالكامل
