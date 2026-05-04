@@ -10,7 +10,7 @@ import {
   getSourceStats, getWeeklyStats, getFunnelStats,
   setSourceManuallyDisabled, sanitizeDomainKey,
 } from "./bot/analytics.js";
-import { getRecentTraces, getTrace } from "./bot/telemetry.js";
+import { getRecentTraces, getTrace, getLatencyHistograms } from "./bot/telemetry.js";
 import { getPdfValidationStats } from "./bot/pdfValidator.js";
 import {
   getQueueStats, getDLQJobs, clearDLQ, clearQueues,
@@ -302,6 +302,13 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     const trace = await getTrace(req.params.id);
     if (!trace) { res.status(404).json({ ok: false, error: "trace not found" }); return; }
     ok(res, trace);
+  }));
+
+  // GET /api/admin/telemetry/latency-hist
+  // يطبع histogram عينة لكل phase (count/avg/p50/p95/p99 + buckets)
+  // يُساعد في كشف الانحرافات: لو phase معيّن ارتفع p95 فجأة ده مؤشّر حقيقي
+  app.get("/api/admin/telemetry/latency-hist", auth, wrap(async (_req, res) => {
+    ok(res, await getLatencyHistograms());
   }));
 
   // ── /random genre stats (للـ dashboard) ──────────────────────
