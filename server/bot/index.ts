@@ -260,16 +260,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ── Graceful shutdown ─────────────────────────
-process.on("SIGTERM", async () => {
-  L.info("bot", "SIGTERM received — shutting down...");
-  if (_bot) await _bot.stopPolling().catch(() => {});
-  await redis.quit().catch(() => {});
-  process.exit(0);
-});
-
-process.on("SIGINT", async () => {
-  L.info("bot", "SIGINT received — shutting down...");
-  if (_bot) await _bot.stopPolling().catch(() => {});
-  await redis.quit().catch(() => {});
-  process.exit(0);
-});
+//
+// لا نسجّل process.on("SIGTERM"|"SIGINT") هنا — التعامل مع إشارات النظام
+// مسؤولية server/index.ts فقط، ويستدعي gracefulShutdown() أعلاه قبل
+// process.exit. الـ duplicate handlers السابقة كانت تستدعي process.exit(0)
+// مباشرة بدون انتظار _activeJobs، مما يكسر الـ graceful-shutdown logic
+// لأن Node.js يُشغّل جميع الـ handlers المُسجّلة بالتوازي، وأول واحد يصل
+// لـ process.exit يُنهي العملية.
