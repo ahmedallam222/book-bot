@@ -18,11 +18,22 @@ export async function isBlacklisted(url: string): Promise<boolean> {
   }
 }
 
+// Lua: INCR + EXPIRE atomically. القديم كان عمليتين منفصلتين، فلو
+// انقطع الاتصال أو crashed بين السطرين كان مفتاح الـ counter يبقى بدون
+// TTL إلى الأبد ويظل المستخدم محظوراً عبر الزمن.
+const incrWithTtlLua = `
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+  redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return count
+`;
+
 export async function recordUrlFailure(url: string): Promise<void> {
   try {
     const key   = BL_FAIL_KEY(url);
-    const count = await redis.incr(key);
-    await redis.expire(key, BL_TTL_SEC);
+    const count = await (redis as unknown as { eval: (s: string, n: number, ...a: string[]) => Promise<number> })
+      .eval(incrWithTtlLua, 1, key, String(BL_TTL_SEC));
     if (count >= BLACKLIST_THRESHOLD) {
       await redis.sadd(BL_SET_KEY, url);
       L.warn("blacklist", `URL blacklisted after ${count} failures`, { url: url.slice(0, 80) });
@@ -46,8 +57,8 @@ export async function recordUrlSuccess(url: string): Promise<void> {
     if (!inBlacklist) return; // ليس في blacklist → لا شيء إضافي
 
     const successKey   = BL_SUCCESS_KEY(url);
-    const successCount = await redis.incr(successKey);
-    await redis.expire(successKey, BL_TTL_SEC);
+    const successCount = await (redis as unknown as { eval: (s: string, n: number, ...a: string[]) => Promise<number> })
+      .eval(incrWithTtlLua, 1, successKey, String(BL_TTL_SEC));
 
     if (successCount >= BL_SUCCESS_NEEDED) {
       await redis.pipeline()

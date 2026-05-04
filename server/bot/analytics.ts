@@ -118,7 +118,7 @@ export async function getTotalStats(): Promise<Record<string, number>> {
 
 export async function getTopBooks(limit = 15, _date?: string): Promise<{ book: string; count: number }[]> {
   try {
-    const raw = await (redis as any).zrevrange("stats:top_books", 0, limit - 1, "WITHSCORES") as string[];
+    const raw = await redis.zrevrange("stats:top_books", 0, limit - 1, "WITHSCORES");
     const out: { book: string; count: number }[] = [];
     for (let i = 0; i < raw.length; i += 2) {
       out.push({ book: raw[i], count: parseInt(raw[i + 1], 10) || 0 });
