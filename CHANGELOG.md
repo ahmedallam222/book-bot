@@ -7,6 +7,28 @@
 
 ---
 
+## [31.3.7] — 2026-05-04
+
+### 🚨 إصلاح حرج — race condition بين SIGTERM handlers يُجهض graceful shutdown
+
+السياق: السيرفر كان يُسجّل `process.on("SIGTERM"|"SIGINT")` في موضعَين منفصلَين:
+1. `server/index.ts` — handler الـ graceful (يُغلق HTTP، ينتظر `_activeJobs` تنتهي حتى 30 ثانية، ثم Redis quit، ثم `process.exit(0)`).
+2. `server/bot/index.ts` — handler ثانٍ (يوقف Telegram polling، Redis quit، **ثم `process.exit(0)` فورًا**).
+
+Node.js يُشغّل **كل** الـ handlers المُسجّلة على نفس الإشارة بالتوازي، فأول واحد يصل لـ `process.exit` يُنهي العملية كلها. الـ handler في `bot/index.ts` كان أسرع بكثير (بدون انتظار workers) → كان يقتل الـ workers في وسط معالجة الـ jobs.
+
+**التأثير على Production:**
+- مستخدم في وسط تحميل كتاب (10s+ على Hindawi/foulabook) → يضرب `docker compose restart bot` → الـ job يُقتل قبل `await failJob` وقبل تحديث `Q_ACTIVE` → الـ job يُعتبر "stuck" ويُمسح في `recoverStuckJobs()` على الـ start التالي → المستخدم لا يحصل على رسالة فشل، فقط silent loss.
+- إحصاءات Telegram: رسائل "⏳جاري التحميل..." تبقى في الـ chat بدون update لأن `editMsg` ما يُنفَّذ.
+
+**الإصلاح:**
+1. **حذف `process.on("SIGTERM"|"SIGINT")` من `bot/index.ts`** — التعامل مع الإشارات يقع حصرًا على `server/index.ts`. الـ shutdown logic في `server/index.ts` تستدعي `gracefulShutdown()` من `bot/index.ts` (الـ named export)، فلا حاجة لـ duplicate registration.
+2. **إضافة safety-net force-exit لـ SIGINT** في `server/index.ts` — كان موجود لـ SIGTERM فقط (`setTimeout(() => process.exit(1), 60_000)`). الآن مغلَّف في helper `installForceExit(signal)` ومُطبَّق على الإشارتَين.
+
+النتيجة: SIGTERM/SIGINT الآن تنتظر فعليًا 30 ثانية للـ workers قبل الخروج. لو طلب التحميل قعد أكثر من ذلك، يُسجَّل warning واضح وتُسترَد الـ jobs العالقة على الـ start التالي عبر `recoverStuckJobs`.
+
+---
+
 ## [31.3.6] — 2026-05-04
 
 ### 🐛 إصلاح — `^www.` regex في `engine.ts` كان يحذف حرفًا زائدًا
