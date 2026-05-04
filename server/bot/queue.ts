@@ -25,7 +25,8 @@ export async function enqueue(
   bookName: string,
   token:    string,
   priority: "high" | "normal",
-  userName?: string | null
+  userName?: string | null,
+  userMessageId?: number
 ): Promise<EnqueueResult> {
   try {
     // فحص عدد الطلبات المعلقة لهذا المستخدم
@@ -44,6 +45,7 @@ export async function enqueue(
       priority,
       retries:   0,
       createdAt: Date.now(),
+      userMessageId,
     };
 
     const queue = priority === "high" ? Q_HIGH : Q_NORMAL;
