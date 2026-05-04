@@ -7,6 +7,25 @@
 
 ---
 
+## [31.3.8] — 2026-05-04
+
+### ⚡ أداء — in-memory TTL cache لـ `getAutoDisabledSourceDomains`
+
+السياق: بعد استبدال KEYS بـ SCAN في 31.3.7، الدالة لا تزال تنفّذ على **كل** طلب بحث (قبل cache check):
+- 1× SCAN + N×HGETALL (في `getSourceStats`)
+- 1× SCAN (في `getManualDisabledSourceDomains`)
+
+أي ~5+ round-trips على Redis لكل بحث. ولأن الـ disabled-set نادرًا ما يتغيّر (auto-disable يتراكم تدريجيًا، manual toggle يحدث من الـ admin فقط)، نتيجة الدالة قابلة للـ cache بأمان.
+
+التصميم: in-memory cache بـ TTL = 30 ثانية:
+- معظم الـ requests تقرأ الـ Set من الذاكرة مباشرة (≤1µs بدل ~5–15ms).
+- على manual toggle (`setSourceManuallyDisabled`): استدعاء `invalidateDisabledSourcesCache()` فورًا → الـ admin يرى التأثير في البحث التالي بدون انتظار 30s.
+- على auto-disable الناتج عن تراكم failures: على الأكثر بضع failed attempts إضافية في الـ 30s النافذة قبل الحجب الفعلي — مقبول.
+
+Process-local فقط (لا يعمل multi-instance) — لا مشكلة لأن الـ deploy الحالي بـ Docker Compose مع instance واحد للـ bot.
+
+---
+
 ## [31.3.7] — 2026-05-04
 
 ### ⚡ أداء — استبدال `redis.keys()` بـ `SCAN` في hot path
