@@ -1,4 +1,4 @@
-import { redis } from "./redis.js";
+import { redis, scanKeys } from "./redis.js";
 import {
   SOURCE_AUTO_DISABLE_MAX_RATE,
   SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
@@ -35,7 +35,8 @@ export async function setSourceManuallyDisabled(
 
 export async function getManualDisabledSourceDomains(): Promise<Set<string>> {
   try {
-    const keys = await redis.keys(`${MANUAL_DISABLE_KEY_PREFIX}*`);
+    // PERF: استبدال KEYS بـ SCAN — يتجنّب حجب Redis عند زيادة عدد المفاتيح.
+    const keys = await scanKeys(`${MANUAL_DISABLE_KEY_PREFIX}*`);
     return new Set(
       keys.map((k) => sanitizeDomainKey(k.slice(MANUAL_DISABLE_KEY_PREFIX.length)))
         .filter(Boolean),
@@ -247,7 +248,11 @@ export interface SourceStat {
 
 export async function getSourceStats(): Promise<SourceStat[]> {
   try {
-    const keys = await redis.keys("stats:source:*");
+    // PERF: استبدال KEYS بـ SCAN — `getSourceStats` تُستدعى من
+    // `getAutoDisabledSourceDomains` وهذي تُستدعى من `engine.searchAllSources`
+    // قبل cache check، أي على كل طلب بحث. على Redis بآلاف المفاتيح كان
+    // الـ KEYS بيضيف ~5–50ms latency لكل بحث ويمنع أوامر أخرى أثناء التنفيذ.
+    const keys = await scanKeys("stats:source:*");
     // Aggregate by sanitized domain so legacy `www.*` keys merge
     // with their canonical counterparts. Going forward all writes go
     // through `sanitizeDomainKey()`; this read-side merge cleans up
