@@ -18,6 +18,7 @@ import {
 import {
   isPremium, setPremium, listPremiumUsers, premiumCount,
   getUserDailyLimit, setUserDailyLimit, resetUserDailyLimit,
+  getPremiumAudit,
 } from "./bot/userSettings.js";
 import { bannedList, banUser, unbanUser, bannedCount } from "./bot/guards.js";
 import { blacklistStats, clearBlacklist }               from "./bot/blacklist.js";
@@ -232,11 +233,20 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     const id = requireNumericId(req, res); if (!id) return;
     // days اختياري: لو محدد ورقم موجب → اشتراك مدفوع بمدة محددة.
     // لو غير محدد أو 0 → admin manual grant بلا انتهاء.
-    const body = req.body as { enable: boolean; days?: number };
+    // reason اختياري — يُسجَّل في audit log عشان نعرف ليه الأدمن منح/سحب
+    const body = req.body as { enable: boolean; days?: number; reason?: string };
     const days = Number.isFinite(body.days) && (body.days as number) > 0 ? Math.floor(body.days as number) : 0;
-    await setPremium(id, body.enable, days);
-    L.adminAction("dashboard", `${body.enable ? "grant" : "revoke"} premium ${id}${days ? ` (${days}d)` : ""}`);
+    const reason = (body.reason ?? "").toString().slice(0, 200) || undefined;
+    await setPremium(id, body.enable, days, { by: "dashboard", source: "dashboard", reason });
+    L.adminAction("dashboard", `${body.enable ? "grant" : "revoke"} premium ${id}${days ? ` (${days}d)` : ""}${reason ? ` — ${reason}` : ""}`);
     ok(res, { done: true, enable: body.enable, days });
+  }));
+
+  // Audit log للـ premium — يطبع آخر 50 حركة (grant/revoke) لمستخدم
+  app.get("/api/admin/users/:id/premium/audit", auth, wrap(async (req, res) => {
+    const id = requireNumericId(req, res); if (!id) return;
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
+    ok(res, await getPremiumAudit(id, limit));
   }));
 
   // User limit
