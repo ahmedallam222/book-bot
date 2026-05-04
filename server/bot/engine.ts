@@ -127,7 +127,7 @@ function isPdfUrl(url: string): boolean {
     if (u.searchParams.get("type")   === "pdf")      return true;
     if (u.searchParams.get("format") === "pdf")      return true;
     if (u.searchParams.get("action") === "download") return true;
-    const hostname = u.hostname.replace(/^www./, "");
+    const hostname = u.hostname.replace(/^www\./, "");
     if (TRUSTED_PDF_DOMAINS.some((d) => hostname.includes(d))) {
       if (u.pathname.includes("download") || u.pathname.includes("dl")) return true;
     }
@@ -260,7 +260,7 @@ async function unifiedSearch(
           };
         } else {
           let realDomain = "";
-          try { realDomain = new URL(docUrl).hostname.replace(/^www./, ""); } catch {}
+          try { realDomain = new URL(docUrl).hostname.replace(/^www\./, ""); } catch {}
           srcConfig = {
             domain: realDomain || "unknown",
             name:   realDomain || "مصدر غير معروف",
