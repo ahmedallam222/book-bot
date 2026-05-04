@@ -2,6 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
 import { isAdmin, getLastBook, banUser, unbanUser } from "./guards.js";
 import { handleBookRequest } from "./bookRequest.js";
+import { react } from "./reactions.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
@@ -65,13 +66,20 @@ export function registerCommands(
     try {
       // BUG-FIX: getUserDailyLimit بتنده isPremium جواها → كان بيتعمل مرتين. دلوقتي نمرّر prem.
       const prem  = await isPremium(userId);
+      // أول ترحيب: redis flag NX — لو لسه ما اتعمل، نعرض الترحيب الموسّع
+      // EXPIRE 90 يوم: لو رجع المستخدم بعد فترة طويلة يتعامل معاه كأنه جديد تاني
+      const setRes = await redis.set(`welcomed:${userId}`, "1", "EX", 90 * 86400, "NX").catch(() => null);
+      const isFirstTime = setRes === "OK";
       const [limit, dlRaw] = await Promise.all([
         getUserDailyLimit(userId, prem),
         storage.getDailyDownloadCount(userId).catch(() => 0),
       ]);
       const remaining = Math.max(0, limit - dlRaw);
-      await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem),
+      await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem, isFirstTime),
         { parse_mode: "Markdown", reply_markup: kbMain() });
+      if (isFirstTime) {
+        react(bot, chatId, msg.message_id, "🎉").catch(() => {});
+      }
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId,
@@ -103,8 +111,10 @@ export function registerCommands(
         return;
       }
     }
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
     const parsedName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedName, token, username);
+    await handleBookRequest(bot, chatId, userId, parsedName, token, username, msg.message_id);
   });
 
   // ── /random ────────────────────────────────────
@@ -240,7 +250,9 @@ export function registerCommands(
     await bot.sendMessage(chatId,
       `🔄 *إعادة تحميل:*\n_"${escMd(lastBook.slice(0,50))}"_`,
       { parse_mode: "Markdown" }).catch(() => {});
-    await handleBookRequest(bot, chatId, userId, lastBook, token, username);
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
+    await handleBookRequest(bot, chatId, userId, lastBook, token, username, msg.message_id);
   });
 
   // ── /wishlist ──────────────────────────────────
@@ -289,10 +301,27 @@ export function registerCommands(
   bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
     await bot.sendMessage(chatId,
-      `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-      `*في المحادثة الخاصة:*\n◦ اكتب اسم أي كتاب مباشرةً\n◦ /search اسم الكتاب\n\n` +
-      `*في المجموعات — ٣ طرق:*\n◦ بوت اسم الكتاب\n◦ bot اسم الكتاب\n◦ @اسم_البوت اسم الكتاب\n\n` +
-      `*أوامر مفيدة:*\n/stats · /history · /top · /queue · /cancel · /last · /random · /weekly · /wishlist · /premium`,
+      `❓ *دليل الاستخدام*\n` +
+      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+      `📖 *البحث:*\n` +
+      `◦ اكتب اسم الكتاب مباشرةً\n` +
+      `◦ \`/search عنوان الكتاب\`\n` +
+      `◦ \`/random\` — كتاب مفاجأة\n` +
+      `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
+      `📊 *حسابك:*\n` +
+      `◦ \`/stats\` — رصيدك اليومي\n` +
+      `◦ \`/history\` — آخر بحث لك\n` +
+      `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
+      `🔖 *الإدارة:*\n` +
+      `◦ \`/wishlist عنوان\` — أضف لقائمتك\n` +
+      `◦ \`/wishlist\` — اعرض قائمتك\n` +
+      `◦ \`/queue\` — حالة طلبك في الطابور\n` +
+      `◦ \`/cancel\` — ألغِ طلبك الحالي\n\n` +
+      `🌟 *الترتيبات:*\n` +
+      `◦ \`/top\` — أكثر الكتب تحميلاً\n` +
+      `◦ \`/weekly\` — تقرير الأسبوع\n` +
+      `◦ \`/premium\` — الترقية لـ Premium\n\n` +
+      `👥 *في المجموعات:* اكتب \`بوت\` ثم اسم الكتاب`,
       { parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [
           [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
@@ -428,12 +457,20 @@ export function registerCommands(
         getPremiumExpiry(userId),
         getUserDailyLimit(userId, prem),
       ]);
-      const expiryLine = expiry
-        ? `_ينتهي في: ${expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long", year: "numeric" })}_ 📅`
-        : `_اشتراك دائم_ ♾️`;
+      let expiryLine: string;
+      if (expiry) {
+        const daysLeft = Math.max(0, Math.ceil((expiry.getTime() - Date.now()) / 86400000));
+        const dateStr  = expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long", year: "numeric" });
+        const urgency  = daysLeft <= 3 ? "🟡" : daysLeft <= 7 ? "🟠" : "🟢";
+        expiryLine = `${urgency} _ينتهي خلال *${daysLeft}* يوم_\n📅 _${dateStr}_`;
+      } else {
+        expiryLine = `♾️ _اشتراك دائم — ممنوح من الإدارة_`;
+      }
       await bot.sendMessage(chatId,
-        `⭐ *أنت مشترك في Premium!*\n\n` +
-        `📥 لديك *${limit}* تحميل يومياً\n` +
+        `⭐ *أنت مشترك في Premium!*\n` +
+        `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+        `📥 *${limit}* تحميل يومياً\n` +
+        `⚡ أولوية قصوى في الطابور\n\n` +
         expiryLine,
         { parse_mode: "Markdown", reply_markup: kbMain() }
       ).catch(() => {});
@@ -549,8 +586,14 @@ export function registerMessageHandler(
       return;
     }
 
+    // 👀 reaction فوري على رسالة المستخدم — يحس أن البوت "شاف" الطلب
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+
+    // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
+
     const parsedBookName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username);
+    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id);
   });
 }
 

@@ -18,7 +18,8 @@ import { announceMaintenanceEnd }                              from "./maintenan
 // ── Welcome message ───────────────────────────
 export function buildWelcome(
   name: string, remaining: number, limit: number,
-  sourceCount: number, isPrem: boolean
+  sourceCount: number, isPrem: boolean,
+  isFirstTime = false
 ): string {
   const premBadge = isPrem ? " ⭐" : "";
   let balanceLine: string;
@@ -31,6 +32,24 @@ export function buildWelcome(
     const emoji  = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
     balanceLine  = `${emoji} \`${bar}\` *${remaining}/${limit}* كتاب متبقٍّ`;
   }
+
+  if (isFirstTime) {
+    // ترحيب موسّع للمستخدم الجديد فقط — جولة سريعة
+    return (
+      `🎉 *أهلاً وسهلاً يا ${escMd(name)}!*\n` +
+      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
+      `_أنا بوت خلاصة الكتب — أبحث لك في أكبر المكتبات العربية_\n\n` +
+      `🚀 *كيف أستخدمك؟*\n` +
+      `◦ اكتب اسم أي كتاب مباشرةً\n` +
+      `◦ \`/random\` لكتاب مفاجأة\n` +
+      `◦ \`/wishlist عنوان\` لحفظ كتاب لاحقاً\n` +
+      `◦ \`/help\` للقائمة الكاملة\n\n` +
+      `${balanceLine}\n` +
+      `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
+      `_اكتب اسم كتابك الأول وانطلق_ 📖✨`
+    );
+  }
+
   return (
     `📚 *أهلاً ${escMd(name)}${premBadge}*\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
