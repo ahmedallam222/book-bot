@@ -37,6 +37,27 @@ export function normalizeForCache(text: string): string {
 }
 
 /**
+ * Canonical key for cache lookup/insert.
+ *
+ * FIX-WRONG-FILE (BUG-2/6/7/8): دمج 3 خطوات:
+ *   1. cleanSearchQuery — يُزيل كلمات الحشو ("تحميل"، "كتاب"، "pdf"، إلخ)
+ *      → "تحميل كتاب أرض زيكولا pdf" و "أرض زيكولا" يلتقيان على نفس المفتاح
+ *   2. normalizeArabic — يوحّد أ/إ/آ → ا، ة → ه، ى → ي، يحذف التشكيل
+ *      → "أرض زيكولا" و "ارض زيكولا" يلتقيان على نفس المفتاح
+ *   3. space normalization — يوحّد المسافات
+ *
+ * هذا يحلّ:
+ *   - تخزين مكرّر لنفس الكتاب تحت أشكال مختلفة
+ *   - حرمان مستخدم B من الاستفادة من كاش مستخدم A عند اختلاف الصياغة
+ *
+ * استخدم هذه الدالة (لا normalizeForCache مباشرةً) لكل من
+ * `getCachedBook` و `cacheBook` للحفاظ على تطابق المفتاح بين القراءة والكتابة.
+ */
+export function canonicalizeForCache(text: string): string {
+  return normalizeForCache(cleanSearchQuery(text));
+}
+
+/**
  * تنظيف استعلام البحث — يُزيل كلمات الحشو الشائعة
  * مثال: "تحميل رواية اسمها أرض زيكولا pdf مجانا" → "أرض زيكولا"
  */

@@ -78,15 +78,28 @@ function shouldSkipDirect(url: string): boolean {
 // Returns true when direct mode is unsafe and the caller must fall
 // through to local-download + full pdfValidator + Mistral.
 //
-// Heuristic: if the URL filename has zero/near-zero token overlap with
+// Heuristic: if the URL filename has insufficient token overlap with
 // the requested book name, we have no signal that the URL is the right
-// book. The 0.15 threshold matches the existing
-// `bestFilenameScore < 0.15` warning in bookRequest.ts; digit-only
-// neutral filenames (score 0.3) still pass — they're handled by the
-// trusted-domain branch in pdfValidator after local download.
+// book.
+//
+// FIX-WRONG-FILE (BUG-5): the original threshold (0.15) left a
+// "validation dead zone" between 0.15 and PDF_VALIDATE_ACCEPT_THRESHOLD
+// (0.40). URLs scoring inside that band were direct-sent to Telegram
+// without ever entering pdfValidator → no metadata check, no Mistral
+// → wrong-but-similar books (e.g. "العقيدة الواسطية" vs
+// "العقيدة السفارينية" — only "العقيدة" overlaps, score ~0.30) leaked
+// through. Raising to 0.40 closes the dead zone: only confidently
+// matching filenames stay in direct mode; everything else falls
+// through to local-download + full validation.
+//
+// Digit-only/neutral filenames (urlFilenameRelevance returns 0.3) are
+// now flagged unsafe — but those domains are typically already in
+// SKIP_DIRECT_DOMAINS (Hindawi/foulabook/archive.org-style), and the
+// trusted-domain branch in pdfValidator handles them after local
+// download with proper title verification.
 function directSendUnsafe(bookName: string, pdfUrl: string): boolean {
   const score = urlFilenameRelevance(bookName, pdfUrl);
-  return score < 0.15;
+  return score < 0.40;
 }
 
 // ══════════════════════════════════════════════

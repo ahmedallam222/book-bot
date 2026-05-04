@@ -375,6 +375,31 @@ export function registerCommands(
     await bot.sendMessage(chatId, `✅ تم إعادة الحد الافتراضي لـ \`${targetId}\``, { parse_mode: "Markdown" }).catch(() => {});
   });
 
+  // FIX-WRONG-FILE (BUG-9): admin tool to remove a poisoned cache entry.
+  // Usage: /purge_cache <book query>
+  // The query is canonicalized the same way the cache write did, so any
+  // wording variant the user reported as wrong will match the stored row.
+  bot.onText(/^\/purge_cache\s+(.+)$/i, async (msg, match) => {
+    const chatId = msg.chat.id; const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) return;
+    const query = (match?.[1] || "").trim();
+    if (!query) {
+      await bot.sendMessage(chatId, `❌ مثال: \`/purge_cache أرض زيكولا\``, { parse_mode: "Markdown" }).catch(() => {});
+      return;
+    }
+    try {
+      const removed = await storage.purgeCachedBookByQuery(query);
+      L.adminAction(userId, `purge_cache "${query.slice(0, 50)}" → ${removed} row(s)`);
+      const reply = removed > 0
+        ? `🧹 تم حذف *${removed}* إدخال من الكاش لاستعلام:\n_${escMd(query)}_`
+        : `ℹ️ لا توجد إدخالات في الكاش لاستعلام:\n_${escMd(query)}_`;
+      await bot.sendMessage(chatId, reply, { parse_mode: "Markdown" }).catch(() => {});
+    } catch (e) {
+      L.error("cmd", "/purge_cache failed", { err: String(e).slice(0, 120) });
+      await bot.sendMessage(chatId, `❌ فشل: \`${escMd(String(e).slice(0, 60))}\``, { parse_mode: "Markdown" }).catch(() => {});
+    }
+  });
+
   bot.onText(/^\/note\s+(\S+)\s+(.+)$/, async (msg, match) => {
     const chatId = msg.chat.id; const userId = String(msg.from?.id || "");
     if (!isAdmin(userId)) return;
