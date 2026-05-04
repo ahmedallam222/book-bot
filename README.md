@@ -227,8 +227,8 @@ cd kholasa-books-bot
 cp .env.example .env
 nano .env   # BOT_TOKEN + FIRECRAWL_API_KEY على الأقل
 
-docker-compose up -d --build
-docker logs book-bot-bot-1 -f
+docker compose up -d --build
+docker compose logs -f bot
 ```
 
 **اللوج المتوقع:**
@@ -461,10 +461,10 @@ kholasa-books-bot/
 
 ```bash
 # مراقبة
-docker logs book-bot-bot-1 -f
+docker compose logs -f bot
 
 # إعادة تشغيل بدون rebuild
-docker-compose restart bot
+docker compose restart bot
 
 # تحديث كامل
 bash deploy.sh
