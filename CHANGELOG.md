@@ -7,6 +7,24 @@
 
 ---
 
+## [31.3.9] — 2026-05-04
+
+### 🐛 إصلاح UX — toast notifications لـ `premium_buy` و `fp:` ما كانتش بتظهر
+
+السياق: في `callbacks.ts` كان فيه general `bot.answerCallbackQuery(query.id)` صامت بيتنفّذ على كل الـ callbacks اللي ما اتعملش لها handle مبكّر (line 215 سابقاً). بعد كده كان فيه handlers بتحاول ترد بـ toast نصّي، وأي محاولة ثانية لـ `answerCallbackQuery` على نفس الـ query ترفضها Telegram → الكود مغلَّف بـ `.catch(() => {})` فالخطأ كان بيتبلع بصمت والمستخدم ما يشوفش الرسالة.
+
+التأثير الفعلي على المستخدمين:
+1. **`premium_buy` لمستخدم Premium بالفعل**: يضغط "⭐ ترقية" → الـ general silent answer يفوز → الـ toast `"⭐ أنت بالفعل مشترك في Premium!"` بيفشل بصمت → المستخدم يشوف لودر يختفي وما يحصلش رد. تكرار الضغط ممكن يأكل dedup quota.
+2. **`fp:` على رسالة فشل قديمة بـ session منتهية**: يضغط زر التنقل → الـ general answer يفوز → الـ toast `"⏰ انتهت الجلسة."` بيفشل بصمت → نقرة بدون رد.
+
+الإصلاح: نقل `premium_buy` و `fp:` handlers قبل الـ general silent answer (نفس الـ pattern اللي اتطبق على wishlist callbacks سابقاً، مع تعليق صريح في الكود يشرح اللي حصل). الـ premium_buy "already subscribed" toast كمان أصبح `show_alert: true` عشان يظهر بشكل واضح كـ popup بدل toast سريع. الـ general answer بقى أسفل الـ explicit handlers، فيتنفّذ فقط للـ callbacks اللي مش محتاجة toast نصي خاص.
+
+### 📝 ملاحظة على CHANGELOG history
+
+PRs #58 و #59 (Redis SCAN في hot path، in-memory cache لـ disabled-source set) اتدمجوا في main وكودهم موجود في `analytics.ts` و `redis.ts`، لكن إدخالاتهم في CHANGELOG اتمسحت أثناء حل تعارضات `merge main → PR #56`. الإدخالات دي ممكن نرجّعها في CHANGELOG لاحقاً لو حضرتك قررت ذلك — مفيش effect على السلوك الفعلي للبوت.
+
+---
+
 ## [31.3.8] — 2026-05-04
 
 ### 🛠 صيانة — graceful shutdown يُغلق noor-book Playwright browser
