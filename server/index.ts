@@ -96,16 +96,23 @@ async function shutdown(signal: string): Promise<void> {
   process.exit(0);
 }
 
+// shutdown signals — كلاهما يستدعي نفس shutdown() الذي يدير الـ graceful
+// shutdown (يقفل HTTP، ينتظر workers ينتهوا، يُغلق Redis).
 process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
 process.on("SIGINT",  () => { void shutdown("SIGINT");  });
 
-// safety net — if shutdown takes longer than 60s, force-exit
-process.on("SIGTERM", () => {
-  setTimeout(() => {
-    L.error("server", "Forced exit after timeout");
-    process.exit(1);
-  }, 60_000).unref();
-});
+// safety net — لو shutdown قعد أكتر من 60 ثانية، اخرج بالقوة. ينطبق
+// على أي إشارة إنهاء (مش SIGTERM فقط — SIGINT/SIGUSR2 من nodemon أيضاً).
+const installForceExit = (signal: string) => {
+  process.on(signal, () => {
+    setTimeout(() => {
+      L.error("server", `Forced exit after timeout (${signal})`);
+      process.exit(1);
+    }, 60_000).unref();
+  });
+};
+installForceExit("SIGTERM");
+installForceExit("SIGINT");
 
 process.on("uncaughtException", (err) => {
   L.error("server", "uncaughtException", { err: String(err).slice(0, 200) });
