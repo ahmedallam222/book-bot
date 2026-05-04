@@ -47,15 +47,19 @@ export const BLACKLIST_THRESHOLD      = 3;
 export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 // ── Admin IDs ─────────────────────────────────
+// SECURITY: تُقرأ فقط من env. تم حذف الـ ID المثبت في المصدر — كان مكشوفاً
+// لأي شخص يقرأ الـ repo (والـ repo public). انظر deployment notes في الـ PR.
 const _envAdminIds = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter((s) => /^\d{5,15}$/.test(s));
 
-export const ADMIN_IDS = new Set<string>([
-  "5469997406",
-  ..._envAdminIds.filter((id) => id !== "5469997406"),
-]);
+export const ADMIN_IDS = new Set<string>(_envAdminIds);
+
+if (ADMIN_IDS.size === 0) {
+  // log فقط — لا نوقف التشغيل لأن النشر قد يكون قبل ضبط الـ env بدقيقة
+  console.warn("[config] ADMIN_IDS is empty — /admin and admin alerts will be disabled until set");
+}
 
 // ── Banned users (env, fast-path) ────────────
 export const BANNED_USERS = new Set<string>(
