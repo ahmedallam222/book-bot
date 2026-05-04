@@ -15,7 +15,29 @@ const PORT = parseInt(process.env.PORT || "5000", 10);
 let _httpServer: Server | null = null;
 let _shuttingDown = false;
 
+// ── ENV validation عند الإقلاع ────────────────
+// نفشل بسرعة بدل ما نكتشف لاحقاً أن متغير حرج مفقود (e.g. لما الأول
+// مستخدم يبعث رسالة فيظهر error غامض). الـ envs التالية لا غنى عنها:
+function validateEnv(): void {
+  const required = ["BOT_TOKEN", "DATABASE_URL", "REDIS_URL"] as const;
+  const missing: string[] = [];
+  for (const k of required) {
+    const v = (process.env[k] || "").trim();
+    if (!v) missing.push(k);
+  }
+  if (missing.length > 0) {
+    console.error(`[FATAL] Missing required env vars: ${missing.join(", ")}`);
+    process.exit(1);
+  }
+  if (!process.env.DASHBOARD_SECRET?.trim()) {
+    // لا نوقف التشغيل — auth.ts بيرفض الطلبات بـ 503 لو فاضي.
+    // لكن نحذّر بوضوح وقت الإقلاع.
+    console.warn("[startup] DASHBOARD_SECRET is not set — /api/admin/* will return 503 until configured");
+  }
+}
+
 async function main(): Promise<void> {
+  validateEnv();
   const app = express();
   // body limit واضح بدل الافتراضي 100KB — يمنع large payloads على الـ admin endpoints
   app.use(express.json({ limit: "200kb" }));
