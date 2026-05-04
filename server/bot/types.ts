@@ -47,6 +47,8 @@ export interface QueueJob {
   retries:    number;
   createdAt:  number;
   startedAt?: number;
+  /** message_id لرسالة المستخدم — يُستخدم لإضافة reactions (✅/😢) عند الانتهاء */
+  userMessageId?: number;
 }
 
 export interface EnqueueResult {
