@@ -1,5 +1,45 @@
 import { redis } from "./redis.js";
-import { SOURCE_AUTO_DISABLE_MAX_RATE, SOURCE_AUTO_DISABLE_MIN_ATTEMPTS } from "./config.js";
+import {
+  SOURCE_AUTO_DISABLE_MAX_RATE,
+  SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
+  SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS,
+  SOURCE_AUTO_DISABLE_HARD_MAX_RATE,
+} from "./config.js";
+
+// ══════════════════════════════════════════════
+// SOURCE manual-disable (admin override)
+//
+// `src:off:{domain}` يكتبه الـ dashboard / Telegram لإيقاف مصدر يدوياً.
+// كان يُكتب بدون قارئ — إصلاحه هنا (engine يقرأ getManualDisabledSourceDomains).
+// ══════════════════════════════════════════════
+const MANUAL_DISABLE_KEY_PREFIX = "src:off:";
+const manualDisableKey = (domain: string) =>
+  `${MANUAL_DISABLE_KEY_PREFIX}${sanitizeDomainKey(domain)}`;
+
+export async function isSourceManuallyDisabled(domain: string): Promise<boolean> {
+  try { return (await redis.exists(manualDisableKey(domain))) === 1; }
+  catch { return false; }
+}
+
+export async function setSourceManuallyDisabled(
+  domain: string, off: boolean,
+): Promise<void> {
+  const key = manualDisableKey(domain);
+  try {
+    if (off) await redis.set(key, "1");
+    else     await redis.del(key);
+  } catch {}
+}
+
+export async function getManualDisabledSourceDomains(): Promise<Set<string>> {
+  try {
+    const keys = await redis.keys(`${MANUAL_DISABLE_KEY_PREFIX}*`);
+    return new Set(
+      keys.map((k) => sanitizeDomainKey(k.slice(MANUAL_DISABLE_KEY_PREFIX.length)))
+        .filter(Boolean),
+    );
+  } catch { return new Set(); }
+}
 
 // ══════════════════════════════════════════════
 // ANALYTICS — إحصاءات وتتبع
@@ -177,7 +217,7 @@ export async function getWeeklyStats(): Promise<Record<string, Record<string, nu
   return days;
 }
 
-export async function getSourceStats(): Promise<{
+export interface SourceStat {
   domain: string;
   ok: number;
   fail: number;
@@ -186,7 +226,13 @@ export async function getSourceStats(): Promise<{
   successRate: number;
   rate: string;
   autoDisabled: boolean;
-}[]> {
+  // Hard-fail tier: مصدر بحد أدنى محاولات صغير ونسبة نجاح صفرية تقريباً —
+  // catastrophic. يحجب أسرع من الـ tier العادي.
+  hardAutoDisabled: boolean;
+  manuallyDisabled: boolean;
+}
+
+export async function getSourceStats(): Promise<SourceStat[]> {
   try {
     const keys = await redis.keys("stats:source:*");
     // Aggregate by sanitized domain so legacy `www.*` keys merge
@@ -194,32 +240,33 @@ export async function getSourceStats(): Promise<{
     // through `sanitizeDomainKey()`; this read-side merge cleans up
     // historical splits without requiring a migration.
     const agg = new Map<string, { ok: number; fail: number; mistralRejected: number }>();
-    for (const key of keys) {
-      const rawDomain = key.replace("stats:source:", "");
-      const domain = sanitizeDomainKey(rawDomain) || rawDomain;
-      const raw = await redis.hgetall(key);
-      const ok = parseInt(raw?.ok || "0", 10);
-      const fail = parseInt(raw?.fail || "0", 10);
-      const mistralRejected = parseInt(raw?.mistral_rejected || "0", 10);
-      const cur = agg.get(domain) ?? { ok: 0, fail: 0, mistralRejected: 0 };
-      cur.ok += ok;
-      cur.fail += fail;
-      cur.mistralRejected += mistralRejected;
-      agg.set(domain, cur);
+    if (keys.length > 0) {
+      const pipe = redis.pipeline();
+      for (const key of keys) pipe.hgetall(key);
+      const res = await pipe.exec();
+      for (let i = 0; i < keys.length; i++) {
+        const rawDomain = keys[i].replace("stats:source:", "");
+        const domain = sanitizeDomainKey(rawDomain) || rawDomain;
+        const raw = (res?.[i]?.[1] as Record<string, string> | null) || {};
+        const ok = parseInt(raw.ok || "0", 10);
+        const fail = parseInt(raw.fail || "0", 10);
+        const mistralRejected = parseInt(raw.mistral_rejected || "0", 10);
+        const cur = agg.get(domain) ?? { ok: 0, fail: 0, mistralRejected: 0 };
+        cur.ok += ok;
+        cur.fail += fail;
+        cur.mistralRejected += mistralRejected;
+        agg.set(domain, cur);
+      }
     }
-    const results: {
-      domain: string;
-      ok: number;
-      fail: number;
-      mistralRejected: number;
-      total: number;
-      successRate: number;
-      rate: string;
-      autoDisabled: boolean;
-    }[] = [];
+    const manualOff = await getManualDisabledSourceDomains();
+    const results: SourceStat[] = [];
     for (const [domain, c] of agg) {
       const total = c.ok + c.fail;
       const successRate = total > 0 ? c.ok / total : 0;
+      const autoDisabled = total >= SOURCE_AUTO_DISABLE_MIN_ATTEMPTS &&
+        successRate <= SOURCE_AUTO_DISABLE_MAX_RATE;
+      const hardAutoDisabled = total >= SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS &&
+        successRate <= SOURCE_AUTO_DISABLE_HARD_MAX_RATE;
       results.push({
         domain,
         ok: c.ok,
@@ -228,17 +275,37 @@ export async function getSourceStats(): Promise<{
         total,
         successRate,
         rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
-        autoDisabled: total >= SOURCE_AUTO_DISABLE_MIN_ATTEMPTS &&
-          successRate <= SOURCE_AUTO_DISABLE_MAX_RATE,
+        autoDisabled: autoDisabled || hardAutoDisabled,
+        hardAutoDisabled,
+        manuallyDisabled: manualOff.has(domain),
       });
+    }
+    // Include manually-disabled domains that have no stats yet (admin
+    // pre-emptively disabled them) — so they remain visible/togglable.
+    for (const domain of manualOff) {
+      if (!agg.has(domain)) {
+        results.push({
+          domain, ok: 0, fail: 0, mistralRejected: 0,
+          total: 0, successRate: 0, rate: "0%",
+          autoDisabled: false, hardAutoDisabled: false,
+          manuallyDisabled: true,
+        });
+      }
     }
     return results.sort((a, b) => (b.ok + b.fail) - (a.ok + a.fail));
   } catch { return []; }
 }
 
+// Combines auto-disable (both tiers) + manual override. This is the
+// single source of truth for `searchAllSources` filtering.
 export async function getAutoDisabledSourceDomains(): Promise<Set<string>> {
-  const stats = await getSourceStats();
-  return new Set(stats.filter((s) => s.autoDisabled).map((s) => s.domain));
+  const [stats, manualOff] = await Promise.all([
+    getSourceStats(),
+    getManualDisabledSourceDomains(),
+  ]);
+  const out = new Set<string>(manualOff);
+  for (const s of stats) if (s.autoDisabled) out.add(s.domain);
+  return out;
 }
 
 export async function getFunnelStats(date?: string): Promise<Record<string, number>> {

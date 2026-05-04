@@ -6,7 +6,10 @@ import { escMd }         from "./text.js";
 import { getQueueStats, clearDLQ, getDLQJobs } from "./queue.js";
 import { blacklistStats, clearBlacklist }        from "./blacklist.js";
 import { getPdfValidationStats }                 from "./pdfValidator.js";
-import { getDailyStats, getTotalStats, getTopBooks, getSourceStats, getFunnelStats, getWeeklyStats } from "./analytics.js";
+import {
+  getDailyStats, getTotalStats, getTopBooks, getSourceStats, getFunnelStats, getWeeklyStats,
+  setSourceManuallyDisabled, isSourceManuallyDisabled, sanitizeDomainKey,
+} from "./analytics.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
@@ -312,6 +315,33 @@ export async function handleAdminCallback(
       return;
     }
 
+    // ── Toggle مصدر يدوياً (تفعيل/تعطيل) ──────────────
+    // FIX-MANUAL-DISABLE: الـ callback dispatcher في callbacks.ts كان
+    // يحوِّل `admin_src_toggle:{domain}` لـ handleAdminCallback بدون أي
+    // handler فعلي → الزر مكنش بيعمل حاجة. الآن: يقلب src:off:{domain}
+    // ويعيد رسم لوحة المصادر.
+    if (data.startsWith("admin_src_toggle:")) {
+      const rawDomain = data.slice("admin_src_toggle:".length);
+      const domain    = sanitizeDomainKey(rawDomain);
+      if (!domain) {
+        if (queryId) await bot.answerCallbackQuery(queryId, { text: "❌ مصدر غير صالح" }).catch(() => {});
+        return;
+      }
+      const wasOff = await isSourceManuallyDisabled(domain);
+      await setSourceManuallyDisabled(domain, !wasOff);
+      L.adminAction(userId, `source ${wasOff ? "enabled" : "disabled"}: ${domain}`);
+      if (queryId) {
+        await bot.answerCallbackQuery(queryId, {
+          text: wasOff ? `✅ ${domain} تم تفعيله` : `🚫 ${domain} تم تعطيله`,
+        }).catch(() => {});
+      }
+      if (msgId) {
+        try { await bot.deleteMessage(chatId, msgId); } catch {}
+      }
+      await sendSourcesPanel(bot, chatId);
+      return;
+    }
+
     switch (data) {
 
       // ── إحصاءات تفصيلية ─────────────────────────────
@@ -448,24 +478,7 @@ export async function handleAdminCallback(
 
       // ── المصادر ──────────────────────────────────────
       case "admin_sources": {
-        const srcStats = await getSourceStats();
-        const lines = srcStats.slice(0, 13).map((s) => {
-          const tot    = s.ok + s.fail;
-          const rate   = tot > 0 ? Math.round((s.ok / tot) * 100) : 0;
-          const emoji  = rate >= 70 ? "🟢" : rate >= 40 ? "🟡" : "🔴";
-          const domain = s.domain.replace("www.", "").slice(0, 20);
-          return `${emoji} _${escMd(domain)}_ — ${rate}% (${s.ok}✅ ${s.fail}❌)`;
-        }).join("\n");
-        await bot.sendMessage(chatId,
-          `📡 *أداء المصادر*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `${lines || "_لا بيانات بعد_"}`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[
-              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
-            ]]},
-          }
-        ).catch(() => {});
+        await sendSourcesPanel(bot, chatId);
         break;
       }
 
@@ -571,6 +584,48 @@ export async function handleAdminCallback(
     L.error("admin", `handleAdminCallback error`, { data, err: String(e).slice(0, 100) });
     await bot.sendMessage(chatId, `⚠️ خطأ مؤقت: ${String(e).slice(0, 60)}`).catch(() => {});
   }
+}
+
+// ── helper: لوحة المصادر مع أزرار toggle ─────
+async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void> {
+  const srcStats = await getSourceStats();
+  // أعلى 13 (مرتبة بالـ total تنازلياً) + أيّ مصدر معطَّل يدوياً يظهر تلقائياً
+  // (حتى لو total = 0 لأنه أُضيف حديثاً للـ off list — getSourceStats يضمّه).
+  const top = srcStats.slice(0, 13);
+  const lines: string[] = [];
+  const buttons: TelegramBot.InlineKeyboardButton[][] = [];
+  for (const s of top) {
+    const rate = s.total > 0 ? Math.round(s.successRate * 100) : 0;
+    let badge: string;
+    if (s.manuallyDisabled)        badge = "🚫"; // معطّل يدوياً
+    else if (s.hardAutoDisabled)   badge = "⛔"; // معطّل تلقائياً (catastrophic)
+    else if (s.autoDisabled)       badge = "🟠"; // معطّل تلقائياً (low rate)
+    else if (rate >= 70)           badge = "🟢";
+    else if (rate >= 40)           badge = "🟡";
+    else                           badge = "🔴";
+    const domain = s.domain.replace(/^www\./, "").slice(0, 22);
+    const mistralPart = s.mistralRejected > 0 ? ` (m:${s.mistralRejected})` : "";
+    lines.push(`${badge} _${escMd(domain)}_ — ${rate}% (${s.ok}✅ ${s.fail}❌${mistralPart})`);
+    const btnText = s.manuallyDisabled
+      ? `✅ تفعيل ${domain.slice(0, 16)}`
+      : `🚫 تعطيل ${domain.slice(0, 16)}`;
+    buttons.push([{ text: btnText, callback_data: `admin_src_toggle:${s.domain}` }]);
+  }
+  buttons.push([{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }]);
+
+  const legend =
+    "\n\n_شرح:_ 🟢 جيد · 🟡 متوسط · 🔴 ضعيف · 🟠 معطّل تلقائياً · ⛔ catastrophic · 🚫 معطّل يدوياً" +
+    "\n_m: عدد رفض Mistral \\(لا يحتسب فشل مصدر\\)_";
+
+  await bot.sendMessage(chatId,
+    `📡 *أداء المصادر*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+    `${lines.length ? lines.join("\n") : "_لا بيانات بعد_"}` +
+    legend,
+    {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: buttons },
+    }
+  ).catch(() => {});
 }
 
 // ── buildHistoryMessage ───────────────────────
