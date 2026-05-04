@@ -29,20 +29,18 @@ import { normalizeArabic }                               from "./bot/text.js";
 import { GENRE_MAP, SUGGESTIONS }                        from "./bot/suggestions.js";
 
 // ── Config ────────────────────────────────────────────────────
-// ADMIN_IDS للـ dashboard auth fallback — يجب أن تطابق سلوك bot/config.ts تماماً:
-// الأدمن الرئيسي "5469997406" مُضمَّن دائماً + أي IDs من الـ env
-// لو استخدمنا (env || default) → عند ضبط env يُستبعد الأدمن الرئيسي
-// BUG-3 FIX: كان {5,12} → لا يدعم معرّفات Telegram الجديدة (13-15 رقم)
-// يجب أن يتطابق مع config.ts الذي يستخدم {5,15}
-const _envAdminIds = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim()).filter(s => /^\d{5,15}$/.test(s));
-const ADMIN_IDS = ["5469997406", ..._envAdminIds.filter(id => id !== "5469997406")];
 const MAINTENANCE_KEY = "flag:maintenance";   // ← matches bot/config.ts
 
 // ── Auth ──────────────────────────────────────────────────────
-// SECURITY: نستخدم DASHBOARD_SECRET منفصل عن Admin Telegram IDs
-// Telegram IDs رقمية وقابلة للتخمين — Dashboard secret مستقل وأكثر أماناً
-// لو لم يُضبط DASHBOARD_SECRET، نرجع للـ ADMIN_IDS كـ fallback (backward compat)
+// SECURITY: الـ dashboard auth يعتمد على DASHBOARD_SECRET فقط — لا fallback
+// إلى Telegram numeric IDs. الـ IDs مكشوفة في الكود/اللوجز/الجروبات
+// وقابلة للتخمين — استخدامها كـ secret كان ثغرة كبيرة.
 const DASHBOARD_SECRET = process.env.DASHBOARD_SECRET?.trim();
+
+if (!DASHBOARD_SECRET) {
+  // fail-closed: نُسجِّل تحذيراً صريحاً عند الإقلاع بدل قبول auth غير آمن
+  L.warn("routes", "DASHBOARD_SECRET is not set — admin dashboard API will reject all requests until configured");
+}
 
 /** مقارنة بوقت ثابت (constant-time) — تمنع timing attacks على الـ secret */
 function safeEqual(a: string, b: string): boolean {
@@ -55,11 +53,15 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 function auth(req: Request, res: Response, next: NextFunction): void {
+  if (!DASHBOARD_SECRET) {
+    res.status(503).json({ ok: false, error: "Dashboard auth not configured (set DASHBOARD_SECRET)" });
+    return;
+  }
   const token = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
-  const valid = DASHBOARD_SECRET
-    ? safeEqual(token, DASHBOARD_SECRET)
-    : ADMIN_IDS.includes(token);
-  if (!valid) { res.status(401).json({ ok: false, error: "Unauthorized" }); return; }
+  if (!token || !safeEqual(token, DASHBOARD_SECRET)) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return;
+  }
   next();
 }
 
