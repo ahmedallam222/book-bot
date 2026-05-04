@@ -7,6 +7,22 @@
 
 ---
 
+## [31.3.7] — 2026-05-04
+
+### ⚡ أداء — استبدال `redis.keys()` بـ `SCAN` في hot path
+
+السياق: `engine.searchAllSources()` يستدعي `getAutoDisabledSourceDomains()` على كل طلب بحث (قبل cache check)، والأخيرة كانت تستدعي:
+1. `getSourceStats()` → `redis.keys("stats:source:*")`
+2. `getManualDisabledSourceDomains()` → `redis.keys("src:off:*")`
+
+الـ `KEYS` في Redis **يحجب السيرفر بالكامل** أثناء التنفيذ (O(n) على كل المفاتيح بغض النظر عن الـ pattern). على Redis بآلاف المفاتيح (cache entries، daily limits، sessions، premium TTLs) كان كل بحث يضيف 5–50ms latency ويمنع أوامر متزامنة من المعالجة.
+
+الإصلاح: helper `scanKeys()` جديد في `redis.ts` يستخدم `SCAN ... MATCH ... COUNT 200`. الـ SCAN يكرّر بالـ cursor ويرجع batches صغيرة بدون lock — round-trips أكثر لكن لا تؤثر على باقي الأوامر. على المفاتيح الحالية للبوت (~عشرات إلى مئات) الفرق في الـ throughput محسوس فورًا، وعلى مدى زمني أطول يمنع تدهور Redis كلما زاد حجم الـ cache.
+
+أُحلّت `redis.keys()` في موضعَين فقط (analytics) — لا callers أخرى.
+
+---
+
 ## [31.3.6] — 2026-05-04
 
 ### 🐛 إصلاح — `^www.` regex في `engine.ts` كان يحذف حرفًا زائدًا
