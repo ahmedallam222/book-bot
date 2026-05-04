@@ -8,6 +8,7 @@ import { redis } from "./bot/redis.js";
 import {
   getDailyStats, getTotalStats, getTopBooks,
   getSourceStats, getWeeklyStats, getFunnelStats,
+  setSourceManuallyDisabled, sanitizeDomainKey,
 } from "./bot/analytics.js";
 import { getRecentTraces, getTrace } from "./bot/telemetry.js";
 import { getPdfValidationStats } from "./bot/pdfValidator.js";
@@ -474,18 +475,19 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   }));
 
   // ── source toggle (تفعيل/إيقاف مصدر من الـ dashboard) ────────
+  // BUG FIX: كان يكتب `src:off:{domain}` بـ raw param بدون normalization،
+  // بينما analytics.ts يكتب stats الـ source بـ sanitizeDomainKey (lowercase،
+  // strip `www.`، strip non-alnum). نتيجة: الـ engine ما كانش يلاقي الـ key
+  // لما يقرأ الـ disabled set عشان مفتاح الكتابة != مفتاح القراءة.
+  // الآن: setSourceManuallyDisabled تسلسل واحد ومتسق مع باقي الـ analytics.
   app.post("/api/admin/sources/:domain/toggle", auth, wrap(async (req, res) => {
-    const { domain } = req.params;
+    const domain = sanitizeDomainKey(req.params.domain);
+    if (!domain) { res.status(400).json({ ok: false, error: "invalid domain" }); return; }
     const { action }  = req.body as { action: "enable" | "disable" };
-    const key = `src:off:${domain}`;
-    if (action === "disable") {
-      await redis.set(key, "1");
-      L.adminAction("dashboard", `source disabled: ${domain}`);
-    } else {
-      await redis.del(key);
-      L.adminAction("dashboard", `source enabled: ${domain}`);
-    }
-    ok(res, { domain, enabled: action === "enable" });
+    const off = action === "disable";
+    await setSourceManuallyDisabled(domain, off);
+    L.adminAction("dashboard", `source ${off ? "disabled" : "enabled"}: ${domain}`);
+    ok(res, { domain, enabled: !off });
   }));
 
   // ── broadcast (بث جماعي من الـ dashboard) ────────────────────
