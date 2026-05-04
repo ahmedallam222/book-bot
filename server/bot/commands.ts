@@ -227,7 +227,7 @@ export function registerCommands(
     const userId   = String(msg.from?.id || "");
     const username = msg.from?.username;
     if (!userId) return;
-    const lastBook = getLastBook(userId);
+    const lastBook = await getLastBook(userId);
     if (!lastBook) {
       await bot.sendMessage(chatId,
         `ℹ️ *لم تطلب أي كتاب بعد*\n\n_ابحث عن كتاب أولاً ثم استخدم /last لإعادة تحميله_ 📚`,
