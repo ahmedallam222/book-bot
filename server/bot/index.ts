@@ -9,6 +9,7 @@ import { cleanOldTempFiles }          from "./tempFiles.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
 import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
+import { listPremiumUsers }           from "./userSettings.js";
 import type { QueueJob }              from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -97,9 +98,9 @@ export async function startBot(): Promise<void> {
 
   // استماع لأحداث البث من الـ dashboard
   (process as NodeJS.EventEmitter).on("dashboard:broadcast", async (payload: {
-    message: string; parse_mode?: string
+    message: string; parse_mode?: string; target?: string
   }) => {
-    await broadcastToAll(payload.message, payload.parse_mode || "Markdown");
+    await broadcastToAll(payload.message, payload.parse_mode || "Markdown", payload.target || "all");
   });
 
   // استماع لإنهاء الصيانة من الـ dashboard — يبعث إعلان للجروبات
@@ -195,17 +196,35 @@ async function processJobSafe(job: QueueJob): Promise<boolean> {
 
 // ── Broadcast ─────────────────────────────────
 
-async function broadcastToAll(message: string, parseMode = "Markdown"): Promise<void> {
+async function resolveBroadcastTargets(target: string): Promise<string[]> {
+  if (target === "premium") {
+    return await listPremiumUsers();
+  }
+  if (target === "active7") {
+    // المستخدمون الذين أرسلوا بحثاً خلال آخر 7 أيام
+    const since = Date.now() - 7 * 24 * 3600 * 1000;
+    try {
+      const ids = await redis.zrangebyscore("user:lastSeen", since, "+inf");
+      if (ids?.length) return ids;
+    } catch { /* fallback below */ }
+    // fallback: كل المستخدمين
+    return await storage.getAllUserIds();
+  }
+  return await storage.getAllUserIds();
+}
+
+async function broadcastToAll(message: string, parseMode = "Markdown", target = "all"): Promise<void> {
   if (!_bot) return;
   try {
-    const userIds = await storage.getAllUserIds();
-    L.adminAction("system", `broadcast to ${userIds.length} users`);
+    const userIds = await resolveBroadcastTargets(target);
+    L.adminAction("system", `broadcast to ${userIds.length} users [target=${target}]`);
 
     let sent = 0, failed = 0;
     for (const uid of userIds) {
       try {
         await _bot.sendMessage(parseInt(uid, 10), message, {
           parse_mode: parseMode as any,
+          disable_web_page_preview: true,
         });
         sent++;
         await sleep(50); // تجنب حد الـ rate limit لـ Telegram
@@ -214,7 +233,7 @@ async function broadcastToAll(message: string, parseMode = "Markdown"): Promise<
       }
     }
 
-    L.info("bot", `Broadcast done`, { sent, failed, total: userIds.length });
+    L.info("bot", `Broadcast done`, { sent, failed, total: userIds.length, target });
   } catch (e) {
     L.error("bot", `Broadcast error`, { err: String(e).slice(0, 100) });
   }
