@@ -29,6 +29,11 @@ import { PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
 
 const PREMIUM_EXP_KEY    = (uid: string) => `premium:exp:${uid}`;
 const PREMIUM_MANUAL_KEY = (uid: string) => `premium:manual:${uid}`;
+// audit log — قائمة مرتبة (أحدث أولاً) من JSON entries لكل مستخدم
+// المحتوى: { ts, action, days, by, source, reason }
+// نحتفظ بآخر 50 لكل مستخدم — كافية للمراجعة وما بتأكلش ذاكرة
+const PREMIUM_AUDIT_KEY  = (uid: string) => `premium:audit:${uid}`;
+const PREMIUM_AUDIT_MAX  = 50;
 
 export async function isPremium(userId: string): Promise<boolean> {
   try {
@@ -56,12 +61,47 @@ export async function isPremium(userId: string): Promise<boolean> {
 }
 
 /**
+ * source للتتبّع الإداري — من فين جت الحركة (audit trail)
+ *   - "telegram-cmd" = /grantpremium أو /revokepremium
+ *   - "telegram-callback" = زر prem:toggle: في الـ admin UI
+ *   - "dashboard" = POST /api/admin/users/:id/premium
+ *   - "stars-payment" = اشتراك مدفوع via Telegram Stars
+ *   - "system" = إصلاح/تنظيف تلقائي
+ */
+export type PremiumGrantSource =
+  | "telegram-cmd"
+  | "telegram-callback"
+  | "dashboard"
+  | "stars-payment"
+  | "system";
+
+export interface PremiumGrantContext {
+  /** Admin Telegram ID اللي عمل الحركة، أو "system" للحركات التلقائية */
+  by: string;
+  /** من أي واجهة جت الحركة */
+  source: PremiumGrantSource;
+  /** سبب اختياري — مفيد بشكل خاص للمنح اليدوية */
+  reason?: string;
+}
+
+interface PremiumAuditEntry {
+  ts:     number;            // ms epoch
+  action: "grant" | "revoke";
+  days:   number;            // 0 = manual grant بدون انتهاء
+  by:     string;
+  source: PremiumGrantSource;
+  reason?: string;
+}
+
+/**
  * تفعيل أو إلغاء Premium لمستخدم
  * @param userId  Telegram user ID
  * @param enable  true = تفعيل | false = إلغاء
  * @param days    عدد الأيام:
  *                  > 0 = اشتراك مدفوع (يُمدّد TTL القائم بهذه الأيام)
  *                  = 0 = منحة Admin يدوية بلا انتهاء
+ * @param ctx     سياق التتبع — من قام بالحركة، من أي واجهة، ولماذا. اختياري
+ *                للتوافق الخلفي لكن يُكتب صراحةً في audit log.
  *
  * Renewal semantics (days > 0):
  *   - لو فيه TTL باقي → الجديد = القديم + days*86400 (تمديد)
@@ -72,6 +112,7 @@ export async function setPremium(
   userId: string,
   enable: boolean,
   days   = 0,
+  ctx?:    PremiumGrantContext,
 ): Promise<void> {
   if (!enable) {
     // إلغاء كامل — احذف من كل مكان
@@ -80,6 +121,7 @@ export async function setPremium(
       .del(PREMIUM_EXP_KEY(userId))
       .del(PREMIUM_MANUAL_KEY(userId))
       .exec();
+    await appendAudit(userId, { action: "revoke", days: 0, ctx });
     return;
   }
 
@@ -114,6 +156,54 @@ export async function setPremium(
 
     L.info("premium", "Manual admin grant set", { userId });
   }
+
+  await appendAudit(userId, { action: "grant", days, ctx });
+}
+
+/**
+ * يلصق entry جديد في audit log لمستخدم. fire-and-forget — أخطاء Redis
+ * لا تكسر العملية الأصلية (الـ premium grant) لأن الـ audit ثانوي.
+ */
+async function appendAudit(
+  userId: string,
+  args: { action: "grant" | "revoke"; days: number; ctx?: PremiumGrantContext },
+): Promise<void> {
+  const entry: PremiumAuditEntry = {
+    ts:     Date.now(),
+    action: args.action,
+    days:   args.days,
+    by:     args.ctx?.by     ?? "unknown",
+    source: args.ctx?.source ?? "system",
+    ...(args.ctx?.reason ? { reason: args.ctx.reason } : {}),
+  };
+  try {
+    const key = PREMIUM_AUDIT_KEY(userId);
+    await redis.pipeline()
+      .lpush(key, JSON.stringify(entry))
+      .ltrim(key, 0, PREMIUM_AUDIT_MAX - 1)
+      .exec();
+  } catch (e) {
+    L.warn("premium", "audit append failed (non-fatal)", { userId, err: String(e).slice(0, 80) });
+  }
+}
+
+/**
+ * يجيب آخر N entries من audit log لمستخدم.
+ * يُستخدم في dashboard عند فتح ملف premium المستخدم.
+ */
+export async function getPremiumAudit(
+  userId: string,
+  limit  = 20,
+): Promise<PremiumAuditEntry[]> {
+  try {
+    const raws = await redis.lrange(PREMIUM_AUDIT_KEY(userId), 0, Math.max(0, limit - 1));
+    const out: PremiumAuditEntry[] = [];
+    for (const raw of raws) {
+      try { out.push(JSON.parse(raw) as PremiumAuditEntry); }
+      catch { /* skip malformed entries */ }
+    }
+    return out;
+  } catch { return []; }
 }
 
 /**
