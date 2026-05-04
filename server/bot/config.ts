@@ -146,6 +146,18 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
   process.env.SOURCE_AUTO_DISABLE_MAX_RATE || "0.15",
 );
 
+// ── Hard-fail tier ────────────────────────────
+// مصادر بتفشل فشل كاتاستروفي (HTML بدل PDF، 5xx متكرر، DNS فشل …) —
+// لازم يتحجبوا أسرع. Tier ثاني: عدد محاولات أقل + نسبة نجاح ≤ 0% فعلياً.
+// المستخدم يضيع وقته 5 محاولات في مصدر باظ بدل 8.
+export const SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS || "5",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_HARD_MAX_RATE = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_HARD_MAX_RATE || "0.0",
+);
+
 // ── Trusted PDF domains ───────────────────────
 // Aggregators / mirrors. Anything served from these download/dl paths
 // is assumed to be the requested book — we skip Mistral entirely.
