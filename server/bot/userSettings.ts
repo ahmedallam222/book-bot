@@ -104,12 +104,12 @@ export async function setPremium(
       newTtlSec,
     });
   } else {
-    // منحة Admin — بدون TTL، تدوم للأبد
+    // منحة Admin — بدون TTL، تدوم للأبد. تُلغي أي paid TTL سابق لتفادي
+    // ظهوره فجأة لو الأدمن ألغى الـ manual لاحقاً (audit M3).
     await redis.pipeline()
       .sadd(PREMIUM_SET_KEY, userId)
       .set(PREMIUM_MANUAL_KEY(userId), String(Date.now()))
-      // لو كان عنده اشتراك مدفوع، ما نمسحوش — الـ manual flag كافٍ ليبقى premium
-      // والـ exp يُكمل للحد منتهي. نختار manual فوق exp في عرض expiry لأنها بلا انتهاء.
+      .del(PREMIUM_EXP_KEY(userId))
       .exec();
 
     L.info("premium", "Manual admin grant set", { userId });
