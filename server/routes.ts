@@ -304,7 +304,7 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   // يقرأ ZREVRANGE stats:random:genres من Redis
   app.get("/api/admin/stats/random-genres", auth, wrap(async (_req, res) => {
     try {
-      const raw: string[] = await (redis as any).zrevrange("stats:random:genres", 0, -1, "WITHSCORES");
+      const raw = await redis.zrevrange("stats:random:genres", 0, -1, "WITHSCORES");
       const genres: {genre:string;count:number}[] = [];
       for (let i = 0; i < raw.length; i += 2) {
         genres.push({ genre: String(raw[i]), count: parseInt(String(raw[i + 1]), 10) || 0 });
