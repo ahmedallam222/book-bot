@@ -586,10 +586,15 @@ async function performFullSearch(
     // requests don't pay for `redis.keys("stats:source:*")` +
     // N×HGETALL (Devin Review #32 caught this when the init was
     // briefly hoisted).
+    // نستخدم trustRate (ok / (ok+fail+mistralRejected)) بدل successRate
+    // البسيط (ok / (ok+fail)). الفرق: لو مصدر بيرجع PDFs بنجاح بس Mistral
+    // بيرفضها كلها (يعني search-ranker بياخد wrong-book URLs)، ده fail
+    // فعلي من منظور المستخدم. مثال: Hindawi عنده successRate=27% لكن
+    // trustRate=17% — والـ trustRate هو الإشارة الصحيحة للـ ranker.
     let srcRateMap = new Map<string, number>();
     try {
       const srcStats = await getSourceStats();
-      srcRateMap = new Map(srcStats.map((s) => [s.domain, s.ok / Math.max(s.ok + s.fail, 1)]));
+      srcRateMap = new Map(srcStats.map((s) => [s.domain, s.trustRate]));
     } catch {}
 
     validUrls.sort((a, b) => {
