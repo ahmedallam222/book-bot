@@ -31,6 +31,9 @@ export async function setSourceManuallyDisabled(
     if (off) await redis.set(key, "1");
     else     await redis.del(key);
   } catch {}
+  // Admin expects the toggle to take effect on the next search — invalidate
+  // the in-memory cache so getAutoDisabledSourceDomains() recomputes.
+  invalidateDisabledSourcesCache();
 }
 
 export async function getManualDisabledSourceDomains(): Promise<Set<string>> {
@@ -325,15 +328,39 @@ export async function getSourceStats(): Promise<SourceStat[]> {
   } catch { return []; }
 }
 
+// PERF: in-memory TTL cache — `getAutoDisabledSourceDomains` تُستدعى من
+// `engine.searchAllSources` على كل طلب بحث (قبل cache check). كانت تنفّذ
+// SCAN + N×HGETALL لكل request — ~5+ round-trips على Redis.
+//
+// التصميم: نخزّن الـ Set في الذاكرة لـ 30 ثانية فقط:
+//   * auto-disable يتراكم تدريجياً (failures count up)، فـ 30s staleness
+//     مقبولة — على الأكثر بضعة failed attempts إضافية من مصدر جديد قبل
+//     الحجب الفعلي.
+//   * manual toggle يُلغي الـ cache فوراً عبر invalidateDisabledSourcesCache
+//     في `setSourceManuallyDisabled` ليرى الـ admin النتيجة فوراً.
+//
+// Process-local فقط (لا يعمل multi-instance) — لا مشكلة لأن الـ deploy
+// الحالي عبر Docker Compose مع instance واحد للـ bot.
+const DISABLED_CACHE_TTL_MS = 30_000;
+let _disabledCache: { value: Set<string>; expiry: number } | null = null;
+
+export function invalidateDisabledSourcesCache(): void {
+  _disabledCache = null;
+}
+
 // Combines auto-disable (both tiers) + manual override. This is the
 // single source of truth for `searchAllSources` filtering.
 export async function getAutoDisabledSourceDomains(): Promise<Set<string>> {
+  if (_disabledCache && Date.now() < _disabledCache.expiry) {
+    return _disabledCache.value;
+  }
   const [stats, manualOff] = await Promise.all([
     getSourceStats(),
     getManualDisabledSourceDomains(),
   ]);
   const out = new Set<string>(manualOff);
   for (const s of stats) if (s.autoDisabled) out.add(s.domain);
+  _disabledCache = { value: out, expiry: Date.now() + DISABLED_CACHE_TTL_MS };
   return out;
 }
 
