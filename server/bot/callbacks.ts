@@ -4,13 +4,13 @@ import { BLACKLIST_THRESHOLD, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } 
 import { isAdmin } from "./guards.js";
 import { getSession, deleteSession, storeRetryKey } from "./session.js";
 import { blacklistUrlDirect } from "./blacklist.js";
-import { getSearchCacheResults } from "./engine.js";
 import { storage } from "../storage.js";
 import {
   buildWelcome, handleAdminCallback, buildHistoryMessage,
   buildTopBooksMessage,
 } from "./admin.js";
-import { kbAfterFail, kbMain, buildFailMessage } from "./keyboards.js";
+import { kbAfterFail, kbMain, kbNoResults } from "./keyboards.js";
+import { buildPaidBookMessage } from "./ui.js";
 import { handleBookRequest } from "./bookRequest.js";
 import { SOURCES } from "./sources.js";
 import { cancelUserJobs, getQueueStats, getUserPendingCount } from "./queue.js";
@@ -242,35 +242,27 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── pagination ────────────────────────────────
+    // ── legacy pagination on stale fail messages ──────────────
+    // FIX-PAID-BOOK-MSG: السلوك القديم كان يعرض قائمة معاينة من كتب خطأ.
+    // الـ handler الجديد يستبدل الرسالة القديمة بالرسالة القاطعة الموحَّدة
+    // عشان المستخدم اللي رسالة فشل قديمة لسه ظاهرة على شاشته يحصل على
+    // نفس الـ UX الجديد لما يضغط على زر التنقل.
     if (data.startsWith("fp:")) {
       const withoutPrefix = data.slice(3);
       const lastColon     = withoutPrefix.lastIndexOf(":");
       const sessionKey    = withoutPrefix.slice(0, lastColon);
-      const page          = parseInt(withoutPrefix.slice(lastColon + 1) || "0", 10);
       const entry         = getSession(sessionKey);
       const bookName      = entry?.bookName || "";
       if (!bookName) {
         await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
         return;
       }
-      const results = await getSearchCacheResults(bookName);
       if (!query.message) return;
-      if (results.length > 0) {
-        await bot.editMessageText(buildFailMessage(bookName, results, page), {
-          chat_id: chatId, message_id: query.message.message_id,
-          parse_mode: "Markdown", disable_web_page_preview: true,
-          reply_markup: kbAfterFail(bookName, results, page),
-        }).catch(() => {});
-      } else {
-        await bot.editMessageText(
-          `⏰ انتهت النتائج. اكتب اسم الكتاب مجدداً.`,
-          { chat_id: chatId, message_id: query.message.message_id,
-            reply_markup: { inline_keyboard: [[
-              { text: "🔍 بحث جديد",  callback_data: "new_search" },
-              { text: "🔄 أعد البحث", callback_data: `retry:${storeRetryKey(bookName)}` },
-            ]]}}).catch(() => {});
-      }
+      await bot.editMessageText(buildPaidBookMessage(bookName), {
+        chat_id: chatId, message_id: query.message.message_id,
+        parse_mode: "Markdown", disable_web_page_preview: true,
+        reply_markup: kbNoResults(bookName),
+      }).catch(() => {});
       return;
     }
 
