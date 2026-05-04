@@ -12,8 +12,13 @@
 // لأي slug بـ يوصل للمستخدم.
 //
 // الإصلاح: قبل direct mode نشغّل filename relevance gate. لو
-// `urlFilenameRelevance(book, url) < 0.15` ⇒ نسقط للـ local download
+// `urlFilenameRelevance(book, url) < 0.40` ⇒ نسقط للـ local download
 // (اللي بيشغّل full pdfValidator + Mistral).
+//
+// FIX-WRONG-FILE (BUG-5): العتبة الأصلية كانت 0.15 وكانت تترك "validation
+// dead zone" بين 0.15 و 0.40 — كتب باسم متشابه فقط (مثلاً
+// "العقيدة الواسطية" vs "العقيدة السفارينية") تتجاوز direct mode بدون فحص.
+// رفعت إلى 0.40 لتقفل الثقب.
 //
 // نختبر directSendUnsafe + filename relevance scoring + the new
 // pdfValidator trusted-domain unrelated-filename branch.
@@ -23,7 +28,7 @@ import { urlFilenameRelevance } from "./server/bot/text.ts";
 // نسخة مطابقة من directSendUnsafe في download.ts
 function directSendUnsafe(bookName, pdfUrl) {
   const score = urlFilenameRelevance(bookName, pdfUrl);
-  return score < 0.15;
+  return score < 0.40;
 }
 
 let pass = 0, fail = 0;
@@ -75,16 +80,19 @@ function check(name, got, want) {
 // Group 3: digit-only filenames (Hindawi-style)
 // ══════════════════════════════════════════════
 {
-  // urlFilenameRelevance returns 0.3 for digit-only. 0.3 >= 0.15 ⇒ safe.
-  // (But Hindawi is in SKIP_DIRECT_DOMAINS anyway, so this only matters
-  // for hosts that aren't pre-skipped.)
+  // FIX-WRONG-FILE (BUG-5): urlFilenameRelevance returns 0.3 for
+  // digit-only. With the old 0.15 threshold this was safe, but 0.3
+  // gave NO real signal that the URL was the right book. The new 0.40
+  // threshold flags digit-only as unsafe → forces local-download +
+  // full validation + Mistral. (Hindawi is also in SKIP_DIRECT_DOMAINS
+  // so this only matters for hosts that aren't pre-skipped.)
   check(
-    "T3: digit-only filename → score 0.3 → safe (not unsafe)",
+    "T3: digit-only filename → score 0.3 → unsafe (closes dead-zone)",
     directSendUnsafe(
       "أي كتاب عربي",
       "https://example.org/books/30903814.pdf",
     ),
-    false,
+    true,
   );
 }
 
@@ -143,6 +151,55 @@ function check(name, got, want) {
   check(
     "T6.b: short filename — score 0 → unsafe",
     directSendUnsafe("الجنرال في متاهته", "https://example.org/x.pdf"),
+    true,
+  );
+}
+
+// ══════════════════════════════════════════════
+// Group BUG-5: direct-send dead-zone (BUG-5 regression guard)
+// ══════════════════════════════════════════════
+{
+  // الكتاب: "العقيدة الواسطية"
+  // الـ URL يحوي filename = "alaqida-al-safariniya" — كلمة "alaqida"
+  // قد تتطابق partially، لكن فعلياً الكتاب مختلف تماماً.
+  // urlFilenameRelevance يعتمد على Arabic tokens، ومع slug Latin
+  // الـ overlap = 0 → unsafe (لا في dead zone أصلاً).
+  // نختبر بدلاً من ذلك المرتبة الوسطى: book-word واحد مطابق من اثنين.
+  // book = "العقيدة الواسطية" (token: "العقيدة","الواسطية")
+  // url filename = "العقيدة-السفارينية" (token: "العقيدة","السفارينية")
+  // matched=1, total=2 → score = 0.5 → safe (≥ 0.40)
+  check(
+    "BUG-5.a: shared title prefix only — score 0.5 → safe (genuine partial match)",
+    directSendUnsafe(
+      "العقيدة الواسطية",
+      "https://example.org/items/العقيدة-السفارينية.pdf",
+    ),
+    false,
+  );
+
+  // book = "تاريخ مصر القديم الكامل" (4 tokens)
+  // url filename = "تاريخ-مصر.pdf" (2 tokens)
+  // matched=2, total=4 → score = 0.5 → safe
+  // العتبة الجديدة 0.40 تسمح للمطابقات الجزئية الصادقة (≥ 50%)
+  // وترفض المتطابقات الواهية (< 40%).
+  check(
+    "BUG-5.b: half-match → score 0.5 → safe",
+    directSendUnsafe(
+      "تاريخ مصر القديم الكامل",
+      "https://example.org/items/تاريخ-مصر.pdf",
+    ),
+    false,
+  );
+
+  // book = "تاريخ مصر القديم الكامل" (4 tokens)
+  // url filename = "تاريخ-روما.pdf" (1 matched: "تاريخ")
+  // matched=1, total=4 → score = 0.25 → unsafe (was safe under old 0.15)
+  check(
+    "BUG-5.c: 1-of-4 weak match → score 0.25 → unsafe (closes dead-zone)",
+    directSendUnsafe(
+      "تاريخ مصر القديم الكامل",
+      "https://example.org/items/تاريخ-روما.pdf",
+    ),
     true,
   );
 }

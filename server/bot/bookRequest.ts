@@ -4,7 +4,7 @@ import { L } from "./logger.js";
 import { enqueue } from "./queue.js";
 import { isBanned, isAdmin, setLastBook } from "./guards.js";
 import { isRateLimited, isSearchRateLimited, RATE_LIMIT_MAX, SEARCH_RATE_MAX } from "./rateLimit.js";
-import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, buildResetTime } from "./text.js";
+import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, canonicalizeForCache, buildResetTime } from "./text.js";
 import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
@@ -277,6 +277,43 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
   }
 }
 
+// ── Cache Hit Re-Validation (FIX-WRONG-FILE BUG-3) ──────────────
+//
+// Treat a cache hit as suspect if either:
+//   (a) the cached.bookName tokens overlap < 40% with the requested
+//       bookName tokens (after canonicalization), OR
+//   (b) the cached.sourceUrl filename is opaque AND its filename
+//       relevance to the requested bookName is < 0.10 — i.e. nothing
+//       in the URL signals it's the right book either.
+//
+// We deliberately keep both checks lenient: legitimate cache hits
+// (perfect query match → 100% overlap, score 1.0) always pass.
+function cacheHitMatchesQuery(
+  requestedBook: string,
+  cachedBookName: string,
+  sourceUrl: string,
+): boolean {
+  const reqTokens = canonicalizeForCache(requestedBook)
+    .split(/\s+/).filter((w) => w.length >= 3);
+  const cachedTokens = new Set(
+    canonicalizeForCache(cachedBookName)
+      .split(/\s+/).filter((w) => w.length >= 3),
+  );
+  if (reqTokens.length === 0 || cachedTokens.size === 0) {
+    // not enough signal — let the validator on re-download decide
+    return true;
+  }
+  const matched = reqTokens.filter((w) => cachedTokens.has(w)).length;
+  const overlap = matched / reqTokens.length;
+  if (overlap >= 0.40) return true;
+
+  // Low overlap — only allow if URL filename gives independent signal
+  const filenameScore = sourceUrl ? urlFilenameRelevance(requestedBook, sourceUrl) : 0;
+  if (filenameScore >= 0.40) return true;
+
+  return false;
+}
+
 // ── Cache Serve ───────────────────────────────
 
 async function serveFromCache(
@@ -298,6 +335,34 @@ async function serveFromCache(
     cached = a ?? b;
   }
   if (!cached) return false;
+
+  // FIX-WRONG-FILE (BUG-3): re-validate cache hit before serving.
+  //
+  // Cache writes have anti-poison guards (filename score, opaque URL),
+  // but cache READS were blind: any poisoned entry that slipped through
+  // (or pre-dates a guard) would keep delivering the wrong file to
+  // every subsequent matching query until TTL/manual purge.
+  //
+  // Sanity checks (any failure → treat as miss, fall through to full
+  // search; we keep the entry so a later valid sourceUrl can still
+  // refresh it via the re-cache path below):
+  //   1. cached.bookName (the title we actually delivered last time)
+  //      shares ≥ 40% of tokens with the current bookName, normalized.
+  //   2. cached.sourceUrl filename relevance is acceptable
+  //      (≥ 0.10) OR the URL is non-opaque (so the validator/Mistral
+  //      will catch a mismatch on re-download).
+  //
+  // Both checks are cheap (string ops only). They only run on cache
+  // hit — the common case is no-op (perfect match → score = 1.0).
+  if (!cacheHitMatchesQuery(bookName, cached.bookName, cached.sourceUrl ?? "")) {
+    L.warn("cache", "cache hit looked suspicious — falling through to full search", {
+      query:      bookName.slice(0, 50),
+      cachedName: cached.bookName.slice(0, 50),
+      sourceUrl:  (cached.sourceUrl ?? "").slice(0, 80),
+    });
+    redis.incr("tel:cache:hit_revalidated_skip").catch(() => {});
+    return false;
+  }
 
   if (cached.telegramFileId) {
     try {
@@ -575,11 +640,19 @@ async function performFullSearch(
   // قبل: يُحسَب مرتين (داخل الحلقة + بعدها) — نتيجتان قد تختلفان لو تغيّر المنطق
   let sentFilenameScore = 0.5; // neutral حتى يُضبط بعد التحميل الناجح
 
-  // Mistral early-stop: count consecutive NO verdicts on this query and
-  // skip Mistral for remaining candidates once the streak crosses
-  // MISTRAL_NO_STREAK_LIMIT. Resets on any success. The pdfValidator
-  // will then reject ambiguous candidates without paying for Mistral.
-  let mistralNoStreak = 0;
+  // Mistral early-stop: count consecutive NO verdicts and skip Mistral
+  // for remaining candidates once the streak crosses
+  // MISTRAL_NO_STREAK_LIMIT.
+  //
+  // FIX-WRONG-FILE (NIT-2): the streak is now tracked PER DOMAIN, not
+  // global. Previously, 3 NOs on Hindawi would short-circuit Mistral
+  // for a subsequent (potentially correct) candidate from foulabook,
+  // causing it to be rejected by the local-only fallback. Per-domain
+  // ensures only the same source's repeated bad rankings disable
+  // Mistral, while a different source still gets a fresh evaluation.
+  // The global streak is kept for telemetry only.
+  let globalMistralNoStreak = 0;
+  const mistralNoStreakByDomain = new Map<string, number>();
 
   // Download attempt accounting (find-to-send loss mitigation).
   // - `attemptedDownloads` counts URLs we've actually tried (including
@@ -644,12 +717,15 @@ async function performFullSearch(
       attemptsByDomain.set(dlDomain, domainAttempts + 1);
       attemptedDownloads++;
 
+      const domainStreak = mistralNoStreakByDomain.get(dlDomain) ?? 0;
       const skipMistral = MISTRAL_NO_STREAK_LIMIT > 0 &&
-                          mistralNoStreak >= MISTRAL_NO_STREAK_LIMIT;
+                          domainStreak >= MISTRAL_NO_STREAK_LIMIT;
       if (skipMistral) {
-        L.info("bot", "Mistral early-stop active for this request", {
+        L.info("bot", "Mistral early-stop active for this domain", {
           book: bookName.slice(0, 50),
-          streak: mistralNoStreak,
+          domain: dlDomain,
+          domainStreak,
+          globalStreak: globalMistralNoStreak,
           url: pdfUrl.slice(0, 80),
         });
       }
@@ -683,9 +759,11 @@ async function performFullSearch(
       // heuristic-only rejects don't count toward the streak (they're not
       // signals about Mistral disagreeing with the search ranker).
       if (result.mistralRejected) {
-        mistralNoStreak++;
+        globalMistralNoStreak++;
+        mistralNoStreakByDomain.set(dlDomain, domainStreak + 1);
       } else if (result.ok) {
-        mistralNoStreak = 0;
+        globalMistralNoStreak = 0;
+        mistralNoStreakByDomain.clear();
       }
       if (result.ok) {
         sent          = true;
