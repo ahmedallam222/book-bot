@@ -211,14 +211,19 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── باقي الـ callbacks: General answer ────────
-    await bot.answerCallbackQuery(query.id).catch(() => {});
+    // ══════════════════════════════════════════════
+    // BUG FIX: premium_buy و fp: محتاجين يعالَجوا قبل الـ general
+    // answerCallbackQuery — وإلا فإن toast notifications الخاصة بيهم
+    // ("⭐ أنت بالفعل مشترك" / "⏰ انتهت الجلسة") لن تظهر للمستخدم
+    // لأن Telegram يرفض تكرار answerCallbackQuery على نفس query.
+    // (نفس مبرر الـ wishlist callbacks فوق.)
+    // ══════════════════════════════════════════════
 
     // ── premium_buy — Telegram Stars invoice ─────
     if (data === "premium_buy") {
       const prem = await isPremium(userId);
       if (prem) {
-        await bot.answerCallbackQuery(query.id, { text: "⭐ أنت بالفعل مشترك في Premium!" }).catch(() => {});
+        await bot.answerCallbackQuery(query.id, { text: "⭐ أنت بالفعل مشترك في Premium!", show_alert: true }).catch(() => {});
         return;
       }
       await bot.answerCallbackQuery(query.id).catch(() => {});
@@ -238,6 +243,34 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       }
       return;
     }
+
+    // ── legacy pagination on stale fail messages ──────────────
+    // FIX-PAID-BOOK-MSG: السلوك القديم كان يعرض قائمة معاينة من كتب خطأ.
+    // الـ handler الجديد يستبدل الرسالة القديمة بالرسالة القاطعة الموحَّدة
+    // عشان المستخدم اللي رسالة فشل قديمة لسه ظاهرة على شاشته يحصل على
+    // نفس الـ UX الجديد لما يضغط على زر التنقل.
+    if (data.startsWith("fp:")) {
+      const withoutPrefix = data.slice(3);
+      const lastColon     = withoutPrefix.lastIndexOf(":");
+      const sessionKey    = withoutPrefix.slice(0, lastColon);
+      const entry         = await getSession(sessionKey);
+      const bookName      = entry?.bookName || "";
+      if (!bookName) {
+        await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
+        return;
+      }
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      if (!query.message) return;
+      await bot.editMessageText(buildPaidBookMessage(bookName), {
+        chat_id: chatId, message_id: query.message.message_id,
+        parse_mode: "Markdown", disable_web_page_preview: true,
+        reply_markup: kbNoResults(bookName),
+      }).catch(() => {});
+      return;
+    }
+
+    // ── باقي الـ callbacks: General answer ────────
+    await bot.answerCallbackQuery(query.id).catch(() => {});
 
     // ── summary ───────────────────────────────────
     // The "📘 ملخص الكتاب" button under a delivered file. Heavy
@@ -259,30 +292,6 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         return;
       }
       await handleBookRequest(bot, chatId, userId, entry.bookName, token, query.from.username);
-      return;
-    }
-
-    // ── legacy pagination on stale fail messages ──────────────
-    // FIX-PAID-BOOK-MSG: السلوك القديم كان يعرض قائمة معاينة من كتب خطأ.
-    // الـ handler الجديد يستبدل الرسالة القديمة بالرسالة القاطعة الموحَّدة
-    // عشان المستخدم اللي رسالة فشل قديمة لسه ظاهرة على شاشته يحصل على
-    // نفس الـ UX الجديد لما يضغط على زر التنقل.
-    if (data.startsWith("fp:")) {
-      const withoutPrefix = data.slice(3);
-      const lastColon     = withoutPrefix.lastIndexOf(":");
-      const sessionKey    = withoutPrefix.slice(0, lastColon);
-      const entry         = await getSession(sessionKey);
-      const bookName      = entry?.bookName || "";
-      if (!bookName) {
-        await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
-        return;
-      }
-      if (!query.message) return;
-      await bot.editMessageText(buildPaidBookMessage(bookName), {
-        chat_id: chatId, message_id: query.message.message_id,
-        parse_mode: "Markdown", disable_web_page_preview: true,
-        reply_markup: kbNoResults(bookName),
-      }).catch(() => {});
       return;
     }
 
