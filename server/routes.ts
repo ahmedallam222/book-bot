@@ -152,6 +152,12 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     next();
   });
 
+  // ── Brute-force protection للـ admin endpoints ───────────────
+  // 60 طلب/دقيقة لكل IP — كافي للـ dashboard العادي (overview واحد كل
+  // 5 ثواني = 12/دقيقة). يحمي ضد brute-force على DASHBOARD_SECRET لو
+  // اتسرّب IP السيرفر. fail-open على Redis errors.
+  app.use("/api/admin", ipRateLimit({ prefix: "admin", max: 60, windowMs: 60_000 }));
+
   // ── Start Bot (fire-and-forget) ───────────────────────────
   startBot().catch(e => L.error("server", "bot start error", { e: String(e) }));
 
