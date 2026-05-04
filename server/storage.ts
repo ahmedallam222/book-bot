@@ -6,6 +6,7 @@ import {
   type User, type InsertUser, type SearchLog, type InsertSearchLog,
   type CachedBook, type InsertCachedBook, type DailyLimit, type InsertDailyLimit,
 } from "@shared/schema";
+import { canonicalizeForCache } from "./bot/text.js";
 
 // ══════════════════════════════════════════════
 // DB POOL — معدَّل وغير مُعرَّض للـ pool exhaustion
@@ -30,8 +31,15 @@ pool.on("error", (err) => {
 
 export const db = drizzle(pool);
 
+// FIX-WRONG-FILE (BUG-2/6/7/8): استخدم canonicalizeForCache الموحَّدة
+// (تطبيع عربي + إزالة كلمات الحشو + تطبيع المسافات).
+// السابقة كانت تطبيق سطحي: `toLowerCase().trim().replace(/\s+/g, " ")` فقط
+// → "أرض زيكولا" و "ارض زيكولا" مفاتيح كاش منفصلة (تخزين مكرّر).
+// → "تحميل كتاب أرض زيكولا pdf" و "أرض زيكولا" مفاتيح منفصلة (قراءة عمياء).
+// canonicalizeForCache مُعرَّفة في bot/text.ts لتُستخدَم بنفس الشكل في
+// كل المسارات (cache write + cache lookup + dashboard) بدون انحراف.
 function normalizeQuery(q: string): string {
-  return q.toLowerCase().trim().replace(/\s+/g, " ");
+  return canonicalizeForCache(q);
 }
 
 // ══════════════════════════════════════════════
@@ -51,6 +59,7 @@ export interface IStorage {
   incrementCacheServed(id: number): Promise<void>;
   getCacheStats(): Promise<{ totalCached: number; totalServed: number }>;
   deleteCachedBook(id: number): Promise<void>;
+  purgeCachedBookByQuery(query: string): Promise<number>;
   getDailyDownloadCount(telegramUserId: string): Promise<number>;
   incrementDailyDownload(telegramUserId: string): Promise<void>;
   canDownload(telegramUserId: string, limit?: number): Promise<boolean>;
@@ -174,6 +183,18 @@ export class DatabaseStorage implements IStorage {
 
   async deleteCachedBook(id: number): Promise<void> {
     await db.delete(cachedBooks).where(eq(cachedBooks.id, id));
+  }
+
+  // FIX-WRONG-FILE (BUG-9): admin-triggered purge by query.
+  // Used by /purge_cache <book> and the cleanup script for the
+  // 34 pre-fix opaque-URL entries. Returns the number of rows deleted.
+  async purgeCachedBookByQuery(query: string): Promise<number> {
+    const normalized = canonicalizeForCache(query);
+    const result = await db
+      .delete(cachedBooks)
+      .where(eq(cachedBooks.bookQueryNormalized, normalized))
+      .returning({ id: cachedBooks.id });
+    return result.length;
   }
 
   async getDailyDownloadCount(telegramUserId: string): Promise<number> {

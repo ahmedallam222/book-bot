@@ -25,20 +25,43 @@ function isFilenameTrustedDomain(url: string): boolean {
   return FILENAME_TRUSTED_PDF_DOMAINS.some(d => url.includes(d));
 }
 
-// True when the URL's filename is opaque (digit-only id, e.g. Hindawi's
-// `/books/14168605.pdf`). On hosts whose search ranker we can't trust,
-// these URLs carry zero title signal — neither the URL nor (typically)
-// the PDF metadata's `/Title` (Hindawi wraps it past the 64KB scan).
-// Production audit on 2026-05-03 found 10 cache entries poisoned with
-// wrong Hindawi PDFs because the trusted-domain bypass fired even with
-// no search title to validate against. Exported so the cache writer
-// (`bookRequest.ts`) can refuse to persist file_ids tied to opaque URLs.
+// True when the URL's filename is opaque — carries zero title signal.
+// Opaque shapes:
+//   1. digit-only id      (Hindawi `/books/14168605.pdf`)
+//   2. very-short ASCII   (`AB.pdf`, `xz.pdf`)
+//   3. random alnum no-sep up to 8 chars (`xK9mP2.pdf`)
+//   4. mixed alpha+digit but real letters < 4 (`TT-79.pdf`, `AB-3.pdf`)
+// On hosts whose search ranker we can't trust, these URLs let wrong-book
+// PDFs slip into the cache because no signal can distinguish them by
+// URL alone. Exported so the cache writer (`bookRequest.ts`) refuses
+// to persist file_ids tied to opaque URLs.
+//
+// FIX-WRONG-FILE (BUG-4): the original function only caught (1) so
+// shapes (2)-(4) leaked into the cache (production audit 2026-05-04
+// found `bookleaks.com/files/server/53.pdf`, `book-shadow.com/.../1094.pdf`
+// caching candidates whose filenames carry no book identity). Now mirrors
+// the richer `isMeaninglessFilename` heuristic used inside the validator.
 export function hasUninformativeFilename(url: string): boolean {
   try {
     const filename = decodeURIComponent(
       new URL(url).pathname.split("/").pop()?.split("?")[0] || "",
     ).replace(/\.pdf$/i, "").trim();
-    return filename.length > 0 && /^\d+$/.test(filename);
+    if (filename.length === 0) return false;
+    // (1) digit-only id
+    if (/^\d+$/.test(filename)) return true;
+    // (2) very-short ASCII (3 chars or less, alnum/dash/underscore)
+    if (filename.length <= 3 && /^[a-zA-Z0-9_-]+$/.test(filename)) return true;
+    const hasAlpha = /[a-zA-Z\u0600-\u06FF]/.test(filename);
+    const hasDigit = /\d/.test(filename);
+    const hasSep   = /[_\-\s]/.test(filename);
+    // (3) random alnum no-separator ≤ 8 chars (e.g. xK9mP2)
+    if (hasAlpha && hasDigit && filename.length <= 8 && !hasSep && /^[a-zA-Z0-9]+$/.test(filename)) {
+      return true;
+    }
+    // (4) alpha letters < 4 with digits → TT-79, AB-3
+    const alphaOnly = filename.replace(/[^a-zA-Z\u0600-\u06FF]/g, "");
+    if (hasAlpha && hasDigit && alphaOnly.length < 4) return true;
+    return false;
   } catch {
     return false;
   }
@@ -485,10 +508,17 @@ async function askMistral(
   urlHint:   string,
   explicitFilenameHint: string = "",
 ): Promise<boolean> {
-  // FIX: fail-closed بدون مفتاح — بدل fail-open
-  // بدون Mistral، كل الحالات الغامضة يجب أن تُرفَض لا أن تُقبَل
-  // المشغّل اختار عدم تفعيل Mistral → النظام يعمل بالـ local score فقط → الغامض = رفض
-  if (!MISTRAL_API_KEY) return true; // fail-open: لا مفتاح → اقبل وجرّب الإرسال
+  // FIX-WRONG-FILE (BUG-1): fail-closed بدون مفتاح — بدل fail-open
+  // الكود السابق كان متناقضاً مع تعليقه: التعليق يقول fail-closed لكن
+  // `return true` فعلياً = fail-open (اقبل) → ثغرة خطيرة لو سقط مفتاح
+  // Mistral أو انتهى الرصيد، كل ملف PDF غامض يُقبل ويُرسل ويُكاش.
+  // لتجنّب breakage مفاجئ في deployments قديمة لم تُعدّ Mistral، نسمح
+  // بـ flag صريح `MISTRAL_FAIL_OPEN=true` (default false) للسلوك القديم.
+  if (!MISTRAL_API_KEY) {
+    const failOpen = process.env.MISTRAL_FAIL_OPEN === "true";
+    redis.incr(failOpen ? "tel:pdf:mistral_no_key_open" : "tel:pdf:mistral_no_key_closed").catch(() => {});
+    return failOpen;
+  }
 
   // BUG FIX: الكود السابق استخدم urlHint (اسم الملف فقط) كـ cache key بدل الـ URL الكامل.
   // هذا يُنتج تصادمات عند ملفات تشترك في نفس الاسم من مصادر مختلفة:
