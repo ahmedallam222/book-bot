@@ -378,7 +378,7 @@ async function serveFromCache(
       ]).catch(() => {});
       logSearch(userId, userName, bookName, true, true, 1);
       invalidateRecentSearchesCache();
-      setLastBook(userId, bookName);
+      setLastBook(userId, bookName).catch(() => {});
       warmRelatedCache(bookName).catch(() => {});
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
       await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
@@ -408,7 +408,7 @@ async function serveFromCache(
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, 1);
         invalidateRecentSearchesCache();
-        setLastBook(userId, bookName);
+        setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
         await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
@@ -817,7 +817,7 @@ async function performFullSearch(
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, results.length);
         invalidateRecentSearchesCache();
-        setLastBook(userId, bookName);
+        setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, false, sentDomain, Date.now() - t0).catch(() => {});
         break;
