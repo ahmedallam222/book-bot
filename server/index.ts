@@ -1,4 +1,5 @@
 import express from "express";
+import helmet from "helmet";
 import { createServer, type Server } from "http";
 import { registerRoutes } from "./routes.js";
 import { L } from "./bot/logger.js";
@@ -11,6 +12,17 @@ import { redis } from "./bot/redis.js";
 // ══════════════════════════════════════════════
 
 const PORT = parseInt(process.env.PORT || "5000", 10);
+// مهم لما البوت يكون خلف reverse proxy (Nginx/Caddy/Cloudflare):
+// (أ) req.ip يرجّع X-Forwarded-For بدل IP الـ proxy (يتمسّ ipRateLimit)،
+// (ب) req.protocol يرجّع https لو الـ proxy يفك TLS.
+// 0 (افتراضي) = ثقة بـ socket.remoteAddress فقط (آمن لما لا proxy).
+// 1 = ثقة بأول hop (آمن عند تشغيل nginx/caddy على نفس الجهاز).
+// قابل للضبط عبر env عشان تشغيل خلف Cloudflare يحتاج 2.
+const TRUST_PROXY = parseInt(process.env.TRUST_PROXY || "0", 10);
+// host binding: 127.0.0.1 افتراضياً عند تشغيل خلف reverse proxy على
+// نفس الجهاز (الأكثر أماناً). 0.0.0.0 لو direct exposure أو docker.
+// docker-compose يُمرّر BOT_PORT_BIND للـ host port forwarding بشكل منفصل.
+const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
 
 let _httpServer: Server | null = null;
 let _shuttingDown = false;
@@ -39,14 +51,24 @@ function validateEnv(): void {
 async function main(): Promise<void> {
   validateEnv();
   const app = express();
+  // trust proxy: لازم ليصل req.ip للـ ipRateLimit من X-Forwarded-For
+  // عند التشغيل خلف reverse proxy. الافتراضي 0 آمن (no trust).
+  app.set("trust proxy", TRUST_PROXY);
+  // helmet: security headers قياسية. CSP معطّلة لأن الـ dashboard inline
+  // (script tag كبير في dashboard.html) — لو فُصِل لاحقاً يمكن تفعيلها.
+  // crossOriginEmbedderPolicy معطّلة لأنها تكسر تحميل الفونتس الخارجية.
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
   // body limit واضح بدل الافتراضي 100KB — يمنع large payloads على الـ admin endpoints
   app.use(express.json({ limit: "200kb" }));
   _httpServer = createServer(app);
 
   await registerRoutes(_httpServer, app);
 
-  _httpServer.listen(PORT, "0.0.0.0", () => {
-    L.info("server", `Server ready on port ${PORT} — Dashboard: /dashboard`);
+  _httpServer.listen(PORT, BIND_HOST, () => {
+    L.info("server", `Server ready on ${BIND_HOST}:${PORT} — Dashboard: /dashboard (trust_proxy=${TRUST_PROXY})`);
   });
 }
 
