@@ -696,17 +696,21 @@ export async function downloadAndSend(
     // ── إرسال لـ Telegram ─────────────────────────
     let sent: TelegramBot.Message;
     let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+    // مجرد الإشارة للـ sendDocument promise عشان لو غلب الـ timeout (فاز بالـ
+    // race) وبعدين الـ sendDocument فشل لاحقاً، نمسك الـ rejection بدل ما تتحول
+    // لـ unhandled-rejection warning في الـ logs.
+    const sendDocPromise = bot.sendDocument(
+      chatId,
+      tempPath,
+      {
+        caption:    buildCaption(bookName, validation.metaTitle),
+        parse_mode: "Markdown",
+      },
+      { filename: fname, contentType: "application/pdf" },
+    ) as Promise<TelegramBot.Message>;
     try {
       sent = await Promise.race([
-        bot.sendDocument(
-          chatId,
-          tempPath,
-          {
-            caption:    buildCaption(bookName, validation.metaTitle),
-            parse_mode: "Markdown",
-          },
-          { filename: fname, contentType: "application/pdf" }
-        ),
+        sendDocPromise,
         new Promise<never>((_, rej) => {
           uploadTimerId = setTimeout(
             () => rej(new Error("UPLOAD_TIMEOUT")),
@@ -714,6 +718,15 @@ export async function downloadAndSend(
           );
         }),
       ]);
+    } catch (raceErr) {
+      // خسرنا الـ race (غالباً timeout). لو الـ sendDocument رفض لاحقاً،
+      // نمسكه بصمت (لو Telegram تأخر ورجع error بعد ما دعشناه تايماوت).
+      sendDocPromise.catch((lateErr) => {
+        L.debug("download", "sendDocument late-rejection (race already lost)", {
+          err: String(lateErr).slice(0, 100),
+        });
+      });
+      throw raceErr;
     } finally {
       if (uploadTimerId !== null) clearTimeout(uploadTimerId);
       safeDeleteTemp(tempPath);
@@ -839,17 +852,20 @@ async function noorBookDownloadAndSend(
 
   let sent: TelegramBot.Message;
   let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+  // توثيق الـ sendDocument promise بشكل منفصل عشان نمسك late-rejection لو
+  // غلب الـ timeout في الـ race وبعدين Telegram رفض بعدوا.
+  const sendDocPromise = bot.sendDocument(
+    chatId,
+    tempPath,
+    {
+      caption:    buildCaption(bookName, validation.metaTitle),
+      parse_mode: "Markdown",
+    },
+    { filename: fname, contentType: "application/pdf" },
+  ) as Promise<TelegramBot.Message>;
   try {
     sent = await Promise.race([
-      bot.sendDocument(
-        chatId,
-        tempPath,
-        {
-          caption:    buildCaption(bookName, validation.metaTitle),
-          parse_mode: "Markdown",
-        },
-        { filename: fname, contentType: "application/pdf" },
-      ),
+      sendDocPromise,
       new Promise<never>((_, rej) => {
         uploadTimerId = setTimeout(
           () => rej(new Error("UPLOAD_TIMEOUT")),
@@ -858,6 +874,11 @@ async function noorBookDownloadAndSend(
       }),
     ]);
   } catch (e: any) {
+    sendDocPromise.catch((lateErr) => {
+      L.debug("download", "noor-book sendDocument late-rejection (race already lost)", {
+        err: String(lateErr).slice(0, 100),
+      });
+    });
     safeDeleteTemp(tempPath);
     L.dlFail(pdfUrl, `noor-book upload: ${String(e?.message || e).slice(0, 80)}`);
     await recordUrlFailure(pdfUrl);
