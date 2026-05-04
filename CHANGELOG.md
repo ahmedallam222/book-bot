@@ -7,6 +7,23 @@
 
 ---
 
+## [31.3.11] — 2026-05-04
+
+### 🐛 إصلاح صحة — "ملف خاطئ؟" ما كانش بيمسح الـ search cache فعلياً
+
+السياق: في `engine.ts` الـ search cache key يتولّد بـ `searchCacheKey(q) = "sc:" + canonicalizeForCache(q)` (`canonicalizeForCache` = `cleanSearchQuery` ثم `normalizeForCache`، يعني بيشيل كلمات الحشو زي "تحميل/كتاب/pdf" قبل الـ normalize). لكن في `callbacks.ts` معالج زر "⚠️ ملف خاطئ؟" كان بيحذف الـ cache بـ `redis.del("sc:" + normalizeForCache(entry.bookName))` بدون `cleanSearchQuery` — يعني المفتاحَين مش بيتطابقوا لو `entry.bookName` بقى فيه أي filler جوّاه.
+
+التأثير الفعلي على المستخدمين:
+- مستخدم يستلم ملف غلط ويضغط "⚠️ ملف خاطئ؟" → البوت يضيف الـ URL للـ blacklist ويحذف الـ DB cache row، لكن الـ Redis search cache ما بيتمسحش لأن المفتاح غلط.
+- المستخدم التالي اللي يدوّر بنفس الاستعلام (في حدود الـ 1h TTL) يستلم نفس الملف الغلط من الـ Redis cache مرة تانية، رغم إن الـ blacklist قاعدة تشتغل (هنا الـ cache بيتجاوز الـ blacklist filter لأنه نتيجة كاملة محفوظة).
+- البوت بيـ log "Cache cleared for bad file" فالـ admin يفترض إن الـ invalidation اشتغلت.
+
+الإصلاح: في `callbacks.ts` نستدعي `invalidateRecentSearchesCache(entry.bookName)` المُصدَّر من `engine.ts` (الـ source of truth لتوليد المفتاح). الدالة دي بتستخدم نفس `searchCacheKey` ومحصّنة بفايل-سيف يجرّب الـ key من الاستعلام الأصلي ومن نسخة `normalizeForCache` كمان عشان تغطي حالات النقل/إعادة التشكيل القديمة.
+
+سبب اختيار النداء بدل تكرار توليد المفتاح: لو فيا تنوّع في صيغة المفتاح في المستقبل، الـ engine module يفضل المرجع الوحيد، فأي تغيير في `searchCacheKey` يلتقط الـ invalidation تلقائياً.
+
+---
+
 ## [31.3.10] — 2026-05-04
 
 ### ⚡ أداء — in-memory cache لـ `getSourceStats` في hot path الترتيب
