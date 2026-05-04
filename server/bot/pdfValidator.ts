@@ -6,6 +6,7 @@ import { redis } from "./redis.js";
 import {
   MISTRAL_API_KEY,
   PDF_VALIDATE_ACCEPT_THRESHOLD,
+  PDF_VALIDATE_CONFIRM_THRESHOLD,
   PDF_VALIDATE_REJECT_THRESHOLD,
   TIMEOUT_MISTRAL,
   TRUSTED_PDF_DOMAINS,
@@ -929,14 +930,52 @@ export async function validatePdfContent(
     titleSrc:  metaTitleSource,
   });
 
-  // ── قرار واضح: قبول ──────────────────────────────────
-  if (score >= PDF_VALIDATE_ACCEPT_THRESHOLD) {
+  // ── قرار واضح: قبول (high-confidence) ───────────────
+  // الدرجة عالية بالقدر الكافي عشان نقبل بدون استدعاء Mistral.
+  // CONFIRM_THRESHOLD ≥ ACCEPT_THRESHOLD: لو متساويان البلوك ده بيشتغل
+  // كأن الـ confirm band غير موجود (back-compat).
+  if (score >= PDF_VALIDATE_CONFIRM_THRESHOLD) {
     redis.incr(TEL_ACCEPTED).catch(() => {});
     L.info("pdfValidator", "candidate_accepted_title_match", {
       book: bookName.slice(0, 50), score: score.toFixed(2),
       metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
     });
     return { accepted: true, score, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle: effectiveMetaTitle };
+  }
+
+  // ── منطقة "قابلة للقبول مع تأكيد Mistral" ─────────────
+  // [ACCEPT_THRESHOLD, CONFIRM_THRESHOLD): الدرجة كافية للقبول لكنها مش
+  // عالية لدرجة الثقة الكاملة. لو Mistral متاح → نطلب تأكيد.
+  // لو Mistral غير متاح → نقبل (السلوك القديم) لأن الـ score يتعدّى
+  // ACCEPT_THRESHOLD أصلاً.
+  if (score >= PDF_VALIDATE_ACCEPT_THRESHOLD) {
+    if (!MISTRAL_API_KEY || skipMistral) {
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      L.info("pdfValidator", "candidate_accepted_title_match (confirm-band, no mistral)", {
+        book: bookName.slice(0, 50), score: score.toFixed(2),
+        metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
+      });
+      return { accepted: true, score, event: "candidate_accepted_title_match", mistralUsed: false, metaTitle: effectiveMetaTitle };
+    }
+    redis.incr(TEL_MISTRAL).catch(() => {});
+    L.info("pdfValidator", "Confirm band — delegating to Mistral", {
+      book: bookName.slice(0, 50), score: score.toFixed(2),
+      metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
+    });
+    const accepted = await askMistral(bookName, effectiveMetaTitle, pdfUrl, filenameHint);
+    if (accepted) {
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      L.info("pdfValidator", "candidate_accepted_title_match (confirm-band, via Mistral)", {
+        book: bookName.slice(0, 50), score: score.toFixed(2),
+      });
+    } else {
+      redis.incr(TEL_REJECTED).catch(() => {});
+      L.warn("pdfValidator", "candidate_rejected_title_mismatch (confirm-band overruled by Mistral)", {
+        book: bookName.slice(0, 50), score: score.toFixed(2),
+        metaTitle: effectiveMetaTitle.slice(0, 60), titleSrc: metaTitleSource,
+      });
+    }
+    return { accepted, score, event: "mistral_rerank_used", mistralUsed: true, metaTitle: effectiveMetaTitle };
   }
 
   // ── قرار واضح: رفض ───────────────────────────────────

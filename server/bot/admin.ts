@@ -299,7 +299,7 @@ export async function handleAdminCallback(
       const targetId = data.split(":")[1] ?? "";
       if (!targetId) return;
       const wasPrem = await isPremium(targetId);
-      await setPremium(targetId, !wasPrem);
+      await setPremium(targetId, !wasPrem, 0, { by: userId, source: "telegram-callback" });
       L.adminAction(userId, `${wasPrem ? "revoke" : "grant"} premium → ${targetId}`);
       await bot.sendMessage(chatId,
         `✅ ${wasPrem ? "تم إلغاء Premium من" : "تم منح Premium لـ"} \`${targetId}\``,
