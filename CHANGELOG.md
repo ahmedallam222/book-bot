@@ -7,6 +7,18 @@
 
 ---
 
+## [31.3.10] — 2026-05-04
+
+### ⚡ أداء — in-memory cache لـ `getSourceStats` في hot path الترتيب
+
+السياق: PR #59 خزّن نتيجة `getAutoDisabledSourceDomains()` في cache 30s، لكن `bookRequest.ts:performFullSearch` لسه بينده `getSourceStats()` مباشرةً على كل full-search متعدد المصادر للحصول على `trustRate` من أجل ترتيب URLs. ده كان بيعمل SCAN + N×HGETALL على Redis في كل بحث (~5–15ms latency).
+
+التصميم: أضفنا `getSourceStatsCached()` بنفس الـ 30s TTL pattern. الـ `getAutoDisabledSourceDomains()` كمان بقت تستدعي النسخة الـ cached داخلياً، فلو الـ cache دافي، الاتنين يخلصو بدون أي Redis ops على hot path. النسخة الأصلية `getSourceStats()` بقت بس للـ admin dashboard / Telegram /sources panel — حيث الـ freshness أهم من الـ latency. الـ `invalidateDisabledSourcesCache()` بتمسح الاتنين معاً عشان admin toggle على source يلتقط فوراً.
+
+تأثير الترتيب: الـ `trustRate` كمية تراكمية (ok / (ok+fail+mistralRejected) عبر تاريخ المصدر)، فـ 30s staleness عليها لا يؤثر على ترتيب URLs ضمن البحث الواحد. على Redis بآلاف المفاتيح يقلّل ~5–15ms من latency كل full-search.
+
+---
+
 ## [31.3.9] — 2026-05-04
 
 ### 🐛 إصلاح UX — toast notifications لـ `premium_buy` و `fp:` ما كانتش بتظهر
