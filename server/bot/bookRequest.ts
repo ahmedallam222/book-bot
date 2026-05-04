@@ -25,6 +25,7 @@ import {
 } from "./config.js";
 import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
+import { react } from "./reactions.js";
 import type { QueueJob } from "./types.js";
 
 // buildResetTime مستوردة من text.ts
@@ -39,7 +40,8 @@ export async function handleBookRequest(
   userId: string,
   bookName: string,
   token: string,
-  userName?: string | null
+  userName?: string | null,
+  userMessageId?: number
 ): Promise<void> {
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
   // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
@@ -147,7 +149,7 @@ export async function handleBookRequest(
 
   // ── Enqueue ───────────────────────────────────
   const priority = isAdmin(userId) ? "high" : isPrem ? "high" : "normal";
-  const result   = await enqueue(userId, chatId, bookName, token, priority, userName);
+  const result   = await enqueue(userId, chatId, bookName, token, priority, userName, userMessageId);
 
   if (!result.ok) {
     if (result.reason === "user_limit") {
@@ -241,6 +243,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
       await deleteMsg(token, chatId, msgId);
+      if (job.userMessageId) react(bot, chatId, job.userMessageId, "🎉").catch(() => {});
       await trace.finish("sent_from_cache");
       trackFunnelOnce(job.id, {
         searchFound:   true,
@@ -252,7 +255,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
       await sendAnnouncement(bot, chatId, userId);
       return;
     }
-    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id);
+    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
     await sendAnnouncement(bot, chatId, userId);
   } catch (e) {
     L.error("worker", `processBookRequest error`, { userId, book: bookName.slice(0, 50), err: String(e).slice(0, 200) });
@@ -269,6 +272,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
 
     await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: kbAfterFail(bookName, []) }).catch(() => {});
 
+    if (job.userMessageId) react(bot, chatId, job.userMessageId, "😱").catch(() => {});
     trace.finish("error").catch(() => {});
     // FIX BUG-7: كان يُعيد throw بعد إرسال رسالة الخطأ للمستخدم
     // هذا يسبب: Worker يُعيد المحاولة → إما يصل الكتاب بدون سياق، أو رسالة خطأ ثانية
@@ -433,7 +437,8 @@ async function performFullSearch(
   token: string, userName: string | null | undefined,
   msgId: number, dlCount: number, dailyLimit: number, isPrem: boolean, t0: number,
   trace: RequestTrace,
-  jobId: string
+  jobId: string,
+  userMessageId?: number
 ): Promise<void> {
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
 
@@ -467,6 +472,7 @@ async function performFullSearch(
 
   if (results.length === 0) {
     await deleteMsg(token, chatId, msgId);
+    if (userMessageId) react(bot, chatId, userMessageId, "😢").catch(() => {});
     logSearch(userId, userName, bookName, false, false, 0);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     trackFunnelOnce(jobId, { searchFound: false, verifyChecked: 0, verifyValid: 0, sendMode: null, sendSuccess: false });
@@ -838,6 +844,7 @@ async function performFullSearch(
     const isSuspectFile = sentFilenameScore < 0.05;
 
     await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
+    if (userMessageId) react(bot, chatId, userMessageId, "🎉").catch(() => {});
     // Telemetry + Funnel
     const dlOutcome: import("./telemetry.js").RequestOutcome =
       sentSendMode === "direct" ? "sent_direct" : "sent_local";
@@ -850,6 +857,7 @@ async function performFullSearch(
       sendSuccess:   true,
     });
   } else {
+    if (userMessageId) react(bot, chatId, userMessageId, results.length > 0 ? "🤔" : "😢").catch(() => {});
     logSearch(userId, userName, bookName, results.length > 0, false, results.length);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     await trace.finish(results.length > 0 ? "links_only" : "no_results").catch(() => {});
