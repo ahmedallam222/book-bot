@@ -27,6 +27,7 @@ import { searchAllSources, getSearchCacheResults }       from "./bot/engine.js";
 import { GENRES }                                        from "./bot/random.js";
 import { normalizeArabic }                               from "./bot/text.js";
 import { GENRE_MAP, SUGGESTIONS }                        from "./bot/suggestions.js";
+import { ipRateLimit }                                   from "./bot/ipRateLimit.js";
 
 // ── Config ────────────────────────────────────────────────────
 const MAINTENANCE_KEY = "flag:maintenance";   // ← matches bot/config.ts
@@ -116,25 +117,29 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   });
 
   // ── CORS للـ mobile app (public endpoints) ───────────────────
-  // Public API يسمح لأي origin — Mobile app من أي domain
-  app.use("/api/search", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
+  // قابل للضبط عبر env. الافتراضي "*" للتوافق مع تطبيقات mobile قائمة.
+  // الحماية الفعلية ضد abuse تأتي من ipRateLimit أدناه.
+  const PUBLIC_API_ORIGIN = process.env.PUBLIC_API_ORIGIN || "*";
+  const publicCors = (_req: Request, res: Response, next: NextFunction): void => {
+    res.header("Access-Control-Allow-Origin",  PUBLIC_API_ORIGIN);
     res.header("Access-Control-Allow-Headers", "Content-Type");
     res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
     next();
-  });
-  app.use("/api/random", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
-    res.header("Access-Control-Allow-Headers", "Content-Type");
-    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
-    next();
-  });
-  app.use("/api/top-books", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
-    res.header("Access-Control-Allow-Headers", "Content-Type");
-    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
-    next();
-  });
+  };
+  app.use("/api/search",    publicCors);
+  app.use("/api/random",    publicCors);
+  app.use("/api/top-books", publicCors);
+  app.use("/api/genres",    publicCors);
+
+  // ── Per-IP rate limits على الـ public APIs ───────────────────
+  // searchAllSources() تستهلك Firecrawl quota → الـ endpoint كان قابلاً
+  // للاستنزاف بدقائق بدون حماية. الحدود محسوبة لحالة الاستخدام العادية:
+  //   /api/search    →  20 طلب/دقيقة (مطابق للـ user search rate limit)
+  //   /api/random    →  60 طلب/دقيقة (cheap، بدون Firecrawl)
+  //   /api/top-books → 120 طلب/دقيقة (Redis read فقط)
+  app.use("/api/search",    ipRateLimit({ prefix: "search",    max: 20,  windowMs: 60_000 }));
+  app.use("/api/random",    ipRateLimit({ prefix: "random",    max: 60,  windowMs: 60_000 }));
+  app.use("/api/top-books", ipRateLimit({ prefix: "top-books", max: 120, windowMs: 60_000 }));
 
   // ── CORS for dashboard ────────────────────────────────────
   app.use("/api/admin", (req, res, next) => {
