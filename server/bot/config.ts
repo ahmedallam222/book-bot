@@ -34,8 +34,26 @@ export const FC_RATE_LIMITED_TTL_SEC  = 60;
 export const FC_QUOTA_TTL_SEC         = 86_400;     // 24h
 
 // ── PDF Validation thresholds ─────────────────
-export const PDF_VALIDATE_ACCEPT_THRESHOLD = 0.40;
-export const PDF_VALIDATE_REJECT_THRESHOLD = 0.12;
+//
+// Three bands (by score):
+//   score >= ACCEPT_THRESHOLD               → accept locally (no Mistral)
+//                                             مع علامة CONFIRM_THRESHOLD
+//                                             نضيف فحص Mistral للتأكيد لو
+//                                             الدرجة بين الاتنين
+//   REJECT_THRESHOLD <= score < ACCEPT      → ambiguous, ask Mistral
+//   score < REJECT_THRESHOLD (clear title)  → reject locally (no Mistral)
+//
+// Confirm band (CONFIRM_THRESHOLD < score < ACCEPT)
+//   تم استحداثه لأن "ACCEPT_THRESHOLD = 0.40" كانت تقبل candidates ذات
+//   تشابه ضعيف-إلى-متوسط بدون مراجعة. مثال شائع: bookName "كتاب الفقه"
+//   ضد metaTitle "الفقه السلوكي" → ratio 0.50 يقبل بدون Mistral، رغم
+//   إن الكتابين مختلفان. الـ confirm band بيمسك دي ويعدّيها على Mistral.
+//
+//   اضبطه = ACCEPT_THRESHOLD لتعطيل الـ band (back-compat).
+//   اضبطه < ACCEPT_THRESHOLD ليبدأ الفحص من تلك القيمة فما فوق.
+export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.40;
+export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.55;
+export const PDF_VALIDATE_REJECT_THRESHOLD  = 0.12;
 
 // ── Blacklist ─────────────────────────────────
 export const BLACKLIST_THRESHOLD      = 3;
