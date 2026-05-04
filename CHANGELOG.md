@@ -7,6 +7,18 @@
 
 ---
 
+## [31.3.8] — 2026-05-04
+
+### 🛠 صيانة — graceful shutdown يُغلق noor-book Playwright browser
+
+السياق: `noorBookResolver.ts` يُشغّل headless Chromium singleton (~150MB RAM) و يفتحه lazily عند أول طلب لـ noor-book.com. الـ `shutdownNoorBookBrowser()` كان مُعرَّف ومُصدَّر، لكن **ما حدش بيناديه**. على SIGTERM، الـ Chromium child process يبقى لحظة قبل ما الـ process exit يقتله من الـ OS، مما قد يُسبّب:
+- warnings في الـ container logs عن orphan processes.
+- في حالات نادرة، خطأ "browser closed unexpectedly" لو الـ process exit وقع أثناء معالجة تحميل noor-book نشط.
+
+الإصلاح: استدعاء `shutdownNoorBookBrowser()` في `gracefulShutdown()` بعد ما الـ workers تنتهي. الإغلاق idempotent ولا يُسبّب مشاكل لو الـ browser ما اتفتحش أصلاً (مثلاً deployment ما واجهش طلب noor-book).
+
+---
+
 ## [31.3.7] — 2026-05-04
 
 ### 🚨 إصلاح حرج — race condition بين SIGTERM handlers يُجهض graceful shutdown
