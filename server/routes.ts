@@ -223,10 +223,13 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   app.get("/api/admin/users/premium",  auth, wrap(async (_req, res) => ok(res, await listPremiumUsers())));
   app.post("/api/admin/users/:id/premium", auth, wrap(async (req, res) => {
     const id = requireNumericId(req, res); if (!id) return;
-    const { enable } = req.body as { enable: boolean };
-    await setPremium(id, enable);
-    L.adminAction("dashboard", `${enable ? "grant" : "revoke"} premium ${id}`);
-    ok(res, { done: true, enable });
+    // days اختياري: لو محدد ورقم موجب → اشتراك مدفوع بمدة محددة.
+    // لو غير محدد أو 0 → admin manual grant بلا انتهاء.
+    const body = req.body as { enable: boolean; days?: number };
+    const days = Number.isFinite(body.days) && (body.days as number) > 0 ? Math.floor(body.days as number) : 0;
+    await setPremium(id, body.enable, days);
+    L.adminAction("dashboard", `${body.enable ? "grant" : "revoke"} premium ${id}${days ? ` (${days}d)` : ""}`);
+    ok(res, { done: true, enable: body.enable, days });
   }));
 
   // User limit
@@ -487,12 +490,24 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
 
   // ── broadcast (بث جماعي من الـ dashboard) ────────────────────
   app.post("/api/admin/broadcast", auth, wrap(async (req, res) => {
-    const { message, parse_mode } = req.body as { message: string; parse_mode?: string };
+    const { message, parse_mode, target } = req.body as { message: string; parse_mode?: string; target?: string };
     if (!message?.trim()) { res.status(400).json({ ok: false, error: "message required" }); return; }
-    // نُشغِّل البث عبر event — bot/admin.ts يتولى الإرسال
-    (process.emit as any)("dashboard:broadcast", { message, parse_mode: parse_mode || "Markdown" });
-    L.adminAction("dashboard", `broadcast sent: ${message.slice(0, 50)}`);
-    ok(res, { queued: true });
+    if (message.length > 4000) { res.status(400).json({ ok: false, error: "message too long" }); return; }
+    const tgt = ["all", "premium", "active7"].includes(target || "") ? target! : "all";
+    // تقدير عدد المستلمين قبل الإطلاق (للعرض في الـ dashboard)
+    let total = 0;
+    try {
+      if (tgt === "premium") {
+        const { listPremiumUsers } = await import("./bot/userSettings.js");
+        total = (await listPremiumUsers()).length;
+      } else {
+        total = (await storage.getAllUserIds().catch(() => [] as string[])).length;
+      }
+    } catch { /* keep 0 */ }
+    // نُشغِّل البث عبر event — bot/index.ts يتولى الإرسال
+    (process.emit as any)("dashboard:broadcast", { message, parse_mode: parse_mode || "Markdown", target: tgt });
+    L.adminAction("dashboard", `broadcast queued [target=${tgt}, est=${total}]: ${message.slice(0, 50)}`);
+    ok(res, { queued: true, target: tgt, total, sent: 0, failed: 0 });
   }));
 
   // ── user info ─────────────────────────────────────────────────
