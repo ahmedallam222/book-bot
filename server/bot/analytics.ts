@@ -9,6 +9,20 @@ function todayKey(): string {
   return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 }
 
+// ── Daily-stats retention ─────────────────────
+//
+// `stats:daily:{day}` و `stats:funnel:{day}` كانا يُكتَبان بـ HINCRBY فقط بدون
+// انتهاء صلاحية → تتراكم هاشات يومية للأبد في Redis (365 hash/سنة لمستخدم
+// واحد). معظمها لا يُقرأ بعد آخر 7 أيام (getWeeklyStats). نضع TTL مرتاح يكفي
+// تحاليل ربع-سنوية ويسمح بالـ idempotent extend عند الكتابة اليومية.
+const DAILY_STATS_TTL_SEC = 90 * 24 * 3600; // 90 days
+
+// EXPIRE هو NX-من-الجانب-المُقدَّم: إعادة استدعائه يومياً تُجدد TTL لـ 90 يوم —
+// آمن لأن الـ EXPIRE تُعيد الـ TTL وليس extend cumulative.
+function touchDailyTtl(pipe: ReturnType<typeof redis.pipeline>, key: string): void {
+  pipe.expire(key, DAILY_STATS_TTL_SEC);
+}
+
 // Normalize a hostname into a Redis-key-safe domain identifier.
 // Single source of truth — historically `trackDownload` wrote raw
 // hostnames (so `bookleaks.com` and `www.bookleaks.com` ended up in
@@ -26,10 +40,12 @@ export function sanitizeDomainKey(domain: string): string {
 // ── Search tracking ───────────────────────────
 export async function trackSearch(userId: string): Promise<void> {
   const day = todayKey();
-  await redis.pipeline()
-    .hincrby(`stats:daily:${day}`, "searches", 1)
-    .hincrby("stats:total", "searches", 1)
-    .exec().catch(() => {});
+  const dailyKey = `stats:daily:${day}`;
+  const pipe = redis.pipeline()
+    .hincrby(dailyKey, "searches", 1)
+    .hincrby("stats:total", "searches", 1);
+  touchDailyTtl(pipe, dailyKey);
+  await pipe.exec().catch(() => {});
 }
 
 // ── Download tracking ─────────────────────────
@@ -38,12 +54,13 @@ export async function trackDownload(
   domain?: string, ms?: number
 ): Promise<void> {
   const day = todayKey();
+  const dailyKey = `stats:daily:${day}`;
   const pipe = redis.pipeline()
-    .hincrby(`stats:daily:${day}`, "requests", 1);
-  if (found)     pipe.hincrby(`stats:daily:${day}`, "found", 1);
-  if (fromCache) pipe.hincrby(`stats:daily:${day}`, "cache_hits", 1);
+    .hincrby(dailyKey, "requests", 1);
+  if (found)     pipe.hincrby(dailyKey, "found", 1);
+  if (fromCache) pipe.hincrby(dailyKey, "cache_hits", 1);
   if (found && !fromCache) {
-    pipe.hincrby(`stats:daily:${day}`, "downloads", 1);
+    pipe.hincrby(dailyKey, "downloads", 1);
     pipe.hincrby("stats:total", "downloads", 1);
     // أكثر الكتب تحميلاً
     pipe.zincrby("stats:top_books", 1, bookName.slice(0, 100));
@@ -54,6 +71,7 @@ export async function trackDownload(
     const dc = sanitizeDomainKey(domain);
     if (dc) pipe.hincrby(`stats:source:${dc}`, "fail", 1);
   }
+  touchDailyTtl(pipe, dailyKey);
   await pipe.exec().catch(() => {});
 }
 
@@ -93,6 +111,7 @@ export async function trackFunnel(event: FunnelEvent): Promise<void> {
   if (event.sendMode === "local")  pipe.hincrby(key, "send_local", 1);
   pipe.hincrby(key, "verify_checked", event.verifyChecked);
   pipe.hincrby(key, "verify_valid",   event.verifyValid);
+  touchDailyTtl(pipe, key);
   await pipe.exec().catch(() => {});
 }
 
@@ -127,14 +146,33 @@ export async function getTopBooks(limit = 15, _date?: string): Promise<{ book: s
   } catch { return []; }
 }
 
+// PERF FIX: كان يصدر 7 round-trips متسلسلة (await في loop) → ~50ms latency
+// إضافية على كل استدعاء (admin panel + dashboard). الآن: pipeline واحد بسبع
+// HGETALL → round-trip واحد. الترتيب محفوظ لأن exec() تعيد النتائج بنفس
+// ترتيب الأوامر المُضافة.
 export async function getWeeklyStats(): Promise<Record<string, Record<string, number>>> {
   const days: Record<string, Record<string, number>> = {};
-  const now = new Date();
+  const now  = new Date();
+  const keys: string[] = [];
+  const pipe = redis.pipeline();
   for (let i = 6; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const key = d.toISOString().split("T")[0];
-    days[key] = await getDailyStats(key);
+    keys.push(key);
+    pipe.hgetall(`stats:daily:${key}`);
+  }
+  try {
+    const res = await pipe.exec();
+    if (!res) return Object.fromEntries(keys.map((k) => [k, {}]));
+    for (let i = 0; i < keys.length; i++) {
+      const raw = (res[i]?.[1] as Record<string, string> | null) || {};
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(raw)) out[k] = parseInt(v, 10) || 0;
+      days[keys[i]] = out;
+    }
+  } catch {
+    for (const k of keys) days[k] = {};
   }
   return days;
 }

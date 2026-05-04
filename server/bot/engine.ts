@@ -2,7 +2,7 @@ import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
 import { getAutoDisabledSourceDomains } from "./analytics.js";
-import { normalizeArabic, normalizeForCache, urlFilenameRelevance } from "./text.js";
+import { normalizeArabic, normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import {
@@ -18,8 +18,14 @@ const FIRECRAWL_SCRAPE  = "https://api.firecrawl.dev/v1";
 
 // ── Cache helpers ─────────────────────────────
 
+// BUG FIX: كان يستخدم normalizeForCache فقط بينما الـ DB cache (storage.ts)
+// يستخدم canonicalizeForCache (normalize + filler-word removal). نتيجة عدم
+// التوحيد: استعلامات مثل "تحميل أرض زيكولا pdf" و "أرض زيكولا" تُنتِج مفاتيح
+// كاش مختلفة في طبقة الـ Firecrawl (مدفوعة) رغم أنها بحث مكافئ منطقياً.
+// الآن: التوحيد على canonicalizeForCache — مطابق لـ DB cache → cache hits أعلى
+// واستهلاك أقل لاعتمادات Firecrawl.
 function searchCacheKey(query: string): string {
-  return `sc:${normalizeForCache(query)}`;
+  return `sc:${canonicalizeForCache(query)}`;
 }
 
 export async function isFirecrawlDown(): Promise<boolean> {
