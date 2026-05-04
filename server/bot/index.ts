@@ -10,6 +10,7 @@ import { startAlertWatcher }          from "./alertWatcher.js";
 import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import { listPremiumUsers }           from "./userSettings.js";
+import { shutdownNoorBookBrowser }    from "./noorBookResolver.js";
 import type { QueueJob }              from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -64,6 +65,12 @@ export async function gracefulShutdown(timeoutMs = 30_000): Promise<void> {
   } else {
     L.info("bot", "All workers idle");
   }
+
+  // أغلق noor-book Playwright browser لو لسه شغّال (idle close timer قد يكون
+  // بعيد). بدونه، Chromium child process يبقى لحظة قبل ما الـ exit يقتله من
+  // الـ OS، وتظهر warnings عن orphan processes في الـ container logs.
+  try { await shutdownNoorBookBrowser(); }
+  catch (e) { L.warn("bot", "shutdownNoorBookBrowser failed", { err: String(e).slice(0, 80) }); }
 }
 
 // ── startBot ──────────────────────────────────
@@ -260,16 +267,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ── Graceful shutdown ─────────────────────────
-process.on("SIGTERM", async () => {
-  L.info("bot", "SIGTERM received — shutting down...");
-  if (_bot) await _bot.stopPolling().catch(() => {});
-  await redis.quit().catch(() => {});
-  process.exit(0);
-});
-
-process.on("SIGINT", async () => {
-  L.info("bot", "SIGINT received — shutting down...");
-  if (_bot) await _bot.stopPolling().catch(() => {});
-  await redis.quit().catch(() => {});
-  process.exit(0);
-});
+//
+// لا نسجّل process.on("SIGTERM"|"SIGINT") هنا — التعامل مع إشارات النظام
+// مسؤولية server/index.ts فقط، ويستدعي gracefulShutdown() أعلاه قبل
+// process.exit. الـ duplicate handlers السابقة كانت تستدعي process.exit(0)
+// مباشرة بدون انتظار _activeJobs، مما يكسر الـ graceful-shutdown logic
+// لأن Node.js يُشغّل جميع الـ handlers المُسجّلة بالتوازي، وأول واحد يصل
+// لـ process.exit يُنهي العملية.
