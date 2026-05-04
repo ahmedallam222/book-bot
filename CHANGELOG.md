@@ -9,36 +9,35 @@
 
 ## [31.3.8] — 2026-05-04
 
-### ⚡ أداء — in-memory TTL cache لـ `getAutoDisabledSourceDomains`
+### 🛠 صيانة — graceful shutdown يُغلق noor-book Playwright browser
 
-السياق: بعد استبدال KEYS بـ SCAN في 31.3.7، الدالة لا تزال تنفّذ على **كل** طلب بحث (قبل cache check):
-- 1× SCAN + N×HGETALL (في `getSourceStats`)
-- 1× SCAN (في `getManualDisabledSourceDomains`)
+السياق: `noorBookResolver.ts` يُشغّل headless Chromium singleton (~150MB RAM) و يفتحه lazily عند أول طلب لـ noor-book.com. الـ `shutdownNoorBookBrowser()` كان مُعرَّف ومُصدَّر، لكن **ما حدش بيناديه**. على SIGTERM، الـ Chromium child process يبقى لحظة قبل ما الـ process exit يقتله من الـ OS، مما قد يُسبّب:
+- warnings في الـ container logs عن orphan processes.
+- في حالات نادرة، خطأ "browser closed unexpectedly" لو الـ process exit وقع أثناء معالجة تحميل noor-book نشط.
 
-أي ~5+ round-trips على Redis لكل بحث. ولأن الـ disabled-set نادرًا ما يتغيّر (auto-disable يتراكم تدريجيًا، manual toggle يحدث من الـ admin فقط)، نتيجة الدالة قابلة للـ cache بأمان.
-
-التصميم: in-memory cache بـ TTL = 30 ثانية:
-- معظم الـ requests تقرأ الـ Set من الذاكرة مباشرة (≤1µs بدل ~5–15ms).
-- على manual toggle (`setSourceManuallyDisabled`): استدعاء `invalidateDisabledSourcesCache()` فورًا → الـ admin يرى التأثير في البحث التالي بدون انتظار 30s.
-- على auto-disable الناتج عن تراكم failures: على الأكثر بضع failed attempts إضافية في الـ 30s النافذة قبل الحجب الفعلي — مقبول.
-
-Process-local فقط (لا يعمل multi-instance) — لا مشكلة لأن الـ deploy الحالي بـ Docker Compose مع instance واحد للـ bot.
+الإصلاح: استدعاء `shutdownNoorBookBrowser()` في `gracefulShutdown()` بعد ما الـ workers تنتهي. الإغلاق idempotent ولا يُسبّب مشاكل لو الـ browser ما اتفتحش أصلاً (مثلاً deployment ما واجهش طلب noor-book).
 
 ---
 
 ## [31.3.7] — 2026-05-04
 
-### ⚡ أداء — استبدال `redis.keys()` بـ `SCAN` في hot path
+### 🚨 إصلاح حرج — race condition بين SIGTERM handlers يُجهض graceful shutdown
 
-السياق: `engine.searchAllSources()` يستدعي `getAutoDisabledSourceDomains()` على كل طلب بحث (قبل cache check)، والأخيرة كانت تستدعي:
-1. `getSourceStats()` → `redis.keys("stats:source:*")`
-2. `getManualDisabledSourceDomains()` → `redis.keys("src:off:*")`
+السياق: السيرفر كان يُسجّل `process.on("SIGTERM"|"SIGINT")` في موضعَين منفصلَين:
+1. `server/index.ts` — handler الـ graceful (يُغلق HTTP، ينتظر `_activeJobs` تنتهي حتى 30 ثانية، ثم Redis quit، ثم `process.exit(0)`).
+2. `server/bot/index.ts` — handler ثانٍ (يوقف Telegram polling، Redis quit، **ثم `process.exit(0)` فورًا**).
 
-الـ `KEYS` في Redis **يحجب السيرفر بالكامل** أثناء التنفيذ (O(n) على كل المفاتيح بغض النظر عن الـ pattern). على Redis بآلاف المفاتيح (cache entries، daily limits، sessions، premium TTLs) كان كل بحث يضيف 5–50ms latency ويمنع أوامر متزامنة من المعالجة.
+Node.js يُشغّل **كل** الـ handlers المُسجّلة على نفس الإشارة بالتوازي، فأول واحد يصل لـ `process.exit` يُنهي العملية كلها. الـ handler في `bot/index.ts` كان أسرع بكثير (بدون انتظار workers) → كان يقتل الـ workers في وسط معالجة الـ jobs.
 
-الإصلاح: helper `scanKeys()` جديد في `redis.ts` يستخدم `SCAN ... MATCH ... COUNT 200`. الـ SCAN يكرّر بالـ cursor ويرجع batches صغيرة بدون lock — round-trips أكثر لكن لا تؤثر على باقي الأوامر. على المفاتيح الحالية للبوت (~عشرات إلى مئات) الفرق في الـ throughput محسوس فورًا، وعلى مدى زمني أطول يمنع تدهور Redis كلما زاد حجم الـ cache.
+**التأثير على Production:**
+- مستخدم في وسط تحميل كتاب (10s+ على Hindawi/foulabook) → يضرب `docker compose restart bot` → الـ job يُقتل قبل `await failJob` وقبل تحديث `Q_ACTIVE` → الـ job يُعتبر "stuck" ويُمسح في `recoverStuckJobs()` على الـ start التالي → المستخدم لا يحصل على رسالة فشل، فقط silent loss.
+- إحصاءات Telegram: رسائل "⏳جاري التحميل..." تبقى في الـ chat بدون update لأن `editMsg` ما يُنفَّذ.
 
-أُحلّت `redis.keys()` في موضعَين فقط (analytics) — لا callers أخرى.
+**الإصلاح:**
+1. **حذف `process.on("SIGTERM"|"SIGINT")` من `bot/index.ts`** — التعامل مع الإشارات يقع حصرًا على `server/index.ts`. الـ shutdown logic في `server/index.ts` تستدعي `gracefulShutdown()` من `bot/index.ts` (الـ named export)، فلا حاجة لـ duplicate registration.
+2. **إضافة safety-net force-exit لـ SIGINT** في `server/index.ts` — كان موجود لـ SIGTERM فقط (`setTimeout(() => process.exit(1), 60_000)`). الآن مغلَّف في helper `installForceExit(signal)` ومُطبَّق على الإشارتَين.
+
+النتيجة: SIGTERM/SIGINT الآن تنتظر فعليًا 30 ثانية للـ workers قبل الخروج. لو طلب التحميل قعد أكثر من ذلك، يُسجَّل warning واضح وتُسترَد الـ jobs العالقة على الـ start التالي عبر `recoverStuckJobs`.
 
 ---
 
