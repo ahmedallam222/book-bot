@@ -32,14 +32,25 @@ function check(name, cond, want, got) {
   }
 }
 
-// Verbatim copy of pdfValidator.ts:36-45.
+// Verbatim copy of pdfValidator.ts hasUninformativeFilename.
 // If you change one, change the other.
 function hasUninformativeFilename(u) {
   try {
     const filename = decodeURIComponent(
       new URL(u).pathname.split("/").pop()?.split("?")[0] || ""
     ).replace(/\.pdf$/i, "").trim();
-    return filename.length > 0 && /^\d+$/.test(filename);
+    if (filename.length === 0) return false;
+    if (/^\d+$/.test(filename)) return true;
+    if (filename.length <= 3 && /^[a-zA-Z0-9_-]+$/.test(filename)) return true;
+    const hasAlpha = /[a-zA-Z\u0600-\u06FF]/.test(filename);
+    const hasDigit = /\d/.test(filename);
+    const hasSep   = /[_\-\s]/.test(filename);
+    if (hasAlpha && hasDigit && filename.length <= 8 && !hasSep && /^[a-zA-Z0-9]+$/.test(filename)) {
+      return true;
+    }
+    const alphaOnly = filename.replace(/[^a-zA-Z\u0600-\u06FF]/g, "");
+    if (hasAlpha && hasDigit && alphaOnly.length < 4) return true;
+    return false;
   } catch {
     return false;
   }
@@ -53,8 +64,9 @@ const helperCases = [
   ["https://downloads.hindawi.org/books/14168605.pdf", true],
   ["https://downloads.hindawi.org/books/62575295.pdf", true],
   ["https://example.com/files/0123456789.pdf", true],
-  // Mixed alpha+digit, slug-style — informative (false).
-  ["https://archive.org/download/abc-book/abc.pdf", false],
+  // 3-char ASCII filename is opaque (BUG-4 broadened): "abc" carries
+  // no book-identity signal even though the URL path looks descriptive.
+  ["https://archive.org/download/abc-book/abc.pdf", true],
   ["https://bookleaks.com/the-one-thing.pdf", false],
   ["https://example.com/books/Naguib-Mahfouz-1.pdf", false],
   // Edge: empty filename (last path segment empty).
@@ -65,10 +77,24 @@ const helperCases = [
   ["", false],
   // Edge: digit-only WITHOUT .pdf extension (still opaque — same risk).
   ["https://hindawi.org/books/12345", true],
-  // Mixed pattern that's NOT pure digits — has a letter, informative.
-  ["https://hindawi.org/books/12345-abc.pdf", false],
+  // Mixed pattern with very few real letters — opaque (BUG-4 broadened).
+  // 5 digits + only "abc" letters → still no book identity signal.
+  ["https://hindawi.org/books/12345-abc.pdf", true],
   // Query string after .pdf — should be stripped before the digit check.
   ["https://hindawi.org/books/14168605.pdf?ref=foo", true],
+  // FIX-WRONG-FILE (BUG-4): broader opaque shapes from production audit.
+  // Random alnum, no separator, ≤ 8 chars — random ID style.
+  ["https://example.com/files/xK9mP2.pdf", true],
+  // alpha < 4 chars, with digits — TT-79 / AB-3 style.
+  ["https://example.com/files/TT-79.pdf", true],
+  ["https://example.com/files/AB-3.pdf", true],
+  // Very short ASCII filename.
+  ["https://example.com/AB.pdf", true],
+  ["https://example.com/x.pdf", true],
+  // Real Arabic title — informative.
+  ["https://example.com/files/أرض_زيكولا.pdf", false],
+  // Long alpha+digit slug (e.g. "naguib-mahfouz-1") — informative.
+  ["https://example.com/books/naguib-mahfouz-1.pdf", false],
 ];
 
 for (const [u, want] of helperCases) {
@@ -128,7 +154,8 @@ const guardCases = [
     name: "No fileId — both paths block (sendDocument failed)",
     sentFileId: undefined,
     sentFilenameScore: 0.85,
-    pdfUrl: "https://archive.org/download/foo/foo.pdf",
+    // Use a multi-token slug so URL informativeness isn't the gate here.
+    pdfUrl: "https://archive.org/download/the-one-thing/the-one-thing.pdf",
     expectedOpaque: false,
     expectedLegacyCache: false,
     expectedFixedCache: false,
