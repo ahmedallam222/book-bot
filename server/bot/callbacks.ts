@@ -29,9 +29,19 @@ import { handleSummaryCallback } from "./summaryHandler.js";
 // CALLBACK HANDLER
 // ══════════════════════════════════════════════
 
+// dedup TTL: لو الـ callback handler crashed أو العملية اتعلّقت بأي سبب،
+// الـ dedup key تيتمسح أوتوماتيكياً. فيا أغلب callbacks بتخلص في < 5واني،
+// 30 ثانية غطاء أمان واسع. السابق (Set في الذاكرة) كان لو crashed
+// وسط المعالجة الـ entry تفضل عالقة للأبد وتعمل dedup غلط للنقرات اللاحقة.
+const CB_DEDUP_TTL_SEC = 30;
+const cbDedupKey = (userId: string, data: string): string =>
+  `cb:dedup:${userId}:${data.slice(0, 100)}`;
+
 export function registerCallbackHandler(bot: TelegramBot, token: string): void {
-  // منع double-tap — نقر مرتين سريعاً
-  const processingCallbacks = new Set<string>();
+  // منع double-tap — نقر مرتين سريعاً. dedup بـ Redis (SET NX EX)
+  // بدل in-memory Set — (أ) yields auto-cleanup عبر TTL لو الـ handler crashed
+  // أو وسط معالجة، (ب) بيشتغل صح لو تشغيل عدة instances للبوت (لو حدث
+  // لاحقاً)، (ج) ثابتة عبر restarts.
 
   bot.on("callback_query", async (query) => {
     const chatId = query.message?.chat.id;
@@ -39,11 +49,6 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     const userId = String(query.from.id);
     const data   = query.data || "";
 
-    const dedupKey = `${userId}:${data}`;
-    if (processingCallbacks.has(dedupKey)) {
-      await bot.answerCallbackQuery(query.id).catch(() => {});
-      return;
-    }
     const needsDedup = data.startsWith("retry:")         ||
                        data === "cancel_my_jobs"          ||
                        data === "main_menu"               ||
@@ -59,7 +64,22 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
                        data.startsWith("wishlist_add:")   ||
                        data.startsWith("wishlist_del:")   ||
                        data.startsWith("sum:");
-    if (needsDedup) processingCallbacks.add(dedupKey);
+
+    let acquiredDedup = false;
+    if (needsDedup) {
+      try {
+        // SET key value NX EX ttl: يرجّع OK لو اتوضع، null لو في key موجود بالفعل
+        const result = await redis.set(cbDedupKey(userId, data), "1", "EX", CB_DEDUP_TTL_SEC, "NX");
+        acquiredDedup = result === "OK";
+      } catch {
+        // لو Redis باظ، نسمح بالمعالجة (fail-open) — أفضل من حجب كل callbacks
+        acquiredDedup = true;
+      }
+      if (!acquiredDedup) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        return;
+      }
+    }
 
     L.debug("bot", `Callback`, { userId, data: data.slice(0, 50) });
     try {
@@ -423,7 +443,9 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       });
       try { await bot.answerCallbackQuery(query.id, { text: "⚠️ خطأ مؤقت، حاول مرة أخرى" }).catch(() => {}); } catch {}
     } finally {
-      if (needsDedup) processingCallbacks.delete(dedupKey);
+      if (acquiredDedup) {
+        await redis.del(cbDedupKey(userId, data)).catch(() => {});
+      }
     }
   });
 }

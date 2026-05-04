@@ -63,6 +63,7 @@ export interface IStorage {
   getDailyDownloadCount(telegramUserId: string): Promise<number>;
   incrementDailyDownload(telegramUserId: string): Promise<void>;
   canDownload(telegramUserId: string, limit?: number): Promise<boolean>;
+  cleanupOldDailyLimits(retentionDays?: number): Promise<number>;
   getAllUserIds(): Promise<string[]>;
   getUserSearchHistory(telegramUserId: string, limit?: number): Promise<{ query: string; createdAt: Date | null }[]>;
   getAllUsersWithDetails(limit?: number, offset?: number): Promise<{ users: User[]; total: number }>;
@@ -239,6 +240,25 @@ export class DatabaseStorage implements IStorage {
   async canDownload(telegramUserId: string, limit = 6): Promise<boolean> {
     const count = await this.getDailyDownloadCount(telegramUserId);
     return count < limit;
+  }
+
+  /**
+   * حذف صفوف daily_limits الأقدم من retentionDays. الجدول لا يحتاج
+   * أكثر من آخر يوم لتطبيق الحد، لكن نحتفظ بأسبوع للـ debugging
+   * (مثلاً مراجعة سلوك مستخدم خلال آخر 7 أيام).
+   *
+   * يُستدعى من index.ts كل 24 ساعة. بدونه: 10K مستخدم × 365 يوم
+   * = 3.6M صف بعد سنة، كلهم irrelevant بعد 7 أيام.
+   */
+  async cleanupOldDailyLimits(retentionDays = 7): Promise<number> {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - retentionDays);
+    const cutoffStr = cutoff.toISOString().split("T")[0];
+    const result = await db
+      .delete(dailyLimits)
+      .where(sql`${dailyLimits.date} < ${cutoffStr}`)
+      .returning({ id: dailyLimits.id });
+    return result.length;
   }
 
   async getAllUserIds(): Promise<string[]> {

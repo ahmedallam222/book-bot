@@ -127,6 +127,20 @@ export async function startBot(): Promise<void> {
   // تنظيف الملفات المؤقتة كل ساعة
   setInterval(() => cleanOldTempFiles(), 3_600_000).unref();
 
+  // تنظيف صفوف daily_limits الأقدم من 7 أيام كل 24 ساعة
+  // (الجدول كان يكبر للأبد قبل ذلك — 10K مستخدم × 365 يوم بعد سنة)
+  const runDailyLimitsCleanup = async (): Promise<void> => {
+    try {
+      const deleted = await storage.cleanupOldDailyLimits();
+      if (deleted > 0) L.info("cleanup", `Deleted ${deleted} old daily_limits rows`);
+    } catch (e) {
+      L.error("cleanup", "daily_limits cleanup failed", { err: String(e).slice(0, 120) });
+    }
+  };
+  // أول تشغيل بعد دقيقة (نسمح للـ DB connection يستقر) ثم كل 24 ساعة
+  setTimeout(runDailyLimitsCleanup, 60_000).unref();
+  setInterval(runDailyLimitsCleanup, 24 * 3_600_000).unref();
+
   L.info("bot", `${WORKER_COUNT} workers started`);
 
   // تشغيل مراقب التنبيهات
