@@ -59,9 +59,30 @@ export function invalidateRecentSearchesCache(bookName?: string): void {
 export async function searchAllSources(query: string): Promise<BookResult[]> {
   if (!query || query.trim().length < MIN_QUERY_LENGTH) return [];
 
+  // BUG FIX (admin manual-disable): الـ Set هنا الآن يجمع auto-disable +
+  // manual override (`src:off:*`). الكود السابق كان يقرأ auto فقط، فمحاولات
+  // الإيقاف اليدوي من الـ dashboard / Telegram كانت تُكتَب في Redis بدون أي قارئ
+  // (silent feature failure). صار getAutoDisabledSourceDomains مصدر الحقيقة.
+  // CACHE-INVALIDATION FIX: نحسبها قبل الـ cache check عشان نقدر نفلتر النتائج
+  // المخزنة. لو مصدر اتعطّل بعد ما الكاش اتكتب، النتائج الـ stale لازم
+  // تتفلتر — مش يتم تسليمها للمستخدم وتفشل التحقق.
+  const disabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
+  const isDisabled = (url: string) => {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      return disabledDomains.has(host);
+    } catch { return false; }
+  };
+
   // Check cache first
   const cached = await getSearchCacheResults(query);
-  if (cached.length) return cached;
+  if (cached.length) {
+    const filtered = cached.filter((r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || ""));
+    // لو الفلترة سحبت كل النتائج، اعتبرها cache miss — هنعمل بحث جديد.
+    // ولو فضل بعضها، رجِّعها وهات نتائج جديدة بعدين عند الحاجة.
+    if (filtered.length > 0) return filtered;
+    // fall through to fresh search
+  }
 
   // Check if Firecrawl is paused
   try {
@@ -75,11 +96,6 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     }
   } catch {}
 
-  // BUG FIX (admin manual-disable): الـ Set هنا الآن يجمع auto-disable +
-  // manual override (`src:off:*`). الكود السابق كان يقرأ auto فقط، فمحاولات
-  // الإيقاف اليدوي من الـ dashboard / Telegram كانت تُكتَب في Redis بدون أي قارئ
-  // (silent feature failure). صار getAutoDisabledSourceDomains مصدر الحقيقة.
-  const disabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
   const arabicDomains = ARABIC_SOURCES
     .filter((s) => !disabledDomains.has(s.domain))
     .map((s) => s.domain);
