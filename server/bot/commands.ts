@@ -371,7 +371,7 @@ export function registerCommands(
     if (!isAdmin(userId)) return;
     const targetId = (match?.[1] || "").trim();
     if (!isValidId(targetId)) { await bot.sendMessage(chatId, `❌ ID غير صالح: \`${escMd(targetId)}\``, { parse_mode: "Markdown" }).catch(() => {}); return; }
-    await setPremium(targetId, true); L.adminAction(userId, `grant premium ${targetId}`);
+    await setPremium(targetId, true, 0, { by: userId, source: "telegram-cmd" }); L.adminAction(userId, `grant premium ${targetId}`);
     await bot.sendMessage(chatId, `✅ تم منح الـ Premium لـ \`${targetId}\` ⭐`, { parse_mode: "Markdown" }).catch(() => {});
   });
 
@@ -380,7 +380,7 @@ export function registerCommands(
     if (!isAdmin(userId)) return;
     const targetId = (match?.[1] || "").trim();
     if (!isValidId(targetId)) { await bot.sendMessage(chatId, `❌ ID غير صالح: \`${escMd(targetId)}\``, { parse_mode: "Markdown" }).catch(() => {}); return; }
-    await setPremium(targetId, false); L.adminAction(userId, `revoke premium ${targetId}`);
+    await setPremium(targetId, false, 0, { by: userId, source: "telegram-cmd" }); L.adminAction(userId, `revoke premium ${targetId}`);
     await bot.sendMessage(chatId, `✅ تم إلغاء الـ Premium من \`${targetId}\``, { parse_mode: "Markdown" }).catch(() => {});
   });
 
@@ -524,7 +524,12 @@ export function registerMessageHandler(
       const chatId  = msg.chat.id;
       const payload = msg.successful_payment.invoice_payload || "";
       if (payload.startsWith("premium:") && userId) {
-        await setPremium(userId, true, 30);  // 30 يوم اشتراك مدفوع
+        // 30 يوم اشتراك مدفوع — by نفس المستخدم لأن الدفع منه
+        await setPremium(userId, true, 30, {
+          by:     userId,
+          source: "stars-payment",
+          reason: `stars=${msg.successful_payment.total_amount} payload=${payload.slice(0, 40)}`,
+        });
         L.info("payment", "Premium activated via Stars", {
           userId,
           stars: msg.successful_payment.total_amount,
