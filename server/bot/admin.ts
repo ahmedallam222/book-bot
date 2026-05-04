@@ -596,16 +596,20 @@ async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void>
   const buttons: TelegramBot.InlineKeyboardButton[][] = [];
   for (const s of top) {
     const rate = s.total > 0 ? Math.round(s.successRate * 100) : 0;
+    const trust = s.totalWithRejects > 0 ? Math.round(s.trustRate * 100) : rate;
     let badge: string;
     if (s.manuallyDisabled)        badge = "🚫"; // معطّل يدوياً
     else if (s.hardAutoDisabled)   badge = "⛔"; // معطّل تلقائياً (catastrophic)
+    else if (s.trustAutoDisabled)  badge = "🟣"; // معطّل تلقائياً (Mistral trust)
     else if (s.autoDisabled)       badge = "🟠"; // معطّل تلقائياً (low rate)
     else if (rate >= 70)           badge = "🟢";
     else if (rate >= 40)           badge = "🟡";
     else                           badge = "🔴";
     const domain = s.domain.replace(/^www\./, "").slice(0, 22);
     const mistralPart = s.mistralRejected > 0 ? ` (m:${s.mistralRejected})` : "";
-    lines.push(`${badge} _${escMd(domain)}_ — ${rate}% (${s.ok}✅ ${s.fail}❌${mistralPart})`);
+    // اعرض الـ trust rate لما يختلف عن النسبة العادية (يعني Mistral رفض كتير)
+    const trustPart = (s.mistralRejected > 0 && trust !== rate) ? ` · trust:${trust}%` : "";
+    lines.push(`${badge} _${escMd(domain)}_ — ${rate}%${trustPart} (${s.ok}✅ ${s.fail}❌${mistralPart})`);
     const btnText = s.manuallyDisabled
       ? `✅ تفعيل ${domain.slice(0, 16)}`
       : `🚫 تعطيل ${domain.slice(0, 16)}`;
@@ -614,8 +618,8 @@ async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void>
   buttons.push([{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }]);
 
   const legend =
-    "\n\n_شرح:_ 🟢 جيد · 🟡 متوسط · 🔴 ضعيف · 🟠 معطّل تلقائياً · ⛔ catastrophic · 🚫 معطّل يدوياً" +
-    "\n_m: عدد رفض Mistral \\(لا يحتسب فشل مصدر\\)_";
+    "\n\n_شرح:_ 🟢 جيد · 🟡 متوسط · 🔴 ضعيف · 🟠 منخفض النجاح · 🟣 ضعيف الثقة \\(Mistral\\) · ⛔ catastrophic · 🚫 يدوي" +
+    "\n_m: عدد رفض Mistral · trust: ok / \\(ok\\+fail\\+mistral\\)_";
 
   await bot.sendMessage(chatId,
     `📡 *أداء المصادر*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +

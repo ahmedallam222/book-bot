@@ -158,6 +158,23 @@ export const SOURCE_AUTO_DISABLE_HARD_MAX_RATE = parseFloat(
   process.env.SOURCE_AUTO_DISABLE_HARD_MAX_RATE || "0.0",
 );
 
+// ── Trust tier (مرجع لـ Mistral) ──────────────
+// مصادر بترجّع PDFs بنجاح، لكن Mistral بيرفضها (يعني الكتاب الغلط).
+// كأنها fail من منظور المستخدم. مثال: downloads.hindawi.org عنده
+// 13 ok / 34 fail / 29 mistral_rejected. الـ successRate التقليدي = 27%،
+// أعلى من حد الـ tier-1 (15%)، فما يتحجبش. لكن الـ trustRate الحقيقي
+// (ok / total_with_rejects) = 17% وده اللي يمسّ المستخدم فعلاً.
+//
+// نحجب لو: total_with_rejects ≥ 10 محاولات، فيها mistral_rejected
+// حقيقي > 0 (مش كل rejection signal من timeout)، وtrustRate ≤ 20%.
+export const SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS || "10",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_TRUST_MAX_RATE = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_TRUST_MAX_RATE || "0.20",
+);
+
 // ── Trusted PDF domains ───────────────────────
 // Aggregators / mirrors. Anything served from these download/dl paths
 // is assumed to be the requested book — we skip Mistral entirely.
