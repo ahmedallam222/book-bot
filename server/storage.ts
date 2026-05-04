@@ -82,9 +82,19 @@ export class DatabaseStorage implements IStorage {
     const updateSet: Record<string, any> = {};
     if (firstName) updateSet.firstName = firstName;
     if (username)  updateSet.username  = username;
+
+    // لو ما فيش حقول للتحديث (مثلاً نفس الـ id بدون firstName/username)
+    // الكود القديم كان يضيف `telegramId = telegramId` كـ no-op لإرضاء Drizzle.
+    // الأنظف: استخدم onConflictDoNothing ثم SELECT للحصول على الصف.
     if (Object.keys(updateSet).length === 0) {
-      updateSet.telegramId = telegramId;
+      await db
+        .insert(users)
+        .values({ telegramId, firstName: null, username: null, totalSearches: 0, totalDownloads: 0 })
+        .onConflictDoNothing({ target: users.telegramId });
+      const rows = await db.select().from(users).where(eq(users.telegramId, telegramId)).limit(1);
+      return rows[0];
     }
+
     const result = await db
       .insert(users)
       .values({ telegramId, firstName: firstName || null, username: username || null, totalSearches: 0, totalDownloads: 0 })
