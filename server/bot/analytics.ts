@@ -329,23 +329,51 @@ export async function getSourceStats(): Promise<SourceStat[]> {
 }
 
 // PERF: in-memory TTL cache — `getAutoDisabledSourceDomains` تُستدعى من
-// `engine.searchAllSources` على كل طلب بحث (قبل cache check). كانت تنفّذ
-// SCAN + N×HGETALL لكل request — ~5+ round-trips على Redis.
+// `engine.searchAllSources` على كل طلب بحث (قبل cache check)، و `getSourceStats`
+// تُستدعى من `bookRequest.ts` على كل full-search متعدد المصادر للترتيب.
+// كلاهما كان ينفّذ SCAN + N×HGETALL لكل request — ~5+ round-trips على Redis.
 //
-// التصميم: نخزّن الـ Set في الذاكرة لـ 30 ثانية فقط:
+// التصميم: نخزّن النتائج في الذاكرة لـ 30 ثانية فقط:
 //   * auto-disable يتراكم تدريجياً (failures count up)، فـ 30s staleness
 //     مقبولة — على الأكثر بضعة failed attempts إضافية من مصدر جديد قبل
 //     الحجب الفعلي.
+//   * trust-rate ranking في bookRequest.ts بيستخدم نسب تراكمية، فـ 30s
+//     staleness على القيم المتراكمة لا تؤثر فعلياً على الترتيب.
 //   * manual toggle يُلغي الـ cache فوراً عبر invalidateDisabledSourcesCache
-//     في `setSourceManuallyDisabled` ليرى الـ admin النتيجة فوراً.
+//     في `setSourceManuallyDisabled` ليرى الـ admin النتيجة فوراً (الـ
+//     manuallyDisabled flag ضمن SourceStat[]).
+//
+// النسخة الـ uncached (`getSourceStats`) لسه متاحة للـ admin dashboards
+// والـ Telegram /sources panel حيث الـ freshness أهم من الـ latency.
 //
 // Process-local فقط (لا يعمل multi-instance) — لا مشكلة لأن الـ deploy
 // الحالي عبر Docker Compose مع instance واحد للـ bot.
 const DISABLED_CACHE_TTL_MS = 30_000;
+const SOURCE_STATS_CACHE_TTL_MS = 30_000;
 let _disabledCache: { value: Set<string>; expiry: number } | null = null;
+let _sourceStatsCache: { value: SourceStat[]; expiry: number } | null = null;
 
 export function invalidateDisabledSourcesCache(): void {
   _disabledCache = null;
+  // الـ source-stats cache بيشيل الـ manuallyDisabled flag — ندبس admin toggle
+  // يلتقط فوراً في الـ admin views اللي تستخدم النسخة المعتمد عليها.
+  _sourceStatsCache = null;
+}
+
+/**
+ * Same as `getSourceStats()` but with a process-local 30s TTL cache.
+ * Use this in hot paths (e.g. `bookRequest.ts` URL ranking) where 30s
+ * staleness on success-rate counters is fully acceptable. The uncached
+ * `getSourceStats()` is preferred for admin dashboards / Telegram
+ * /sources panel where the latest counts matter.
+ */
+export async function getSourceStatsCached(): Promise<SourceStat[]> {
+  if (_sourceStatsCache && Date.now() < _sourceStatsCache.expiry) {
+    return _sourceStatsCache.value;
+  }
+  const stats = await getSourceStats();
+  _sourceStatsCache = { value: stats, expiry: Date.now() + SOURCE_STATS_CACHE_TTL_MS };
+  return stats;
 }
 
 // Combines auto-disable (both tiers) + manual override. This is the
@@ -354,8 +382,10 @@ export async function getAutoDisabledSourceDomains(): Promise<Set<string>> {
   if (_disabledCache && Date.now() < _disabledCache.expiry) {
     return _disabledCache.value;
   }
+  // نستخدم النسخة الـ cached من getSourceStats — لو الـ cache دافي،
+  // الـ getAutoDisabledSourceDomains cache miss يخلص بدون أي Redis ops.
   const [stats, manualOff] = await Promise.all([
-    getSourceStats(),
+    getSourceStatsCached(),
     getManualDisabledSourceDomains(),
   ]);
   const out = new Set<string>(manualOff);
