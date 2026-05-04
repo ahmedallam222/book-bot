@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Build server bundle
+        run: npm run build
+
+      - name: Run smoke tests
+        # ملفات test-*.mjs في الجذر تستورد .ts مباشرة فتحتاج tsx
+        run: |
+          set -e
+          for t in test-*.mjs; do
+            echo "═══ $t ═══"
+            npx tsx "$t"
+          done
