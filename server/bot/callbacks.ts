@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
-import { BLACKLIST_THRESHOLD, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
+import { PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
 import { isAdmin } from "./guards.js";
 import { getSession, deleteSession, storeRetryKey } from "./session.js";
 import { blacklistUrlDirect } from "./blacklist.js";
@@ -130,7 +130,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     if (data.startsWith("wishlist_add:")) {
       const sessionKey = data.slice(13).trim();
       // FIX: getSession مستورد مباشرة أعلاه — لا dynamic import زائد
-      const entry = getSession(sessionKey);
+      const entry = await getSession(sessionKey);
       if (!entry?.bookName) {
         await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت صلاحية هذا الزر", show_alert: true }).catch(() => {});
         return;
@@ -231,7 +231,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     // ── retry ─────────────────────────────────────
     if (data.startsWith("retry:")) {
       const sessionKey = data.slice(6).trim();
-      const entry      = getSession(sessionKey);
+      const entry      = await getSession(sessionKey);
       if (!entry?.bookName) {
         await bot.sendMessage(chatId,
           `⏰ *انتهت صلاحية هذا الزر*\n\nاكتب اسم الكتاب من جديد وسأبحث عنه.`,
@@ -251,7 +251,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       const withoutPrefix = data.slice(3);
       const lastColon     = withoutPrefix.lastIndexOf(":");
       const sessionKey    = withoutPrefix.slice(0, lastColon);
-      const entry         = getSession(sessionKey);
+      const entry         = await getSession(sessionKey);
       const bookName      = entry?.bookName || "";
       if (!bookName) {
         await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
@@ -269,16 +269,16 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     // ── bad_file ──────────────────────────────────
     if (data.startsWith("bad_file:")) {
       const sessionKey = data.slice(9).trim();
-      const entry      = getSession(sessionKey);
+      const entry      = await getSession(sessionKey);
       if (entry?.url) {
-        await blacklistUrlDirect(entry.url, BLACKLIST_THRESHOLD);
+        await blacklistUrlDirect(entry.url);
         if (entry.bookName) {
           const cachedBook = await storage.getCachedBook(entry.bookName).catch(() => null);
           if (cachedBook) await storage.deleteCachedBook(cachedBook.id).catch(() => {});
           await redis.del(`sc:${normalizeForCache(entry.bookName)}`).catch(() => {});
           L.info("system", `Cache cleared for bad file`, { book: entry.bookName.slice(0, 50) });
         }
-        deleteSession(sessionKey);
+        await deleteSession(sessionKey);
         L.warn("system", `Bad file reported`, { url: entry.url.slice(0, 80), userId });
         const badFileKb = entry.bookName ? {
           inline_keyboard: [[
