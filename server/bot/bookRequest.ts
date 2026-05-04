@@ -23,7 +23,7 @@ import {
   MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
   LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
 } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
+import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import { react } from "./reactions.js";
 import type { QueueJob } from "./types.js";
@@ -593,7 +593,10 @@ async function performFullSearch(
     // trustRate=17% — والـ trustRate هو الإشارة الصحيحة للـ ranker.
     let srcRateMap = new Map<string, number>();
     try {
-      const srcStats = await getSourceStats();
+      // النسخة الـ cached (30s TTL) عشان كل full-search متعدد المصادر
+      // ما يدفعش تكلفة SCAN + N×HGETALL على Redis. الـ trustRate كميّة
+      // تراكمية فالـ staleness بسيطة لا تؤثر على ترتيب URLs.
+      const srcStats = await getSourceStatsCached();
       srcRateMap = new Map(srcStats.map((s) => [s.domain, s.trustRate]));
     } catch {}
 
