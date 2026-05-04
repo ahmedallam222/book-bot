@@ -12,7 +12,7 @@ import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
-import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
+import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued } from "./keyboards.js";
 import { getUserNote, isPremium, computeDailyLimit } from "./userSettings.js";
 import { redis } from "./redis.js";
 import {
@@ -874,26 +874,30 @@ async function performFullSearch(
         globalCapReached,
       });
     }
-    // Paid-book detection: when EVERY candidate failed and the search
-    // returned at least one result classified as paid/protected, tell
-    // the user explicitly. This prevents the silent "no PDF" outcome on
-    // genuinely paid books like تحت مسمى الرجولة from looking like a
-    // bot bug (and stops the user retrying endlessly).
+    // FIX-PAID-BOOK-MSG: لما ما يتسلّمش PDF فعلاً (zero successful deliveries)
+    // نبعت رسالة قاطعة "غير متوفر مجاناً" بدل قائمة معاينة من كتب خطأ.
+    // قائمة المعاينة القديمة كانت بتعرض روابط Hindawi/archive.org لكتب خطأ
+    // (نفس النطاق، عنوان مختلف) — كانت بتربك المستخدم بدل ما تساعده.
+    // النص الموحَّد (`buildPaidBookMessage`) يغطي 3 احتمالات: مدفوع / قراءة فقط
+    // على موقع الناشر / غير منشور رقمياً بعد، فهو مناسب للحالتين.
+    // نحتفظ بفصل العدّاد ليعرف الـ admin هل البحث وجد إشارات paid صريحة أم لا.
     if (paidSignalCount > 0) {
-      L.info("bot", "Sending paid-book message — all candidates failed and paid signals present", {
+      redis.incr("tel:dl:fail_paid_signal").catch(() => {});
+      L.info("bot", "Sending fail message — paid signals present", {
         book: bookName.slice(0, 50),
         paidSignalCount,
       });
-      await bot.sendMessage(chatId, buildPaidBookMessage(bookName), {
-        parse_mode: "Markdown", disable_web_page_preview: true,
-        reply_markup: kbNoResults(bookName),
-      });
     } else {
-      await bot.sendMessage(chatId, buildFailMessage(bookName, results, 0), {
-        parse_mode: "Markdown", disable_web_page_preview: true,
-        reply_markup: kbAfterFail(bookName, results, 0),
+      redis.incr("tel:dl:fail_no_signal").catch(() => {});
+      L.info("bot", "Sending fail message — no paid signals, all candidates failed", {
+        book: bookName.slice(0, 50),
+        results: results.length,
       });
     }
+    await bot.sendMessage(chatId, buildPaidBookMessage(bookName), {
+      parse_mode: "Markdown", disable_web_page_preview: true,
+      reply_markup: kbNoResults(bookName),
+    });
   }
 }
 
