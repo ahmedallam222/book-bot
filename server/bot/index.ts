@@ -23,10 +23,46 @@ let _bot:          TelegramBot | null = null;
 let _botUsername   = "";
 let _botId         = 0;
 let _workerCount   = 0;
+let _activeJobs    = 0;
 let _started       = false;
+let _shuttingDown  = false;
 
 export function activeWorkerCount(): number {
   return _workerCount;
+}
+
+export function isShuttingDown(): boolean {
+  return _shuttingDown;
+}
+
+/**
+ * Graceful shutdown:
+ *   1. مَنع dequeue jobs جديدة
+ *   2. أوقِف Telegram polling
+ *   3. انتظر الـ jobs النشطة حالياً تنتهي (حتى timeoutMs)
+ *   4. أعِد Q_ACTIVE entries إلى الطابور (لو فشلنا في إنهائهم في الوقت)
+ */
+export async function gracefulShutdown(timeoutMs = 30_000): Promise<void> {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  L.info("bot", "Graceful shutdown initiated");
+
+  if (_bot) {
+    try { await _bot.stopPolling({ cancel: true }); }
+    catch (e) { L.warn("bot", "stopPolling failed", { err: String(e).slice(0, 80) }); }
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (_activeJobs > 0 && Date.now() < deadline) {
+    L.info("bot", `Waiting for ${_activeJobs} active jobs to finish...`);
+    await sleep(500);
+  }
+
+  if (_activeJobs > 0) {
+    L.warn("bot", `Shutdown timeout: ${_activeJobs} jobs still active — they will be recovered on next start`);
+  } else {
+    L.info("bot", "All workers idle");
+  }
 }
 
 // ── startBot ──────────────────────────────────
@@ -102,7 +138,7 @@ function startWorker(workerId: number): void {
   _workerCount++;
 
   const loop = async () => {
-    while (true) {
+    while (!_shuttingDown) {
       try {
         const job = await dequeue();
         if (!job) {
@@ -115,24 +151,32 @@ function startWorker(workerId: number): void {
           book: job.bookName.slice(0, 50), userId: job.userId
         });
 
-        const success = await processJobSafe(job);
-        if (success) {
-          await completeJob(job);
-        } else {
-          await failJob(job);
+        _activeJobs++;
+        try {
+          const success = await processJobSafe(job);
+          if (success) {
+            await completeJob(job);
+          } else {
+            await failJob(job);
+          }
+        } finally {
+          _activeJobs--;
         }
       } catch (e) {
         L.error("worker", `Worker ${workerId} loop error`, { err: String(e).slice(0, 100) });
         await sleep(1000);
       }
     }
+    L.info("worker", `Worker ${workerId} exited (shutdown)`);
   };
 
   loop().catch((e) => {
     _workerCount--;
     L.error("worker", `Worker ${workerId} crashed`, { err: String(e).slice(0, 100) });
-    // أعد تشغيل الـ worker بعد 5 ثوانٍ
-    setTimeout(() => startWorker(workerId), 5000);
+    // لا تُعِد التشغيل أثناء الإغلاق — اسمح للـ process بالخروج
+    if (!_shuttingDown) {
+      setTimeout(() => startWorker(workerId), 5000);
+    }
   });
 }
 

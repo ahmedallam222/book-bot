@@ -1,7 +1,9 @@
 import express from "express";
-import { createServer } from "http";
+import { createServer, type Server } from "http";
 import { registerRoutes } from "./routes.js";
 import { L } from "./bot/logger.js";
+import { gracefulShutdown } from "./bot/index.js";
+import { redis } from "./bot/redis.js";
 
 // ══════════════════════════════════════════════
 // ENTRY POINT — Express server + Dashboard + Bot
@@ -10,27 +12,55 @@ import { L } from "./bot/logger.js";
 
 const PORT = parseInt(process.env.PORT || "5000", 10);
 
+let _httpServer: Server | null = null;
+let _shuttingDown = false;
+
 async function main(): Promise<void> {
   const app = express();
-  app.use(express.json());
-  const httpServer = createServer(app);
+  // body limit واضح بدل الافتراضي 100KB — يمنع large payloads على الـ admin endpoints
+  app.use(express.json({ limit: "200kb" }));
+  _httpServer = createServer(app);
 
-  await registerRoutes(httpServer, app);
+  await registerRoutes(_httpServer, app);
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  _httpServer.listen(PORT, "0.0.0.0", () => {
     L.info("server", `Server ready on port ${PORT} — Dashboard: /dashboard`);
   });
 }
 
 // ── Graceful shutdown ─────────────────────────
-process.on("SIGTERM", () => {
-  L.info("server", "SIGTERM received — shutting down...");
-  process.exit(0);
-});
+async function shutdown(signal: string): Promise<void> {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  L.info("server", `${signal} received — shutting down gracefully...`);
 
-process.on("SIGINT", () => {
-  L.info("server", "SIGINT received — shutting down...");
+  // 1. أوقِف قبول طلبات HTTP جديدة
+  if (_httpServer) {
+    _httpServer.close((err) => {
+      if (err) L.warn("server", "http server close error", { err: String(err).slice(0, 80) });
+    });
+  }
+
+  // 2. أوقِف الـ bot polling + انتظر الـ workers ينتهوا
+  await gracefulShutdown(30_000);
+
+  // 3. أغلق اتصال Redis
+  try { await redis.quit(); }
+  catch (e) { L.warn("server", "redis quit error", { err: String(e).slice(0, 80) }); }
+
+  L.info("server", "Shutdown complete");
   process.exit(0);
+}
+
+process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+process.on("SIGINT",  () => { void shutdown("SIGINT");  });
+
+// safety net — if shutdown takes longer than 60s, force-exit
+process.on("SIGTERM", () => {
+  setTimeout(() => {
+    L.error("server", "Forced exit after timeout");
+    process.exit(1);
+  }, 60_000).unref();
 });
 
 process.on("uncaughtException", (err) => {
