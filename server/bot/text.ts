@@ -5,9 +5,16 @@
 /**
  * Markdown v1 escaping — يهرّب أحرف التنسيق الخاصة
  * يدعم: * _ ` [ ]
+ *
+ * BUG FIX: الإصدار السابق كان `/([*_`[]])/g` — قراءته الفعلية:
+ *   character class = [*_`[]   ثم literal ]
+ * أي أنه كان يهرِّب أحد الأحرف فقط لو جاء بعده `]` مباشرة. كل بقية
+ * الحالات كانت تمر دون escape ← Telegram يرفض الرسالة (`can't parse
+ * entities`) والـ `.catch(() => {})` في الـ callers يبتلع الخطأ.
+ * الآن: نهرِّب الأحرف الخمسة بشكل صحيح بـ escape للأقواس داخل الـ class.
  */
 export function escMd(text: string): string {
-  return text.replace(/([*_`[]])/g, "\\$1"); // ✅ FIX: أُضيف ] لإغلاق الـ character class
+  return text.replace(/([_*`\[\]])/g, "\\$1");
 }
 
 /**

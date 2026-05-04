@@ -59,7 +59,7 @@ export async function handleSummaryCallback(
 ): Promise<void> {
   // data shape: "sum:<sessionKey>"
   const sessionKey = data.slice(4).trim();
-  const entry      = getSession(sessionKey);
+  const entry      = await getSession(sessionKey);
   if (!entry?.bookName) {
     await bot.answerCallbackQuery(callbackQueryId, {
       text: "⏰ انتهت صلاحية هذا الزر. اكتب اسم الكتاب من جديد.",
