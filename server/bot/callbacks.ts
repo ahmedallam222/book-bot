@@ -12,13 +12,14 @@ import {
 import { kbAfterFail, kbMain, kbNoResults } from "./keyboards.js";
 import { buildPaidBookMessage } from "./ui.js";
 import { handleBookRequest } from "./bookRequest.js";
+import { invalidateRecentSearchesCache } from "./engine.js";
 import { SOURCES } from "./sources.js";
 import { cancelUserJobs, getQueueStats, getUserPendingCount } from "./queue.js";
 import { isPremium, getUserDailyLimit, getPremiumExpiry } from "./userSettings.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { handleRandomGenreCallback } from "./random.js";
 import { redis } from "./redis.js";
-import { normalizeForCache, normalizeArabic, buildResetTime } from "./text.js";
+import { normalizeArabic, buildResetTime } from "./text.js";
 // FIX: استيراد wishlist من module مستقل — لا global، لا dynamic import زائد
 import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
@@ -304,7 +305,12 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         if (entry.bookName) {
           const cachedBook = await storage.getCachedBook(entry.bookName).catch(() => null);
           if (cachedBook) await storage.deleteCachedBook(cachedBook.id).catch(() => {});
-          await redis.del(`sc:${normalizeForCache(entry.bookName)}`).catch(() => {});
+          // الـ engine يكتب الـ search cache بـ canonicalizeForCache (sc:)؛
+          // الـ del المباشر اللي كان هنا بيستخدم normalizeForCache ومش
+          // بيطابق المفتاح لو الاستعلام الأصلي فيه كلمات حشو ("تحميل ...").
+          // النداء على invalidateRecentSearchesCache يعتمد searchCacheKey
+          // اللي يولّد المفتاح بنفس الطريقة فيمسحه فعلاً.
+          invalidateRecentSearchesCache(entry.bookName);
           L.info("system", `Cache cleared for bad file`, { book: entry.bookName.slice(0, 50) });
         }
         await deleteSession(sessionKey);
