@@ -52,13 +52,27 @@ export class RequestTrace {
   }
 
   phase(name: string, meta?: Record<string, unknown>): void {
-    this.record.phases.push({ phase: name, ts: Date.now(), meta });
+    const now = Date.now();
+    // احسب الفرق من آخر phase (أو من البداية لو هي الأولى) — يلتقط
+    // فترة الـ phase السابقة، فيمكن نتاليه للـ latency histogram.
+    const prevTs = this.record.phases.length > 0
+      ? (this.record.phases[this.record.phases.length - 1] as TracePhase).ts
+      : this.record.startTs;
+    const elapsedMs = now - prevTs;
+    this.record.phases.push({ phase: name, ts: now, meta });
+    // fire-and-forget — ما نأخّرش الـ caller. الـ phase اللي بنسمّيه هنا
+    // هو نهاية المرحلة السابقة، يعني نشحن لاتنسي اسم الـ phase الجديد
+    // لأنه يمثّل الـ checkpoint اللي وصلنا له. اسم الـ bucket: phase اللي
+    // وصلنا له = اللي خلصنا منه (انظر README runbook).
+    recordLatency(name, elapsedMs).catch(() => {});
   }
 
   async finish(outcome: RequestOutcome): Promise<void> {
     this.record.outcome    = outcome;
     this.record.endTs      = Date.now();
     this.record.durationMs = this.record.endTs - this.record.startTs;
+    // طول الـ trace كله (end-to-end)
+    recordLatency("__total__", this.record.durationMs).catch(() => {});
 
     try {
       const json = JSON.stringify(this.record);
@@ -147,4 +161,140 @@ export async function getTrace(id: string): Promise<TraceRecord | null> {
     if (!raw) return null;
     return JSON.parse(raw) as TraceRecord;
   } catch { return null; }
+}
+
+// ══════════════════════════════════════════════
+//  LATENCY HISTOGRAMS
+// ══════════════════════════════════════════════
+//
+// لكل phase بنحفظ histogram (buckets) وعدد العينات + المجموع. الـ
+// buckets ثوابت بالمللي ثانية: 50, 100, 250, 500, 1000, 2000, 5000,
+// 10000, 30000, 60000, +Inf. اختير عشان التغطي مدى الطلبات الواقعية
+// (cache-hit ~50ms حتى download timeout 60s).
+//
+// التخزين في Redis:
+//   - tel:lat:{phase}:hist  → Hash من bucket → count
+//   - tel:lat:{phase}:count → عدد العينات الكلي
+//   - tel:lat:{phase}:sum   → مجموع المللي ثانية (لحساب المتوسط)
+//
+// TTL: 7 أيام لكل المفاتيح. لو الـ phase مش بيتسجّل لها بيانات الـ keys
+// بتختفي تلقائياً.
+//
+// الـ p50/p95/p99 محسوب من الـ histogram (linear interpolation داخل bucket).
+// مش p99 دقيق رقمياً لأنها buckets، لكنه كافي للـ debugging.
+
+const LAT_BUCKETS_MS = [50, 100, 250, 500, 1000, 2000, 5000, 10_000, 30_000, 60_000];
+const LAT_TTL_SEC    = 7 * 86_400;
+const LAT_PHASES_KEY = "tel:lat:phases"; // Set من أسماء كل الـ phases
+
+function bucketLabel(ms: number): string {
+  for (const b of LAT_BUCKETS_MS) {
+    if (ms <= b) return `≤${b}`;
+  }
+  return ">60000";
+}
+
+async function recordLatency(phase: string, elapsedMs: number): Promise<void> {
+  if (elapsedMs < 0 || !Number.isFinite(elapsedMs)) return;
+  // نلتقط max length للأسماء عشان ما يحصلش explosion في keys لو في bug
+  // بيمرر phase names ديناميكية (مش متوقع لكن defense-in-depth).
+  const safePhase = phase.slice(0, 64).replace(/[^a-zA-Z0-9_]/g, "_");
+  const key = `tel:lat:${safePhase}`;
+  try {
+    await redis.pipeline()
+      .sadd(LAT_PHASES_KEY, safePhase)
+      .expire(LAT_PHASES_KEY, LAT_TTL_SEC)
+      .hincrby(`${key}:hist`, bucketLabel(elapsedMs), 1)
+      .expire(`${key}:hist`, LAT_TTL_SEC)
+      .incr(`${key}:count`)
+      .expire(`${key}:count`, LAT_TTL_SEC)
+      .incrby(`${key}:sum`, Math.floor(elapsedMs))
+      .expire(`${key}:sum`, LAT_TTL_SEC)
+      .exec();
+  } catch {
+    // silent: latency histogram ثانوي ما نريدش يعطل الـ caller
+  }
+}
+
+interface PhaseHistogram {
+  phase:   string;
+  count:   number;
+  avgMs:   number;
+  p50Ms:   number;
+  p95Ms:   number;
+  p99Ms:   number;
+  buckets: Record<string, number>;
+}
+
+/**
+ * يقرأ histograms لكل الـ phases. يطلع p50/p95/p99 تقريبية محسوبة من
+ * الـ buckets (linear interpolation داخل الـ bucket).
+ */
+export async function getLatencyHistograms(): Promise<PhaseHistogram[]> {
+  try {
+    const phases = await redis.smembers(LAT_PHASES_KEY);
+    if (!phases.length) return [];
+
+    const out: PhaseHistogram[] = [];
+    for (const phase of phases) {
+      const key = `tel:lat:${phase}`;
+      const [hist, countRaw, sumRaw] = await Promise.all([
+        redis.hgetall(`${key}:hist`),
+        redis.get(`${key}:count`),
+        redis.get(`${key}:sum`),
+      ]);
+      const count = parseInt(countRaw ?? "0", 10) || 0;
+      const sum   = parseInt(sumRaw   ?? "0", 10) || 0;
+      if (count === 0) continue;
+
+      out.push({
+        phase,
+        count,
+        avgMs:   Math.round(sum / count),
+        p50Ms:   estimatePercentile(hist, count, 0.50),
+        p95Ms:   estimatePercentile(hist, count, 0.95),
+        p99Ms:   estimatePercentile(hist, count, 0.99),
+        buckets: parseHistBuckets(hist),
+      });
+    }
+    // ترتيب: __total__ أولاً، ثم باقي الـ phases بعدد العينات نزولاً
+    out.sort((a, b) => {
+      if (a.phase === "__total__") return -1;
+      if (b.phase === "__total__") return 1;
+      return b.count - a.count;
+    });
+    return out;
+  } catch (e) {
+    L.debug("telemetry", `getLatencyHistograms failed: ${String(e).slice(0, 60)}`);
+    return [];
+  }
+}
+
+function parseHistBuckets(hist: Record<string, string>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(hist)) {
+    out[k] = parseInt(v, 10) || 0;
+  }
+  return out;
+}
+
+/**
+ * يحسب percentile تقريبية من الـ histogram. الـ buckets تراكمية بترتيب،
+ * لما تتعدّى الـ count المطلوب نرجع upper bound للـ bucket (تقدير بسيط).
+ */
+function estimatePercentile(
+  hist:    Record<string, string>,
+  total:   number,
+  pct:     number,
+): number {
+  const target = Math.max(1, Math.ceil(total * pct));
+  let cumulative = 0;
+  for (const b of LAT_BUCKETS_MS) {
+    const label = `≤${b}`;
+    cumulative += parseInt(hist[label] ?? "0", 10) || 0;
+    if (cumulative >= target) return b;
+  }
+  // فاضت للـ overflow bucket
+  cumulative += parseInt(hist[">60000"] ?? "0", 10) || 0;
+  return cumulative >= target ? 60_000 : 0;
 }
