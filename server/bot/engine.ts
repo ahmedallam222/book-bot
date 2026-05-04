@@ -75,9 +75,13 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     }
   } catch {}
 
-  const autoDisabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
+  // BUG FIX (admin manual-disable): الـ Set هنا الآن يجمع auto-disable +
+  // manual override (`src:off:*`). الكود السابق كان يقرأ auto فقط، فمحاولات
+  // الإيقاف اليدوي من الـ dashboard / Telegram كانت تُكتَب في Redis بدون أي قارئ
+  // (silent feature failure). صار getAutoDisabledSourceDomains مصدر الحقيقة.
+  const disabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
   const arabicDomains = ARABIC_SOURCES
-    .filter((s) => !autoDisabledDomains.has(s.domain))
+    .filter((s) => !disabledDomains.has(s.domain))
     .map((s) => s.domain);
 
   const results = await unifiedSearch(arabicDomains, query, true);
