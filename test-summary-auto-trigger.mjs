@@ -32,9 +32,9 @@ ok("detectSummaryIntent shipped",       BUNDLE.includes("detectSummaryIntent"));
 ok("runSummaryFlow shipped",            BUNDLE.includes("runSummaryFlow"));
 ok("maybeAutoSummary shipped",          BUNDLE.includes("maybeAutoSummary"));
 ok("wantsSummary field shipped",        BUNDLE.includes("wantsSummary"));
-ok("auto-trigger lock key prefix",      BUNDLE.includes("summary:auto:"));
+ok("auto-trigger lock key prefix",      BUNDLE.includes("summary:lock:"));
 ok("auto-trigger telemetry counter",    BUNDLE.includes("tel:summary:auto_triggered"));
-ok("inflight TTL 90s baked in",         /summary:auto:[^"]*"[^"]*90/.test(BUNDLE) || BUNDLE.includes('"EX",90') || BUNDLE.includes("EX\", 90") || /"EX"\s*,\s*90/.test(BUNDLE));
+ok("inflight TTL 90s baked in",         /summary:lock:[^"]*"[^"]*90/.test(BUNDLE) || BUNDLE.includes('"EX",90') || BUNDLE.includes("EX\", 90") || /"EX"\s*,\s*90/.test(BUNDLE));
 ok("dynamic import to avoid circular dep", /summaryHandler\.js|summaryHandler/.test(BUNDLE));
 
 // ─── G2 — detectSummaryIntent reproduction ──────────────
@@ -116,12 +116,14 @@ function buildLockKey(userId, bookName) {
   // Simplified canonicalize: lowercase + trim + collapse spaces
   // (the runtime uses canonicalizeForCache; we just verify the key
   // prefix/shape, not the exact normalization)
-  return `summary:auto:${userId}:${bookName.trim().toLowerCase()}`;
+  // Bug #18 — unified namespace shared with summaryHandler so auto and
+  // manual paths dedupe each other.
+  return `summary:lock:${userId}:${bookName.trim().toLowerCase()}`;
 }
-ok("lock key format starts with 'summary:auto:'",
-   buildLockKey("u1", "kafka").startsWith("summary:auto:"));
+ok("lock key format starts with 'summary:lock:'",
+   buildLockKey("u1", "kafka").startsWith("summary:lock:"));
 ok("lock key includes userId and book name",
-   buildLockKey("u1", "kafka") === "summary:auto:u1:kafka");
+   buildLockKey("u1", "kafka") === "summary:lock:u1:kafka");
 ok("different users get distinct locks for same book",
    buildLockKey("u1", "kafka") !== buildLockKey("u2", "kafka"));
 
