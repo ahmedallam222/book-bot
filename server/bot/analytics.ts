@@ -6,6 +6,8 @@ import {
   SOURCE_AUTO_DISABLE_HARD_MAX_RATE,
   SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS,
   SOURCE_AUTO_DISABLE_TRUST_MAX_RATE,
+  SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS,
+  SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO,
 } from "./config.js";
 
 // ══════════════════════════════════════════════
@@ -246,6 +248,11 @@ export interface SourceStat {
   // في search-ranker بعرف يحطّ الروابط الغلط من هذا الدومين).
   // Hindawi: 17% trust rate → يتحجب تلقائياً بـ trust tier.
   trustAutoDisabled: boolean;
+  // Mistral-only catastrophic tier: مصدر بـ ok/fail قليلين لكن Mistral
+  // بيرفض بكثافة. الـ TRUST tier محتاج 10 totalWithRejects، فالمصادر
+  // الـ Mistral-only ذات الـ 5-9 rejects تعدّي بدون حجب.
+  // مثال: dn790009.ca.archive.org → 0/0/7 → بيتحجب هنا.
+  mistralOnlyAutoDisabled: boolean;
   manuallyDisabled: boolean;
 }
 
@@ -295,6 +302,12 @@ export async function getSourceStats(): Promise<SourceStat[]> {
       const trustAutoDisabled = totalWithRejects >= SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS &&
         c.mistralRejected > 0 &&
         trustRate <= SOURCE_AUTO_DISABLE_TRUST_MAX_RATE;
+      // Mistral-only catastrophic tier: rejects كتير، نجاح قليل أو معدوم.
+      // مستقل عن totalWithRejects threshold عشان يقدر يمسك الـ subdomains
+      // الـ archive.org الفاشلة قبل ما توصل لـ 10 attempts.
+      const mistralOnlyAutoDisabled =
+        c.mistralRejected >= SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS &&
+        c.mistralRejected >= c.ok * SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO;
       results.push({
         domain,
         ok: c.ok,
@@ -305,9 +318,10 @@ export async function getSourceStats(): Promise<SourceStat[]> {
         successRate,
         trustRate,
         rate: total > 0 ? `${Math.round(successRate * 100)}%` : "0%",
-        autoDisabled: autoDisabled || hardAutoDisabled || trustAutoDisabled,
+        autoDisabled: autoDisabled || hardAutoDisabled || trustAutoDisabled || mistralOnlyAutoDisabled,
         hardAutoDisabled,
         trustAutoDisabled,
+        mistralOnlyAutoDisabled,
         manuallyDisabled: manualOff.has(domain),
       });
     }
@@ -320,6 +334,7 @@ export async function getSourceStats(): Promise<SourceStat[]> {
           total: 0, totalWithRejects: 0,
           successRate: 0, trustRate: 0, rate: "0%",
           autoDisabled: false, hardAutoDisabled: false, trustAutoDisabled: false,
+          mistralOnlyAutoDisabled: false,
           manuallyDisabled: true,
         });
       }
