@@ -15,6 +15,7 @@
 
 import { L } from "../logger.js";
 import { redis } from "../redis.js";
+import { cairoDateString } from "../text.js";
 import type { AIProvider, SummaryRequest, SummaryResponse } from "./types.js";
 
 import { geminiProviders }      from "./gemini.js";
@@ -44,10 +45,10 @@ const ALL_PROVIDERS: AIProvider[] = [
 
 // Redis keys — namespaced under `ai:` so they're easy to inspect /
 // flush as a group.
-const todayKey = (): string => {
-  const d = new Date();
-  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
-};
+// Cairo TZ — يماشي باقي الـ daily counters (downloadCount/summaryUsage/
+// firecrawl credits) عشان الـ AI quota daily-rollover يقع نفس الوقت اللي
+// اليوزر يحس فيه إن "يومه" بيبدأ من جديد.
+const todayKey = (): string => cairoDateString().replace(/-/g, ""); // YYYYMMDD
 const usageKey   = (name: string): string => `ai:usage:${name}:${todayKey()}`;
 const breakerKey = (name: string): string => `ai:breaker:${name}`;
 const failsKey   = (name: string): string => `ai:fails:${name}`;

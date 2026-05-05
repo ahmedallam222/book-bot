@@ -27,7 +27,7 @@ import { storage }                                       from "./storage.js";
 import { L }                                             from "./bot/logger.js";
 import { searchAllSources, getSearchCacheResults }       from "./bot/engine.js";
 import { GENRES }                                        from "./bot/random.js";
-import { normalizeArabic }                               from "./bot/text.js";
+import { normalizeArabic, cairoDateString }              from "./bot/text.js";
 import { GENRE_MAP, SUGGESTIONS }                        from "./bot/suggestions.js";
 import { ipRateLimit }                                   from "./bot/ipRateLimit.js";
 
@@ -351,7 +351,9 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   // يجمع counters التكلفة التقريبية: Firecrawl credits + AI calls per provider.
   // هذه عدّادات تقريبية تُحدَّث في Redis — للقيم الفعلية ارجع لفواتير المزوِّد.
   app.get("/api/admin/system/costs", auth, wrap(async (_req, res) => {
-    const today = new Date().toISOString().slice(0, 10);
+    // Cairo TZ — لازم نقرا بنفس الـ key اللي اتكتب بـ Cairo TZ في
+    // firecrawlParse/registry. لو UTC، ممكن نقرا "اليوم" قبل ما يبدأ فعلاً.
+    const today = cairoDateString();
     const month = today.slice(0, 7);
     // أنماط مفاتيح موجودة فعلاً: counter:firecrawl:credits:{date}, counter:ai:{provider}:{date}
     // PERF: نستخدم scanKeys بدل KEYS — KEYS بتحجب الـ Redis event loop على
