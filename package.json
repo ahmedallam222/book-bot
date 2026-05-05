@@ -8,6 +8,8 @@
     "dev":       "tsx server/index.ts",
     "build":     "tsx script/build.ts",
     "start":     "node dist/index.cjs",
+    "test":      "node script/run-tests.mjs",
+    "typecheck": "tsc --noEmit",
     "db:push":   "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },
