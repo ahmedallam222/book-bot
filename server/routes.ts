@@ -4,7 +4,7 @@ import path from "path";
 import { timingSafeEqual } from "crypto";
 import { fileURLToPath } from "url";
 import { readFileSync, accessSync } from "fs";
-import { redis } from "./bot/redis.js";
+import { redis, scanKeys } from "./bot/redis.js";
 import {
   getDailyStats, getTotalStats, getTopBooks,
   getSourceStats, getWeeklyStats, getFunnelStats,
@@ -354,10 +354,13 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     const today = new Date().toISOString().slice(0, 10);
     const month = today.slice(0, 7);
     // أنماط مفاتيح موجودة فعلاً: counter:firecrawl:credits:{date}, counter:ai:{provider}:{date}
+    // PERF: نستخدم scanKeys بدل KEYS — KEYS بتحجب الـ Redis event loop على
+    // كل المفاتيح في الـ DB (O(n) بغض النظر عن الـ pattern). نفس النمط
+    // اللي اتعمل فيه fix في PR #58/#61 لمسارات analytics.
     const [fcDay, fcMonth, aiKeys] = await Promise.all([
       redis.get(`counter:firecrawl:credits:${today}`).catch(() => null),
-      redis.keys(`counter:firecrawl:credits:${month}*`).catch(() => [] as string[]),
-      redis.keys(`counter:ai:*:${month}*`).catch(() => [] as string[]),
+      scanKeys(`counter:firecrawl:credits:${month}*`).catch(() => [] as string[]),
+      scanKeys(`counter:ai:*:${month}*`).catch(() => [] as string[]),
     ]);
 
     let firecrawlMonth = 0;
