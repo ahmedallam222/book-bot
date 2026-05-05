@@ -11,7 +11,7 @@ import { L } from "./logger.js";
 import { redis } from "./redis.js";
 import { getSession } from "./session.js";
 import { isPremium } from "./userSettings.js";
-import { escMd } from "./text.js";
+import { escMd, canonicalizeForCache } from "./text.js";
 import {
   getBookSummary,
   getCachedSummary,
@@ -26,10 +26,25 @@ import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
 // summary button should hit cache; this prevents re-running the
 // orchestrator concurrently for the same key (which would spend
 // quota twice).
-const INFLIGHT_TTL = 60;
+const INFLIGHT_TTL = 90;
 
-function inflightKey(userId: string, sessionKey: string): string {
-  return `summary:inflight:${userId}:${sessionKey}`;
+// BUG #18 — unified inflight key for both auto-trigger and manual button
+// click. Pre-fix, the manual handler used `summary:inflight:userId:sessionKey`
+// while bookRequest's auto-trigger used `summary:auto:userId:canonicalBook`.
+// If the user typed "لخصلي X" *and* tapped the "📘 ملخص الكتاب" button
+// before the auto-trigger finished, both paths grabbed different keys,
+// passed their NX checks, and ran AI twice — wasting quota and risking
+// global cap exhaustion. Now both paths compute the same key from
+// (userId, canonicalizedBookName), so they dedupe each other.
+//
+// Why canonicalize the book name:
+//   - The bookName surfacing in the auto path comes from `parseBookName`
+//     which strips noise but preserves casing/whitespace differences.
+//   - The session-key path goes through `canonicalizeForCache` to share
+//     storage with the cache layer.
+//   - Canonicalizing here guarantees both paths reduce to the same string.
+function inflightKey(userId: string, bookName: string): string {
+  return `summary:lock:${userId}:${canonicalizeForCache(bookName)}`;
 }
 
 function pickHeader(resp: SummaryResponse): string {
@@ -69,13 +84,15 @@ export async function handleSummaryCallback(
     return;
   }
 
-  // In-flight guard: if the user double-tapped, the second call
+  // In-flight guard: if the user double-tapped, OR the auto-summary
+  // path is already running for the same book (PR G), the second call
   // sees the lock and we just acknowledge without re-running. This
-  // prevents duplicate AI calls (and double quota consumption) when
-  // the user spams the button. The lock is keyed on (userId,
-  // sessionKey) so different users — or the same user requesting
-  // a different delivered book — are unaffected.
-  const lockKey = inflightKey(userId, sessionKey);
+  // prevents duplicate AI calls (and double quota consumption). The
+  // lock is keyed on (userId, canonicalBook) so different users — or
+  // the same user requesting a different delivered book — are
+  // unaffected, and the auto-trigger and manual button click DO
+  // dedupe each other (Bug #18).
+  const lockKey = inflightKey(userId, entry.bookName);
   const locked  = await redis.set(lockKey, "1", "EX", INFLIGHT_TTL, "NX").catch(() => null);
   if (!locked) {
     L.info("summaryHandler", "double-tap blocked", { userId, sessionKey });
