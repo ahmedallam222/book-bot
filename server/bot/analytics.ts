@@ -65,6 +65,30 @@ function todayKey(): string {
 // تحاليل ربع-سنوية ويسمح بالـ idempotent extend عند الكتابة اليومية.
 const DAILY_STATS_TTL_SEC = 90 * 24 * 3600; // 90 days
 
+// Bug #11 — rolling-window source stats. The legacy keys
+// `stats:source:{domain}` had NO TTL: a domain that failed 100 times
+// last month + recovered to 100% ok this month was still tagged as a
+// bad source forever (success rate = 50% all-time → still auto-
+// disabled). The fix shards source stats into daily buckets and reads
+// only the trailing window. After WINDOW_DAYS of healthy traffic, a
+// previously-disabled source naturally re-qualifies.
+const SOURCE_STATS_WINDOW_DAYS = 7;
+const SOURCE_STATS_TTL_SEC     = (SOURCE_STATS_WINDOW_DAYS + 7) * 24 * 3600; // 14 days
+const SOURCE_DOMAINS_INDEX     = "stats:source:domains";
+const sourceDayKey = (domain: string, day: string) =>
+  `stats:source:day:${domain}:${day}`;
+
+function lastNDays(n: number): string[] {
+  const out: string[] = [];
+  const now = new Date();
+  for (let i = 0; i < n; i++) {
+    const d = new Date(now);
+    d.setUTCDate(d.getUTCDate() - i);
+    out.push(d.toISOString().split("T")[0]);
+  }
+  return out;
+}
+
 // EXPIRE هو NX-من-الجانب-المُقدَّم: إعادة استدعائه يومياً تُجدد TTL لـ 90 يوم —
 // آمن لأن الـ EXPIRE تُعيد الـ TTL وليس extend cumulative.
 function touchDailyTtl(pipe: ReturnType<typeof redis.pipeline>, key: string): void {
@@ -96,6 +120,25 @@ export async function trackSearch(userId: string): Promise<void> {
   await pipe.exec().catch(() => {});
 }
 
+// Bug #11 — helper: bump a single source counter into today's bucket
+// and ensure the domain is in the index. Pipelined to keep the cost
+// at one round-trip per attempt.
+function recordSourceCounter(
+  domain: string,
+  field: "ok" | "fail" | "mistral_rejected",
+): Promise<unknown> | undefined {
+  const dc = sanitizeDomainKey(domain);
+  if (!dc) return undefined;
+  const day = todayKey();
+  const dayKey = sourceDayKey(dc, day);
+  return redis.pipeline()
+    .sadd(SOURCE_DOMAINS_INDEX, dc)
+    .hincrby(dayKey, field, 1)
+    .expire(dayKey, SOURCE_STATS_TTL_SEC)
+    .exec()
+    .catch(() => null);
+}
+
 // ── Download tracking ─────────────────────────
 export async function trackDownload(
   userId: string, bookName: string, found: boolean, fromCache: boolean,
@@ -112,21 +155,17 @@ export async function trackDownload(
     pipe.hincrby("stats:total", "downloads", 1);
     // أكثر الكتب تحميلاً
     pipe.zincrby("stats:top_books", 1, bookName.slice(0, 100));
-    // أداء المصادر
-    const dc = sanitizeDomainKey(domain || "");
-    if (dc) pipe.hincrby(`stats:source:${dc}`, "ok", 1);
-  } else if (!found && domain) {
-    const dc = sanitizeDomainKey(domain);
-    if (dc) pipe.hincrby(`stats:source:${dc}`, "fail", 1);
   }
   touchDailyTtl(pipe, dailyKey);
   await pipe.exec().catch(() => {});
+  // Bug #11 — source counters now live in per-day buckets so the
+  // rolling 7-day window can be aggregated on read.
+  if (found && !fromCache && domain) await recordSourceCounter(domain, "ok");
+  else if (!found && domain)         await recordSourceCounter(domain, "fail");
 }
 
 export async function trackSourceAttempt(domain: string, ok: boolean): Promise<void> {
-  const dc = sanitizeDomainKey(domain);
-  if (!dc) return;
-  await redis.hincrby(`stats:source:${dc}`, ok ? "ok" : "fail", 1).catch(() => {});
+  await recordSourceCounter(domain, ok ? "ok" : "fail");
 }
 
 // Mistral rejected the PDF as content-mismatch (wrong book). The source
@@ -134,9 +173,7 @@ export async function trackSourceAttempt(domain: string, ok: boolean): Promise<v
 // this domain. Track separately so the auto-disable logic doesn't punish
 // a working source for the search ranker's choices.
 export async function trackSourceMistralReject(domain: string): Promise<void> {
-  const dc = sanitizeDomainKey(domain);
-  if (!dc) return;
-  await redis.hincrby(`stats:source:${dc}`, "mistral_rejected", 1).catch(() => {});
+  await recordSourceCounter(domain, "mistral_rejected");
 }
 
 // ── Funnel tracking ───────────────────────────
@@ -258,32 +295,45 @@ export interface SourceStat {
 
 export async function getSourceStats(): Promise<SourceStat[]> {
   try {
-    // PERF: استبدال KEYS بـ SCAN — `getSourceStats` تُستدعى من
-    // `getAutoDisabledSourceDomains` وهذي تُستدعى من `engine.searchAllSources`
-    // قبل cache check، أي على كل طلب بحث. على Redis بآلاف المفاتيح كان
-    // الـ KEYS بيضيف ~5–50ms latency لكل بحث ويمنع أوامر أخرى أثناء التنفيذ.
-    const keys = await scanKeys("stats:source:*");
-    // Aggregate by sanitized domain so legacy `www.*` keys merge
-    // with their canonical counterparts. Going forward all writes go
-    // through `sanitizeDomainKey()`; this read-side merge cleans up
-    // historical splits without requiring a migration.
+    // Bug #11 — aggregate the trailing `SOURCE_STATS_WINDOW_DAYS` of
+    // per-day buckets instead of the legacy all-time keys. Domains are
+    // discovered from `SOURCE_DOMAINS_INDEX` (a Set) which avoids the
+    // KEYS/SCAN cost on the Redis main thread. After 7+ days a
+    // previously-disabled domain naturally rolls back to a clean state
+    // — no manual re-enable needed.
+    const domains = await redis.smembers(SOURCE_DOMAINS_INDEX);
+    const days    = lastNDays(SOURCE_STATS_WINDOW_DAYS);
     const agg = new Map<string, { ok: number; fail: number; mistralRejected: number }>();
-    if (keys.length > 0) {
+    if (domains.length > 0) {
       const pipe = redis.pipeline();
-      for (const key of keys) pipe.hgetall(key);
+      const indexed: { domain: string; day: string }[] = [];
+      for (const dom of domains) {
+        for (const day of days) {
+          pipe.hgetall(sourceDayKey(dom, day));
+          indexed.push({ domain: dom, day });
+        }
+      }
       const res = await pipe.exec();
-      for (let i = 0; i < keys.length; i++) {
-        const rawDomain = keys[i].replace("stats:source:", "");
-        const domain = sanitizeDomainKey(rawDomain) || rawDomain;
+      const seen = new Set<string>();
+      for (let i = 0; i < indexed.length; i++) {
+        const { domain } = indexed[i];
         const raw = (res?.[i]?.[1] as Record<string, string> | null) || {};
-        const ok = parseInt(raw.ok || "0", 10);
-        const fail = parseInt(raw.fail || "0", 10);
+        const ok              = parseInt(raw.ok               || "0", 10);
+        const fail            = parseInt(raw.fail             || "0", 10);
         const mistralRejected = parseInt(raw.mistral_rejected || "0", 10);
+        if (ok || fail || mistralRejected) seen.add(domain);
         const cur = agg.get(domain) ?? { ok: 0, fail: 0, mistralRejected: 0 };
-        cur.ok += ok;
-        cur.fail += fail;
+        cur.ok              += ok;
+        cur.fail            += fail;
         cur.mistralRejected += mistralRejected;
         agg.set(domain, cur);
+      }
+      // GC the index: drop domains with no activity in the window so
+      // the read cost stays bounded as old sources retire.
+      const stale = domains.filter((d) => !seen.has(d));
+      if (stale.length > 0) {
+        redis.srem(SOURCE_DOMAINS_INDEX, ...stale).catch(() => {});
+        for (const dom of stale) agg.delete(dom);
       }
     }
     const manualOff = await getManualDisabledSourceDomains();
