@@ -49,6 +49,13 @@ export interface QueueJob {
   startedAt?: number;
   /** message_id لرسالة المستخدم — يُستخدم لإضافة reactions (✅/😢) عند الانتهاء */
   userMessageId?: number;
+  /**
+   * PR G — auto-summary trigger. لو المستخدم كتب "لخصلي" أو "ملخص"
+   * في رسالة الطلب الأصلية، نُفعّل توليد الملخص تلقائيًا بعد إرسال
+   * الكتاب بنجاح. تُحدَّد القيمة في commands.ts قبل enqueue من خلال
+   * detectSummaryIntent() على اسم الكتاب الخام.
+   */
+  wantsSummary?: boolean;
 }
 
 export interface EnqueueResult {
