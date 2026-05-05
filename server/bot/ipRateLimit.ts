@@ -10,18 +10,27 @@ import { L } from "./logger.js";
 // المستخدم المُسيء ما يطيلش فترة الحظر بنفسه (انظر H3 fix).
 // ══════════════════════════════════════════════
 
+// IMPORTANT: `rand` arrives from Node, NOT generated inside Lua.
+// Redis resets the Lua RNG seed before every EVAL for determinism, so
+// `math.random()` would return the SAME value on every invocation.
+// Combined with millisecond-precision `now`, two concurrent requests
+// landing in the same millisecond would produce identical ZSET members,
+// the second ZADD would be a no-op, and the limiter would silently let
+// extra requests through. Generating the random in Node (Math.random,
+// system-seeded) makes every member unique. Same fix as rateLimit.ts:30.
 const slidingWindowGuardLua = `
 local key    = KEYS[1]
 local now    = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local limit  = tonumber(ARGV[3])
+local rand   = ARGV[4]
 local min    = now - window
 redis.call("ZREMRANGEBYSCORE", key, "-inf", min)
 local count = redis.call("ZCARD", key)
 if count >= limit then
   return -1
 end
-redis.call("ZADD", key, now, tostring(now) .. "-" .. tostring(math.random(1, 1000000)))
+redis.call("ZADD", key, now, tostring(now) .. "-" .. rand)
 redis.call("PEXPIRE", key, window)
 return count + 1
 `;
@@ -50,6 +59,7 @@ export function ipRateLimit(opts: IpLimitOpts) {
       result = await (redis as any).eval(
         slidingWindowGuardLua, 1, key,
         String(Date.now()), String(opts.windowMs), String(opts.max),
+        String(Math.floor(Math.random() * 1_000_000)),
       ) as number;
     } catch (e) {
       // fail-open على فشل Redis كي لا نقطع الخدمة بسبب مشكلة اتصال
