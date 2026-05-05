@@ -7,6 +7,48 @@
 
 ---
 
+## [31.4.0] — 2026-05-05
+
+### ✨ ميزة جديدة — مصدر `mktbtypdf.com` (مكتبتي PDF)
+
+أضفنا موقع **مكتبتي PDF** (`mktbtypdf.com`) كمصدر #14 في `ARABIC_SOURCES`.
+الموقع يحتوي على آلاف الكتب والروايات العربية والمترجمة، وهو الأكثر تحديثاً
+في الفترة الأخيرة من بين مصادرنا.
+
+#### كيف يعمل الـ resolver
+
+`mktbtypdf.com/book/<slug>/` صفحة هبوط HTML — زرّ التحميل بيوصّل لـ
+`mktbtypdf.com/download?id=<n>&external=1`، اللي بيعمل:
+
+1. `301 Moved Permanently` لـ `/download/?id=<n>&external=1` (slash إضافي)
+2. `302 Found` لـ `drive.usercontent.google.com/download?id=<gid>&export=download`
+3. الاستجابة النهائية: PDF حقيقي من Google Drive (Content-Type
+   `application/octet-stream`، أول bytes `%PDF-1.x`).
+
+`expandMktbtypdfUrl()` في `download.ts` يفتح صفحة الكتاب مرة واحدة، يستخرج
+الـ id من الـ HTML بـ regex، ويرجع رابط `/download/?id=<n>&external=1`
+(بـ trailing slash لتجنّب الـ 301 hop). الـ `fetch(redirect: "follow")` بيمشي
+مع باقي الـ chain تلقائياً للوصول للـ PDF النهائي.
+
+#### تكامل مع الـ pipeline الموجودة
+
+- `sources.ts:125-133` — مدخلة جديدة في `ARABIC_SOURCES` بأولوية 14.
+- `download.ts:45` — مضاف لـ `SKIP_DIRECT_DOMAINS` لأن صفحات الـ landing
+  لا تخدم PDF مباشرة (Telegram direct-send سيفشل).
+- `download.ts:362-407` — `expandMktbtypdfUrl()` بنفس نمط
+  `expandFoulabookUrl()` (timeout 10s، AbortController، logging).
+- `download.ts:457-467` — wiring في `downloadAndSend` بعد الـ foulabook
+  resolver، قبل blacklist check و pdfValidator.
+
+#### ملاحظة على `sahm-book.com`
+
+تم النظر فيه أيضاً (لكن لم يُضَف) لأن التحميل يمر عبر قناة Telegram داخلية،
+فلا يصلح للاستخراج المباشر بدون خادم Telegram-API client. لو لاحقاً قُرر
+استخدامه كـ "fallback links source"، يمكن إضافته بدون resolver (سيرجع
+صفحات HTML فقط — لن يخدم كـ PDF source).
+
+---
+
 ## [31.3.19] — 2026-05-05
 
 ### 🐛 إصلاح حرج — كتب مجانية كانت تُصنَّف "مدفوعة" خطأً (`classifyAccess` over-matching)
