@@ -78,7 +78,13 @@ function fail(res: Response, msg: string, code = 500): void { res.status(code).j
  */
 function validateNumericId(id: string): boolean {
   // BUG-3 FIX: {5,12} → {5,15} لدعم معرّفات Telegram الجديدة (13-15 رقم)
-  return /^\d{5,15}$/.test(id) && !isNaN(Number(id));
+  // FIX-AUDIT: استخدام Number.isSafeInteger بدل isNaN — كان `isNaN(Number(id))`
+  // يقبل قيم تتجاوز Number.MAX_SAFE_INTEGER (2^53-1) ويحوّلها بصمت لأقرب double،
+  // بما يخلّ بدقة أي مقارنة لاحقة. Telegram IDs الحالية أصغر بكثير من الحد الآمن
+  // لكن الشرط الجديد يقفل الزاوية المظلمة هذه نهائياً.
+  if (!/^\d{5,15}$/.test(id)) return false;
+  const n = Number(id);
+  return Number.isSafeInteger(n) && n > 0;
 }
 
 function requireNumericId(req: Request, res: Response): string | null {
@@ -663,31 +669,10 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     })));
   });
 
-  // ── POST /api/broadcast (من dashboard) ──────────────────
-  // listener للـ broadcast event
-  process.on("dashboard:broadcast" as any, async ({ message, parse_mode }: { message: string; parse_mode: string }) => {
-    try {
-      const allIds = await storage.getAllUserIds().catch(() => [] as string[]);
-      L.info("broadcast", `Sending to ${allIds.length} users`);
-      let sent = 0, failed = 0;
-      for (const userId of allIds) {
-        try {
-          // استخدم botInstance من index.ts عبر global
-          const botGlobal = (global as any).__botInstance;
-          if (botGlobal) {
-            await botGlobal.sendMessage(Number(userId), message, { parse_mode });
-            sent++;
-          }
-          // rate limit: 30 رسالة/ثانية لـ Telegram API
-          if (sent % 30 === 0) await new Promise(r => setTimeout(r, 1000));
-        } catch { failed++; }
-      }
-      L.info("broadcast", `Done: ${sent} sent, ${failed} failed`);
-    } catch (e) {
-      L.error("broadcast", "broadcast error", { err: String(e).slice(0, 100) });
-    }
-  });
-
+  // البث الفعلي يُعالج في server/bot/index.ts عبر `broadcastToAll(message,
+  // parse_mode, target)` المُسجَّل كـ listener لنفس event. كان يوجد listener
+  // ثانٍ هنا يستدعي `getAllUserIds()` مباشرة ويتجاهل الـ target — وكان ينتج
+  // عنه إرسال مزدوج وتجاهل الفلترة (premium/active7). تمت إزالته.
 }
 
 // ── Helpers للـ public API ────────────────────────────────────
