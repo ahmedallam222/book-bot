@@ -7,6 +7,43 @@
 
 ---
 
+## [31.3.16] — 2026-05-05
+
+### 🐛 إصلاح — `summaryHandler` بيستهلك من حد الملخصات اليومي حتى لو الـ AI فشل
+
+في `server/bot/summaryHandler.ts:110` نداء `checkAndConsumeUsage(userId, premium)` بيـ increment الـ counter اليومي للمستخدم (`summary:usage:<uid>:<date>`) **قبل** أي محاولة لتوليد الملخص.
+
+بعد كده الـ orchestrator `getBookSummary()` بيشتغل، وممكن يـ throw في عدة حالات:
+
+1. **`GlobalSummaryLimitError`** — البوت وصل للحد اليومي العام للـ AI، ومفيش Wikipedia extract يصلح كـ fallback.
+2. **All providers exhausted** — Gemini/Groq/Cerebras/Cloudflare كلهم رجعوا أخطاء (rate limit upstream، timeouts، إلخ).
+3. **Cap-hit + no Wikipedia** — العداد العالمي اتخطى لكن `wiki?.extract` قصير أو غير موجود.
+
+في كل الحالات دي، الـ catch في `summaryHandler` بيعرض رسالة خطأ للمستخدم — لكن الـ counter اليومي بتاعه فضل مرتفع. مستخدم بـ 4/5 ملخصات مستهلكة بيدوّر على ملخص → الـ AI يفشل (لسبب خارج عنه) → بيشوف رسالة خطأ → يحاول كتاب تاني → يلاقي `وصلت إلى حد الملخصات اليومي`. بيدفع بكوتاه على شيء مفيش له لازمة.
+
+**التأثير:** المستخدمون مش premium بيخسروا حصتهم اليومية بسبب أخطاء البنية التحتية. أيام شغل الـ AI providers بتكون متذبذبة (rate limits متفاوتة، quota متراكمة من users تانيين)، الـ users بيشتكوا "ما بقدرش أعمل ملخص".
+
+**الإصلاح:**
+
+1. تصدير دالة جديدة `refundUserSummaryUsage(userId, premium)` في `summary.ts` بتعمل `DECR` على نفس الـ key. `premium` و `SUMMARY_DAILY_LIMIT_FREE <= 0` بتعمل early-return عشان no-op على الـ users اللي مش بيتم احتساب كوتا عليهم.
+
+2. في `summaryHandler.ts`، رفع `premium` و `usageConsumed` لخارج الـ try block عشان يكونوا مرئيين في الـ catch. الـ flag `usageConsumed` بيتعمل `true` بس لما `checkAndConsumeUsage` يرجع `blocked=false` (يعني فعلاً اتـ-incremented).
+
+3. الـ catch بقى ينده `refundUserSummaryUsage(userId, premium)` (fire-and-forget مع `.catch()`) قبل ما يعرض رسالة الخطأ. لو `usageConsumed=false` (مثل: cache hit، أو blocked مسبقاً)، مفيش refund.
+
+ملحوظة: الـ wikipedia-fallback (سطور `summary.ts:267-282`) بيعتبر **نجاح** ويرجع `SummaryResponse` — المستخدم بيستلم محتوى مفيد فعلاً، فبيتم احتسابه (مفيش refund). المهم إن الـ refund بيحصل بس على المسارات اللي بتـ throw فعلاً.
+
+**اختبار:** إضافة `test-summary-refund.mjs` (12 probes) بتـ verify:
+- الـ helper موجود ومُصدَّر بالتوقيع الصحيح
+- early-return للـ premium/disabled-cap
+- الـ handler بيـ import الـ helper
+- الـ flags `premium` و `usageConsumed` مرفوعين خارج الـ try
+- `usageConsumed` بيتعمل `true` بس لما الـ consume ينجح (`!usage.blocked`)
+- الـ catch بينده الـ refund بـ fire-and-forget pattern
+- الـ refund داخل الـ catch (مش الـ finally، عشان ما يـ refund بعد المسار الناجح)
+
+---
+
 ## [31.3.15] — 2026-05-05
 
 ### 🐛 إصلاح حرج (security/limit-bypass) — `ipRateLimit` كان يولّد member متطابق في كل EVAL
