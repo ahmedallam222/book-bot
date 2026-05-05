@@ -25,9 +25,21 @@ export const TIMEOUT_FC_SEARCH        = 30_000;
 export const TIMEOUT_FC_SCRAPE        = 20_000;
 export const TIMEOUT_MISTRAL          = 15_000;
 
-// ── Cache TTLs (ms) ───────────────────────────
-export const SEARCH_CACHE_TTL_HIT     = 3_600_000;  // 1 hour
-export const SEARCH_CACHE_TTL_MISS    = 300_000;    // 5 minutes
+// ── Cache TTLs (seconds; consumed by redis.setex) ──
+// BUG-FIX: قبل كده كانت القيم بالـ milliseconds (3_600_000، 300_000)
+// لكن `engine.ts` بيمرّرها لـ `redis.setex(key, seconds, value)` —
+// اللي بيقبل ثواني فقط (شاهد ioredis RedisCommander.d.ts). يعني الـ
+// hit cache كان بيعيش 3,600,000 ثانية ≈ 41 يوم، والـ miss cache
+// 300,000 ثانية ≈ 3.5 يوم — بدل "1 ساعة" و "5 دقائق" المُذكورة في
+// التعليق. ده كان بيخلي:
+//   - استعلام رجع بدون نتايج يفضل cached "no results" لمدة 3.5 يوم،
+//     فيُحجَب البحث الحقيقي حتى لما Firecrawl يبقى عنده الكتاب فعلاً.
+//   - استعلام رجع نتايج يفضل cached للأبد تقريباً، فالـ blacklist
+//     evolution والـ source disable changes بياخد وقت طويل عشان
+//     يـ propagate.
+// الآن: القيم بالثواني فعلاً، مطابقة لاستخدام `setex`.
+export const SEARCH_CACHE_TTL_HIT     = 3_600;      // 1 hour
+export const SEARCH_CACHE_TTL_MISS    = 300;        // 5 minutes
 
 // ── Rate limits ───────────────────────────────
 export const FC_RATE_LIMITED_TTL_SEC  = 60;
