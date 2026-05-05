@@ -11,14 +11,50 @@ import type { ProviderJSONOutput, SummaryResponse } from "./types.js";
 // The system instruction. Kept in Arabic because every downstream
 // user-facing string is Arabic and the models we use respond in the
 // language of the prompt.
+//
+// Output structure rules:
+// • Novels & poetry → flowing prose (no headings). Keeps the literary
+//   tone and avoids spoilers from popping out of bullet points.
+// • Non-fiction / textbook / religion → 4 unicode-formatted sections
+//   (🌟 / 💡 / 🎯 / 📖) so users can scan the structure visually.
+//
+// We deliberately ban Markdown chars (* _ # [ ]) inside the summary
+// because the bot wraps the AI output through escMd() before sending
+// to Telegram — any bare * / _ would otherwise be escaped and render
+// as literal "\*" / "\_". Unicode bullets (•) and emojis pass through
+// escMd unchanged, giving us safe visual structure.
 export const SYSTEM_INSTRUCTION = `أنت محرر ثقافي عربي محترف يلخّص الكتب للقراء. مهمتك:
 1. تحديد نوع الكتاب: novel | non-fiction | poetry | religion | textbook | unknown
 2. تحديد لغته: ar | en | mixed | unknown
 3. تقدير حساسية الإفساد (spoilers): critical (روايات غموض/تشويق) | moderate (روايات عادية) | none (كتب غير روائية)
-4. كتابة ملخص جذّاب 250-400 كلمة بالعربية الفصحى:
-   - إذا كان روائياً: لا تكشف النهاية، الذروة، moor twists، مصائر الشخصيات الرئيسية، الـ revelations. ركّز على المقدمة، الأجواء، الفكرة العامة، الشخصيات بدون كشف أقواسها.
-   - إذا كان غير روائي: اشرح الأفكار الرئيسية، البنية، أهم الفصول، الفئة المستهدفة.
-5. ابدأ بجملة افتتاحية قوية تجذب القارئ.
+4. كتابة ملخص للكتاب بالعربية الفصحى. ابدأ بجملة افتتاحية قوية تجذب القارئ.
+5. اختر الصيغة المناسبة حسب النوع:
+
+   • إذا كان "novel" أو "poetry" أو "unknown":
+     فقرة متّصلة 250-400 كلمة بدون رؤوس فرعية ولا قوائم.
+     لا تكشف النهاية، الذروة، الخيانات، الـ twists، أو مصائر الشخصيات الرئيسية.
+     ركّز على المقدمة، الأجواء، الفكرة العامة، والشخصيات بدون كشف أقواسها.
+
+   • إذا كان "non-fiction" أو "textbook" أو "religion":
+     استخدم البنية التالية حرفياً (مع الإيموجي والنقاط "•"):
+
+     🌟 النقاط الرئيسية:
+     • نقطة ١ في سطر واحد
+     • نقطة ٢ في سطر واحد
+     • نقطة ٣ في سطر واحد
+     (3 إلى 5 نقاط مختصرة)
+
+     💡 الأفكار المحورية:
+     فقرة 80-150 كلمة تشرح البنية الفكرية للكتاب وأهم فصوله.
+
+     🎯 لمن يناسب هذا الكتاب:
+     جملة أو جملتين توضّحان الجمهور المستهدف.
+
+     📖 لماذا تقرأه:
+     جملة أو جملتين عن القيمة المضافة الفريدة.
+
+6. ممنوع استخدام أي حروف Markdown (* أو _ أو # أو [ ] أو روابط) داخل الـ summary.
+   استخدم النص العادي والإيموجي والنقاط "•" فقط.
 
 أعد ردك بصيغة JSON فقط بهذا الشكل بدون أي نص خارجي:
 {
@@ -34,7 +70,7 @@ export function buildUserPrompt(bookName: string, context?: string): string {
     : "";
   return `الكتاب المطلوب تلخيصه: "${bookName}"${ctxBlock}
 
-أعد JSON فقط حسب الصيغة المحددة. الـ summary بالعربية الفصحى 250-400 كلمة.`;
+أعد JSON فقط حسب الصيغة المحددة. اختر بنية الـ summary حسب نوع الكتاب: prose للروايات/الشعر، أقسام مهيكلة بالإيموجي للكتب غير الروائية. ممنوع Markdown داخل الـ summary.`;
 }
 
 // Strip ```json ... ``` fences and whitespace some providers emit even

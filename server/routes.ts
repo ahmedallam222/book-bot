@@ -8,8 +8,9 @@ import { redis } from "./bot/redis.js";
 import {
   getDailyStats, getTotalStats, getTopBooks,
   getSourceStats, getWeeklyStats, getFunnelStats,
+  setSourceManuallyDisabled, sanitizeDomainKey,
 } from "./bot/analytics.js";
-import { getRecentTraces, getTrace } from "./bot/telemetry.js";
+import { getRecentTraces, getTrace, getLatencyHistograms } from "./bot/telemetry.js";
 import { getPdfValidationStats } from "./bot/pdfValidator.js";
 import {
   getQueueStats, getDLQJobs, clearDLQ, clearQueues,
@@ -17,6 +18,7 @@ import {
 import {
   isPremium, setPremium, listPremiumUsers, premiumCount,
   getUserDailyLimit, setUserDailyLimit, resetUserDailyLimit,
+  getPremiumAudit,
 } from "./bot/userSettings.js";
 import { bannedList, banUser, unbanUser, bannedCount } from "./bot/guards.js";
 import { blacklistStats, clearBlacklist }               from "./bot/blacklist.js";
@@ -27,22 +29,21 @@ import { searchAllSources, getSearchCacheResults }       from "./bot/engine.js";
 import { GENRES }                                        from "./bot/random.js";
 import { normalizeArabic }                               from "./bot/text.js";
 import { GENRE_MAP, SUGGESTIONS }                        from "./bot/suggestions.js";
+import { ipRateLimit }                                   from "./bot/ipRateLimit.js";
 
 // ── Config ────────────────────────────────────────────────────
-// ADMIN_IDS للـ dashboard auth fallback — يجب أن تطابق سلوك bot/config.ts تماماً:
-// الأدمن الرئيسي "5469997406" مُضمَّن دائماً + أي IDs من الـ env
-// لو استخدمنا (env || default) → عند ضبط env يُستبعد الأدمن الرئيسي
-// BUG-3 FIX: كان {5,12} → لا يدعم معرّفات Telegram الجديدة (13-15 رقم)
-// يجب أن يتطابق مع config.ts الذي يستخدم {5,15}
-const _envAdminIds = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim()).filter(s => /^\d{5,15}$/.test(s));
-const ADMIN_IDS = ["5469997406", ..._envAdminIds.filter(id => id !== "5469997406")];
 const MAINTENANCE_KEY = "flag:maintenance";   // ← matches bot/config.ts
 
 // ── Auth ──────────────────────────────────────────────────────
-// SECURITY: نستخدم DASHBOARD_SECRET منفصل عن Admin Telegram IDs
-// Telegram IDs رقمية وقابلة للتخمين — Dashboard secret مستقل وأكثر أماناً
-// لو لم يُضبط DASHBOARD_SECRET، نرجع للـ ADMIN_IDS كـ fallback (backward compat)
+// SECURITY: الـ dashboard auth يعتمد على DASHBOARD_SECRET فقط — لا fallback
+// إلى Telegram numeric IDs. الـ IDs مكشوفة في الكود/اللوجز/الجروبات
+// وقابلة للتخمين — استخدامها كـ secret كان ثغرة كبيرة.
 const DASHBOARD_SECRET = process.env.DASHBOARD_SECRET?.trim();
+
+if (!DASHBOARD_SECRET) {
+  // fail-closed: نُسجِّل تحذيراً صريحاً عند الإقلاع بدل قبول auth غير آمن
+  L.warn("routes", "DASHBOARD_SECRET is not set — admin dashboard API will reject all requests until configured");
+}
 
 /** مقارنة بوقت ثابت (constant-time) — تمنع timing attacks على الـ secret */
 function safeEqual(a: string, b: string): boolean {
@@ -55,11 +56,15 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 function auth(req: Request, res: Response, next: NextFunction): void {
+  if (!DASHBOARD_SECRET) {
+    res.status(503).json({ ok: false, error: "Dashboard auth not configured (set DASHBOARD_SECRET)" });
+    return;
+  }
   const token = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
-  const valid = DASHBOARD_SECRET
-    ? safeEqual(token, DASHBOARD_SECRET)
-    : ADMIN_IDS.includes(token);
-  if (!valid) { res.status(401).json({ ok: false, error: "Unauthorized" }); return; }
+  if (!token || !safeEqual(token, DASHBOARD_SECRET)) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return;
+  }
   next();
 }
 
@@ -114,25 +119,29 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   });
 
   // ── CORS للـ mobile app (public endpoints) ───────────────────
-  // Public API يسمح لأي origin — Mobile app من أي domain
-  app.use("/api/search", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
+  // قابل للضبط عبر env. الافتراضي "*" للتوافق مع تطبيقات mobile قائمة.
+  // الحماية الفعلية ضد abuse تأتي من ipRateLimit أدناه.
+  const PUBLIC_API_ORIGIN = process.env.PUBLIC_API_ORIGIN || "*";
+  const publicCors = (_req: Request, res: Response, next: NextFunction): void => {
+    res.header("Access-Control-Allow-Origin",  PUBLIC_API_ORIGIN);
     res.header("Access-Control-Allow-Headers", "Content-Type");
     res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
     next();
-  });
-  app.use("/api/random", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
-    res.header("Access-Control-Allow-Headers", "Content-Type");
-    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
-    next();
-  });
-  app.use("/api/top-books", (_req, res, next) => {
-    res.header("Access-Control-Allow-Origin",  "*");
-    res.header("Access-Control-Allow-Headers", "Content-Type");
-    res.header("Access-Control-Allow-Methods", "GET,OPTIONS");
-    next();
-  });
+  };
+  app.use("/api/search",    publicCors);
+  app.use("/api/random",    publicCors);
+  app.use("/api/top-books", publicCors);
+  app.use("/api/genres",    publicCors);
+
+  // ── Per-IP rate limits على الـ public APIs ───────────────────
+  // searchAllSources() تستهلك Firecrawl quota → الـ endpoint كان قابلاً
+  // للاستنزاف بدقائق بدون حماية. الحدود محسوبة لحالة الاستخدام العادية:
+  //   /api/search    →  20 طلب/دقيقة (مطابق للـ user search rate limit)
+  //   /api/random    →  60 طلب/دقيقة (cheap، بدون Firecrawl)
+  //   /api/top-books → 120 طلب/دقيقة (Redis read فقط)
+  app.use("/api/search",    ipRateLimit({ prefix: "search",    max: 20,  windowMs: 60_000 }));
+  app.use("/api/random",    ipRateLimit({ prefix: "random",    max: 60,  windowMs: 60_000 }));
+  app.use("/api/top-books", ipRateLimit({ prefix: "top-books", max: 120, windowMs: 60_000 }));
 
   // ── CORS for dashboard ────────────────────────────────────
   app.use("/api/admin", (req, res, next) => {
@@ -143,6 +152,12 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     if (req.method === "OPTIONS") { res.sendStatus(204); return; }
     next();
   });
+
+  // ── Brute-force protection للـ admin endpoints ───────────────
+  // 60 طلب/دقيقة لكل IP — كافي للـ dashboard العادي (overview واحد كل
+  // 5 ثواني = 12/دقيقة). يحمي ضد brute-force على DASHBOARD_SECRET لو
+  // اتسرّب IP السيرفر. fail-open على Redis errors.
+  app.use("/api/admin", ipRateLimit({ prefix: "admin", max: 60, windowMs: 60_000 }));
 
   // ── Start Bot (fire-and-forget) ───────────────────────────
   startBot().catch(e => L.error("server", "bot start error", { e: String(e) }));
@@ -216,10 +231,22 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   app.get("/api/admin/users/premium",  auth, wrap(async (_req, res) => ok(res, await listPremiumUsers())));
   app.post("/api/admin/users/:id/premium", auth, wrap(async (req, res) => {
     const id = requireNumericId(req, res); if (!id) return;
-    const { enable } = req.body as { enable: boolean };
-    await setPremium(id, enable);
-    L.adminAction("dashboard", `${enable ? "grant" : "revoke"} premium ${id}`);
-    ok(res, { done: true, enable });
+    // days اختياري: لو محدد ورقم موجب → اشتراك مدفوع بمدة محددة.
+    // لو غير محدد أو 0 → admin manual grant بلا انتهاء.
+    // reason اختياري — يُسجَّل في audit log عشان نعرف ليه الأدمن منح/سحب
+    const body = req.body as { enable: boolean; days?: number; reason?: string };
+    const days = Number.isFinite(body.days) && (body.days as number) > 0 ? Math.floor(body.days as number) : 0;
+    const reason = (body.reason ?? "").toString().slice(0, 200) || undefined;
+    await setPremium(id, body.enable, days, { by: "dashboard", source: "dashboard", reason });
+    L.adminAction("dashboard", `${body.enable ? "grant" : "revoke"} premium ${id}${days ? ` (${days}d)` : ""}${reason ? ` — ${reason}` : ""}`);
+    ok(res, { done: true, enable: body.enable, days });
+  }));
+
+  // Audit log للـ premium — يطبع آخر 50 حركة (grant/revoke) لمستخدم
+  app.get("/api/admin/users/:id/premium/audit", auth, wrap(async (req, res) => {
+    const id = requireNumericId(req, res); if (!id) return;
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
+    ok(res, await getPremiumAudit(id, limit));
   }));
 
   // User limit
@@ -251,8 +278,16 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   }));
   app.put("/api/admin/maintenance",  auth, wrap(async (req, res) => {
     const { active } = req.body as { active: boolean };
+    // FIX (maintenance-announce): نقرأ الحالة قبل التغيير عشان نعرف لو حصل
+    // transition من ON→OFF بالظبط — مش نبعت إعلان لو الـ admin بيتأكد بس
+    // (OFF→OFF) أو لو فعّل الصيانة (any→ON).
+    const wasActive = (await redis.get(MAINTENANCE_KEY).catch(() => null)) === "1";
     active ? await redis.set(MAINTENANCE_KEY, "1") : await redis.del(MAINTENANCE_KEY);
     L.adminAction("dashboard", `maintenance ${active ? "ON" : "OFF"}`);
+    if (wasActive && !active) {
+      // emit event — listener في bot/index.ts يبعت الإعلان فعلياً
+      (process as NodeJS.EventEmitter).emit("bot:maintenance_ended");
+    }
     ok(res, { active });
   }));
 
@@ -285,11 +320,18 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     ok(res, trace);
   }));
 
+  // GET /api/admin/telemetry/latency-hist
+  // يطبع histogram عينة لكل phase (count/avg/p50/p95/p99 + buckets)
+  // يُساعد في كشف الانحرافات: لو phase معيّن ارتفع p95 فجأة ده مؤشّر حقيقي
+  app.get("/api/admin/telemetry/latency-hist", auth, wrap(async (_req, res) => {
+    ok(res, await getLatencyHistograms());
+  }));
+
   // ── /random genre stats (للـ dashboard) ──────────────────────
   // يقرأ ZREVRANGE stats:random:genres من Redis
   app.get("/api/admin/stats/random-genres", auth, wrap(async (_req, res) => {
     try {
-      const raw: string[] = await (redis as any).zrevrange("stats:random:genres", 0, -1, "WITHSCORES");
+      const raw = await redis.zrevrange("stats:random:genres", 0, -1, "WITHSCORES");
       const genres: {genre:string;count:number}[] = [];
       for (let i = 0; i < raw.length; i += 2) {
         genres.push({ genre: String(raw[i]), count: parseInt(String(raw[i + 1]), 10) || 0 });
@@ -456,28 +498,41 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   }));
 
   // ── source toggle (تفعيل/إيقاف مصدر من الـ dashboard) ────────
+  // BUG FIX: كان يكتب `src:off:{domain}` بـ raw param بدون normalization،
+  // بينما analytics.ts يكتب stats الـ source بـ sanitizeDomainKey (lowercase،
+  // strip `www.`، strip non-alnum). نتيجة: الـ engine ما كانش يلاقي الـ key
+  // لما يقرأ الـ disabled set عشان مفتاح الكتابة != مفتاح القراءة.
+  // الآن: setSourceManuallyDisabled تسلسل واحد ومتسق مع باقي الـ analytics.
   app.post("/api/admin/sources/:domain/toggle", auth, wrap(async (req, res) => {
-    const { domain } = req.params;
+    const domain = sanitizeDomainKey(req.params.domain);
+    if (!domain) { res.status(400).json({ ok: false, error: "invalid domain" }); return; }
     const { action }  = req.body as { action: "enable" | "disable" };
-    const key = `src:off:${domain}`;
-    if (action === "disable") {
-      await redis.set(key, "1");
-      L.adminAction("dashboard", `source disabled: ${domain}`);
-    } else {
-      await redis.del(key);
-      L.adminAction("dashboard", `source enabled: ${domain}`);
-    }
-    ok(res, { domain, enabled: action === "enable" });
+    const off = action === "disable";
+    await setSourceManuallyDisabled(domain, off);
+    L.adminAction("dashboard", `source ${off ? "disabled" : "enabled"}: ${domain}`);
+    ok(res, { domain, enabled: !off });
   }));
 
   // ── broadcast (بث جماعي من الـ dashboard) ────────────────────
   app.post("/api/admin/broadcast", auth, wrap(async (req, res) => {
-    const { message, parse_mode } = req.body as { message: string; parse_mode?: string };
+    const { message, parse_mode, target } = req.body as { message: string; parse_mode?: string; target?: string };
     if (!message?.trim()) { res.status(400).json({ ok: false, error: "message required" }); return; }
-    // نُشغِّل البث عبر event — bot/admin.ts يتولى الإرسال
-    (process.emit as any)("dashboard:broadcast", { message, parse_mode: parse_mode || "Markdown" });
-    L.adminAction("dashboard", `broadcast sent: ${message.slice(0, 50)}`);
-    ok(res, { queued: true });
+    if (message.length > 4000) { res.status(400).json({ ok: false, error: "message too long" }); return; }
+    const tgt = ["all", "premium", "active7"].includes(target || "") ? target! : "all";
+    // تقدير عدد المستلمين قبل الإطلاق (للعرض في الـ dashboard)
+    let total = 0;
+    try {
+      if (tgt === "premium") {
+        const { listPremiumUsers } = await import("./bot/userSettings.js");
+        total = (await listPremiumUsers()).length;
+      } else {
+        total = (await storage.getAllUserIds().catch(() => [] as string[])).length;
+      }
+    } catch { /* keep 0 */ }
+    // نُشغِّل البث عبر event — bot/index.ts يتولى الإرسال
+    (process.emit as any)("dashboard:broadcast", { message, parse_mode: parse_mode || "Markdown", target: tgt });
+    L.adminAction("dashboard", `broadcast queued [target=${tgt}, est=${total}]: ${message.slice(0, 50)}`);
+    ok(res, { queued: true, target: tgt, total, sent: 0, failed: 0 });
   }));
 
   // ── user info ─────────────────────────────────────────────────

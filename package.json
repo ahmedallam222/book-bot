@@ -1,6 +1,6 @@
 {
   "name": "kholasa-books-bot",
-  "version": "30.0.0",
+  "version": "31.3.11",
   "description": "خلاصة الكتب — Arabic Telegram Book Download Bot",
   "type": "module",
   "engines": { "node": ">=20.0.0" },
@@ -15,8 +15,9 @@
     "drizzle-orm":           "^0.30.10",
     "drizzle-zod":           "^0.5.1",
     "express":               "^4.19.2",
+    "helmet":                "^8.1.0",
     "ioredis":               "^5.3.2",
-    "node-telegram-bot-api": "^0.66.0",
+    "node-telegram-bot-api": "^0.67.0",
     "pg":                    "^8.11.5",
     "playwright-core":       "^1.49.0",
     "react":                 "^18.2.0",
@@ -37,5 +38,11 @@
     "tsx":                          "^4.10.5",
     "typescript":                   "^5.4.5",
     "vite":                         "^5.2.10"
+  },
+  "overrides": {
+    "form-data":    "^2.5.4",
+    "qs":           "^6.14.1",
+    "tough-cookie": "^4.1.3",
+    "uuid":         "^14.0.0"
   }
 }

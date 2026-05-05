@@ -48,8 +48,12 @@ ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/dist   ./dist
 COPY --from=builder /app/shared ./shared
+# script/ holds one-shot ops scripts (e.g. migrate-premium-to-manual.mjs).
+# They are not loaded at startup, but operators run them ad-hoc with
+# `docker compose exec -T bot node script/<file>.mjs`.
+COPY --from=builder /app/script ./script
 
 RUN mkdir -p /app/temp && chown -R node:node /app
 

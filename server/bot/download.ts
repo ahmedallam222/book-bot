@@ -11,7 +11,7 @@ import {
 import { L } from "./logger.js";
 import { isBlacklisted, recordUrlFailure, recordUrlSuccess } from "./blacklist.js";
 import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
-import { escMd } from "./text.js";
+import { escMd, urlFilenameRelevance } from "./text.js";
 import { validatePdfContent } from "./pdfValidator.js";
 import { downloadNoorBookPdf } from "./noorBookResolver.js";
 import type { DownloadResult } from "./types.js";
@@ -56,8 +56,152 @@ function shouldSkipDirect(url: string): boolean {
   return SKIP_DIRECT_DOMAINS.some((d) => url.includes(d));
 }
 
+// ══════════════════════════════════════════════
+// DIRECT-SEND SAFETY GATE
+//
+// Direct mode (Telegram fetches the URL itself via sendDocument with a
+// remote URL) is faster but **completely bypasses pdfValidator**: there
+// is no local file to inspect for /Title metadata, no Mistral re-rank,
+// no metaTitle vs bookName check. Without a content-side gate, any
+// trusted-but-unrelated URL the search ranker hands us can be delivered
+// to the user verbatim.
+//
+// Production incident 2026-05-03: user requested "الموجز في فن التفاوض";
+// the bot direct-sent archive.org URL
+// `dn790006.ca.archive.org/.../dalilkuwa-s2021-a.pdf` (= "الدليل إلى
+// القوة والدهاء", a completely different book). The url's slug is
+// informative-looking (not digit-only) so neither the direct path's
+// pre-validate step nor pdfValidator's trusted-domain bypass would have
+// caught it — but they never ran anyway because direct mode skipped
+// validation entirely.
+//
+// Returns true when direct mode is unsafe and the caller must fall
+// through to local-download + full pdfValidator + Mistral.
+//
+// Heuristic: if the URL filename has insufficient token overlap with
+// the requested book name, we have no signal that the URL is the right
+// book.
+//
+// FIX-WRONG-FILE (BUG-5): the original threshold (0.15) left a
+// "validation dead zone" between 0.15 and PDF_VALIDATE_ACCEPT_THRESHOLD
+// (0.40). URLs scoring inside that band were direct-sent to Telegram
+// without ever entering pdfValidator → no metadata check, no Mistral
+// → wrong-but-similar books (e.g. "العقيدة الواسطية" vs
+// "العقيدة السفارينية" — only "العقيدة" overlaps, score ~0.30) leaked
+// through. Raising to 0.40 closes the dead zone: only confidently
+// matching filenames stay in direct mode; everything else falls
+// through to local-download + full validation.
+//
+// Digit-only/neutral filenames (urlFilenameRelevance returns 0.3) are
+// now flagged unsafe — but those domains are typically already in
+// SKIP_DIRECT_DOMAINS (Hindawi/foulabook/archive.org-style), and the
+// trusted-domain branch in pdfValidator handles them after local
+// download with proper title verification.
+function directSendUnsafe(bookName: string, pdfUrl: string): boolean {
+  const score = urlFilenameRelevance(bookName, pdfUrl);
+  return score < 0.40;
+}
+
+// ══════════════════════════════════════════════
+// CONTENT-DISPOSITION FILENAME PARSER
+// HTTP `Content-Disposition` header بيحمل اسم الملف الحقيقي حتى لو الـ URL
+// pathname رقم بحت (مثلاً Hindawi /books/62575295.pdf، foulabook
+// /book/downloading/123). الـ header بيكون بصيغتين:
+//   1. RFC 5987: filename*=UTF-8''<percent-encoded>   ← الأصدق (Unicode-safe)
+//   2. RFC 2616: filename="..." أو filename=...        ← fallback (ASCII)
+// لو الاتنين موجودين، RFC 6266 بيقول نفضّل filename* لأنها بتدعم Unicode.
+// ══════════════════════════════════════════════
+function parseContentDispositionFilename(header: string | null): string {
+  if (!header) return "";
+
+  // RFC 5987 — filename*=charset'lang'percent-encoded-value
+  // مثال: filename*=UTF-8''%D8%B2%D9%82%D8%A7%D9%82_%D8%A7%D9%84%D9%85%D8%AF%D9%82.pdf
+  const ext = /filename\*\s*=\s*([^']*)'[^']*'([^;]+)/i.exec(header);
+  if (ext) {
+    try {
+      const charset = (ext[1] || "utf-8").trim().toLowerCase();
+      // strip optional surrounding quotes
+      const raw = ext[2].trim().replace(/^"|"$/g, "");
+      // نفك ترميز الـ percent-encoding. لو charset غير UTF-8 (نادر جداً)
+      // decodeURIComponent ممكن يفشل → نسيب الـ value الخام بدون encoding.
+      if (charset === "utf-8" || charset === "utf8") {
+        return decodeURIComponent(raw);
+      }
+      return raw;
+    } catch { /* fallback to filename= */ }
+  }
+
+  // RFC 2616 — filename="..." (مع مسافات داخلية محتملة) أو filename=token (بدون quotes)
+  const basic = /filename\s*=\s*("([^"]+)"|([^;]+))/i.exec(header);
+  if (basic) {
+    const value = (basic[2] ?? basic[3] ?? "").trim();
+    // بعض الـ servers بترسل filename=ASCII-version بصيغة percent-encoded حتى من
+    // غير filename*. نحاول decode لو فيه %xx.
+    if (/%[0-9A-Fa-f]{2}/.test(value)) {
+      try { return decodeURIComponent(value); } catch { /* return as-is */ }
+    }
+    return value;
+  }
+
+  return "";
+}
+
 function isSlowArchiveUrl(url: string): boolean {
   return /\/\/(?:www\.)?(?:archive\.org|ia\d+\.us\.archive\.org)\//i.test(url);
+}
+
+// ══════════════════════════════════════════════
+// FILENAME / CAPTION BUILDERS
+// Use the actual book title from PDF metadata (or, when extraction fails,
+// the search-result title) instead of the user's raw query for the file
+// name shown in Telegram. This prevents the "file labeled X but contains Y"
+// deception that occurred when the trusted-domain validator bypass let
+// unrelated PDFs through. The caption keeps the user's query so they see
+// what they asked for AND what they got side-by-side when the two differ.
+// ══════════════════════════════════════════════
+function sanitizePdfBaseName(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 80);
+}
+
+// metaTitle from validatePdfContent is the *real* book title (or empty
+// for trusted-domain fast-path with no search title). When it is present
+// and meaningfully different from bookName, prefer it for the filename
+// so the file's identity is honest.
+export function buildPdfFilename(bookName: string, metaTitle: string): string {
+  const sanitizedBook = sanitizePdfBaseName(bookName);
+  const cleanMeta = (metaTitle || "")
+    .replace(/\.pdf$/i, "")
+    .trim();
+  if (cleanMeta && cleanMeta.length >= 4) {
+    const sanitizedMeta = sanitizePdfBaseName(cleanMeta);
+    if (sanitizedMeta && sanitizedMeta !== sanitizedBook) {
+      return `${sanitizedMeta}.pdf`;
+    }
+  }
+  return `${sanitizedBook || "book"}.pdf`;
+}
+
+// Caption shown in Telegram. Always includes user query so they see
+// what they asked for. If validation surfaced a different real title,
+// surface it explicitly so users can spot mismatches before opening.
+export function buildCaption(bookName: string, metaTitle: string): string {
+  const cleanMeta = (metaTitle || "").trim();
+  // Show the actual title only when it diverges meaningfully from the
+  // requested name (case- and whitespace-insensitive) so we don't add
+  // noise on perfect matches.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const showActual = cleanMeta &&
+                     cleanMeta.length >= 4 &&
+                     norm(cleanMeta) !== norm(bookName);
+  if (showActual) {
+    return `📚 *${escMd(bookName)}*\n📖 _${escMd(cleanMeta)}_\n\n✅ من خلاصة الكتب`;
+  }
+  return `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`;
 }
 
 // ══════════════════════════════════════════════
@@ -218,13 +362,14 @@ async function expandFoulabookUrl(url: string): Promise<string | null> {
 // MAIN — downloadAndSend
 // ══════════════════════════════════════════════
 export async function downloadAndSend(
-  bot:         TelegramBot,
-  chatId:      number,
-  pdfUrl:      string,
-  bookName:    string,
-  token:       string,
-  _noFollow    = false,
-  skipMistral  = false,
+  bot:               TelegramBot,
+  chatId:            number,
+  pdfUrl:            string,
+  bookName:          string,
+  token:             string,
+  _noFollow          = false,
+  skipMistral        = false,
+  searchResultTitle  = "",
 ): Promise<DownloadResult> {
   if (isSlowArchiveUrl(pdfUrl)) {
     L.warn("download", "Skipping slow archive.org URL", { url: pdfUrl.slice(0, 80) });
@@ -271,7 +416,7 @@ export async function downloadAndSend(
   // ممكن يحمّل الـ PDF — لازم browser session كامل.
   // noorBookDownload بتحمّل لـ tempPath ثم بنكمل بنفس validate + sendDocument.
   if (/(?:^|\.)noor-book\.com\//i.test(pdfUrl)) {
-    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral);
+    return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral, searchResultTitle);
   }
 
   L.dlStart(pdfUrl, bookName);
@@ -280,7 +425,18 @@ export async function downloadAndSend(
   // ══════════════════════════════════════════════
   // محاولة 1: URL مباشر لـ Telegram
   // ══════════════════════════════════════════════
-  if (!shouldSkipDirect(pdfUrl)) {
+  // مهم: direct mode بيتخطّى pdfValidator بالكامل لأن السيرفر مش
+  // بيحمّل الملف محلياً. نضيف gate قبل: لو اسم الملف ما يطابقش اسم
+  // الكتاب أبداً → نسقط للـ local download (اللي بيشغّل validation
+  // كامل: metaTitle + Mistral). شوف directSendUnsafe أعلاه للتفصيل.
+  const directUnsafe = directSendUnsafe(bookName, pdfUrl);
+  if (directUnsafe) {
+    L.warn("download", "direct_send_skipped — filename has no overlap with book; using local download for full validation", {
+      url: pdfUrl.slice(0, 80),
+      book: bookName.slice(0, 50),
+    });
+  }
+  if (!shouldSkipDirect(pdfUrl) && !directUnsafe) {
     const preValid = await preValidatePdfUrl(pdfUrl);
     if (!preValid) {
       L.warn("download", "preValidate: not a PDF — skipping permanently", {
@@ -301,9 +457,11 @@ export async function downloadAndSend(
           body: JSON.stringify({
             chat_id:    chatId,
             document:   pdfUrl,
-            caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
+            // For direct send we don't have PDF /Title yet — Telegram
+            // fetches the file itself. Pass searchResultTitle so the
+            // caption can flag it when the search-result page title
+            // diverges from the user's query.
+            caption:    buildCaption(bookName, searchResultTitle),
             parse_mode: "Markdown",
           }),
         });
@@ -391,6 +549,18 @@ export async function downloadAndSend(
 
     const ct = r.headers.get("content-type") || "";
 
+    // FIX (CD-filename): اسم الملف الحقيقي من HTTP `Content-Disposition` header.
+    // مهم للـ hosts بتخدّم URL رقمي بحت (مثلاً Hindawi /books/62575295.pdf،
+    // foulabook /book/downloading/123) لكن بترسل الاسم الفعلي في الـ header.
+    // بدون ده الـ Mistral validator بيرفضها لأن الـ URL مفهوش معلومة.
+    const cdFilename = parseContentDispositionFilename(r.headers.get("content-disposition"));
+    if (cdFilename) {
+      L.debug("download", "Got Content-Disposition filename", {
+        filename: cdFilename.slice(0, 60),
+        url:      pdfUrl.slice(0, 60),
+      });
+    }
+
     // ── HTML response → ابحث عن رابط PDF داخله ─
     if (ct.includes("html")) {
       if (!_noFollow) {
@@ -412,7 +582,11 @@ export async function downloadAndSend(
               });
               safeDeleteTemp(tempPath);
               clearTimeout(timer);
-              return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true);
+              // Forward skipMistral + searchResultTitle so the recursive
+              // call honors both the Mistral early-stop streak and the
+              // new title-gate / metaTitle fallback. Without these the
+              // L1/L4 fixes are bypassed for any HTML-redirect PDF.
+              return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true, skipMistral, searchResultTitle);
             }
           }
         } catch { /* HTML غير قابل للقراءة → نكمل للفشل الطبيعي */ }
@@ -486,7 +660,12 @@ export async function downloadAndSend(
     // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
     // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
     // أما الـ resolved (مثل …/book/downloading/578333652) فمعرّف رقمي بلا معنى.
-    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
+    // FIX (CD-filename): cdFilename بيغطّي الحالة اللي originalUrl نفسه ميحملش
+    // slug (مثلاً Hindawi /books/62575295.pdf لـ "زقاق المدق").
+    // searchResultTitle = HTML <title> from Firecrawl, used as a title-mismatch
+    // gate even on trusted domains and as metaTitle fallback for hosts whose
+    // /Title sits beyond the validator's 64KB scan window.
+    const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, cdFilename, searchResultTitle);
     if (!validation.accepted) {
       L.warn("download", "PDF rejected — content mismatch", {
         book:      bookName.slice(0, 50),
@@ -507,30 +686,31 @@ export async function downloadAndSend(
     }
 
     // ── اسم الملف ─────────────────────────────────
-    const cleanBookName = bookName
-      .replace(/[/\\:*?"<>|]/g, "_")
-      .replace(/\s+/g, "_")
-      .replace(/_+/g, "_")
-      .replace(/^_|_$/g, "")
-      .slice(0, 80);
-    const fname = `${cleanBookName || "book"}.pdf`;
+    // Use the actual book title from validation (PDF metadata or search result)
+    // when it diverges meaningfully from the user query. Prevents the
+    // "file labeled 'X' but contains Y" deception that the trusted-domain
+    // bypass used to enable. The user query stays in the caption so the
+    // user knows what they asked for.
+    const fname = buildPdfFilename(bookName, validation.metaTitle);
 
     // ── إرسال لـ Telegram ─────────────────────────
     let sent: TelegramBot.Message;
     let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+    // مجرد الإشارة للـ sendDocument promise عشان لو غلب الـ timeout (فاز بالـ
+    // race) وبعدين الـ sendDocument فشل لاحقاً، نمسك الـ rejection بدل ما تتحول
+    // لـ unhandled-rejection warning في الـ logs.
+    const sendDocPromise = bot.sendDocument(
+      chatId,
+      tempPath,
+      {
+        caption:    buildCaption(bookName, validation.metaTitle),
+        parse_mode: "Markdown",
+      },
+      { filename: fname, contentType: "application/pdf" },
+    ) as Promise<TelegramBot.Message>;
     try {
       sent = await Promise.race([
-        bot.sendDocument(
-          chatId,
-          tempPath,
-          {
-            caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
-            parse_mode: "Markdown",
-          },
-          { filename: fname, contentType: "application/pdf" }
-        ),
+        sendDocPromise,
         new Promise<never>((_, rej) => {
           uploadTimerId = setTimeout(
             () => rej(new Error("UPLOAD_TIMEOUT")),
@@ -538,6 +718,15 @@ export async function downloadAndSend(
           );
         }),
       ]);
+    } catch (raceErr) {
+      // خسرنا الـ race (غالباً timeout). لو الـ sendDocument رفض لاحقاً،
+      // نمسكه بصمت (لو Telegram تأخر ورجع error بعد ما دعشناه تايماوت).
+      sendDocPromise.catch((lateErr) => {
+        L.debug("download", "sendDocument late-rejection (race already lost)", {
+          err: String(lateErr).slice(0, 100),
+        });
+      });
+      throw raceErr;
     } finally {
       if (uploadTimerId !== null) clearTimeout(uploadTimerId);
       safeDeleteTemp(tempPath);
@@ -581,13 +770,14 @@ export async function downloadAndSend(
 // بعد ما الـ PDF موجود محلياً، نكمل بنفس validate + send.
 // ══════════════════════════════════════════════
 async function noorBookDownloadAndSend(
-  bot:         TelegramBot,
-  chatId:      number,
-  pdfUrl:      string,
-  bookName:    string,
-  _token:      string,
-  originalUrl: string,
-  skipMistral  = false,
+  bot:               TelegramBot,
+  chatId:            number,
+  pdfUrl:            string,
+  bookName:          string,
+  _token:            string,
+  originalUrl:       string,
+  skipMistral        = false,
+  searchResultTitle  = "",
 ): Promise<DownloadResult> {
   L.dlStart(pdfUrl, bookName);
   const t0 = Date.now();
@@ -638,7 +828,7 @@ async function noorBookDownloadAndSend(
 
   // ── content validation ───────────────────────
   // originalUrl فيه slug الكتاب — مفيد لـ Mistral
-  const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral);
+  const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, "", searchResultTitle);
   if (!validation.accepted) {
     L.warn("download", "noor-book PDF rejected — content mismatch", {
       book:      bookName.slice(0, 50),
@@ -657,30 +847,25 @@ async function noorBookDownloadAndSend(
   }
 
   // ── sendDocument ─────────────────────────────
-  const cleanBookName = bookName
-    .replace(/[/\\:*?"<>|]/g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/g, "")
-    .slice(0, 80);
-  const fname = `${cleanBookName || "book"}.pdf`;
+  const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
 
   let sent: TelegramBot.Message;
   let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+  // توثيق الـ sendDocument promise بشكل منفصل عشان نمسك late-rejection لو
+  // غلب الـ timeout في الـ race وبعدين Telegram رفض بعدوا.
+  const sendDocPromise = bot.sendDocument(
+    chatId,
+    tempPath,
+    {
+      caption:    buildCaption(bookName, validation.metaTitle),
+      parse_mode: "Markdown",
+    },
+    { filename: fname, contentType: "application/pdf" },
+  ) as Promise<TelegramBot.Message>;
   try {
     sent = await Promise.race([
-      bot.sendDocument(
-        chatId,
-        tempPath,
-        {
-          caption:    `📚 *${escMd(bookName)}*
-
-✅ من خلاصة الكتب`,
-          parse_mode: "Markdown",
-        },
-        { filename: fname, contentType: "application/pdf" },
-      ),
+      sendDocPromise,
       new Promise<never>((_, rej) => {
         uploadTimerId = setTimeout(
           () => rej(new Error("UPLOAD_TIMEOUT")),
@@ -689,6 +874,11 @@ async function noorBookDownloadAndSend(
       }),
     ]);
   } catch (e: any) {
+    sendDocPromise.catch((lateErr) => {
+      L.debug("download", "noor-book sendDocument late-rejection (race already lost)", {
+        err: String(lateErr).slice(0, 100),
+      });
+    });
     safeDeleteTemp(tempPath);
     L.dlFail(pdfUrl, `noor-book upload: ${String(e?.message || e).slice(0, 80)}`);
     await recordUrlFailure(pdfUrl);
