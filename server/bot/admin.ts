@@ -2,7 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis }         from "./redis.js";
 import { L }             from "./logger.js";
 import { storage }       from "../storage.js";
-import { escMd }         from "./text.js";
+import { escMd, cairoDateString } from "./text.js";
 import { getQueueStats, clearDLQ, getDLQJobs } from "./queue.js";
 import { blacklistStats, clearBlacklist }        from "./blacklist.js";
 import { getPdfValidationStats }                 from "./pdfValidator.js";
@@ -571,7 +571,7 @@ export async function handleAdminCallback(
         await bot.sendDocument(chatId,
           Buffer.from(csv, "utf-8"),
           { caption: "📊 أكثر الكتب تحميلاً" },
-          { filename: `kholasa_top_books_${new Date().toISOString().split("T")[0]}.csv`, contentType: "text/csv" }
+          { filename: `kholasa_top_books_${cairoDateString()}.csv`, contentType: "text/csv" }
         ).catch(() => {});
         break;
       }

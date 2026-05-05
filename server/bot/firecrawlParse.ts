@@ -34,6 +34,7 @@
 
 import { L } from "./logger.js";
 import { redis } from "./redis.js";
+import { cairoDateString } from "./text.js";
 import {
   FC_QUOTA_EXCEEDED_KEY,
   FC_RATE_LIMITED_KEY,
@@ -128,7 +129,9 @@ const SCRAPE_CREDIT_COST = 1;  // /scrape with formats=markdown is ~1 credit
 
 async function trackCredits(cost: number): Promise<void> {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    // Cairo TZ — يماشي باقي الـ daily counters (downloadCount/summaryUsage)
+    // عشان الـ /system/costs panel يطابق الاستخدام اليومي اللي اليوزر يشوفه.
+    const today = cairoDateString();
     const key   = `counter:firecrawl:credits:${today}`;
     await redis.incrby(key, cost);
     // 35-day TTL so the dashboard's monthly view always has data.
