@@ -1,6 +1,6 @@
 import { L } from "./logger.js";
 import { normalizeArabic } from "./text.js";
-import { searchAllSources, getSearchCacheResults } from "./engine.js";
+import { searchAllSources, hasRecentSearchCache } from "./engine.js";
 
 // ══════════════════════════════════════════════
 // SUGGESTIONS + CACHE WARMING
@@ -718,11 +718,15 @@ export async function warmRelatedCache(bookName: string): Promise<void> {
 
     for (const book of picks) {
       try {
-        const cached = await getSearchCacheResults(book);
-        if (!cached) {
-          await searchAllSources(book);
-          L.info("suggestions", `Warmed cache for: ${book.slice(0, 50)}`);
-        }
+        // Skip queries that already have a recent cache entry (HIT *or* MISS).
+        // Previously this used `if (!cached)` against `getSearchCacheResults`,
+        // which always returns an array — `!cached` was always false and the
+        // warming branch never ran. With `hasRecentSearchCache` we honour both
+        // the 1h positive TTL and the 5min negative TTL so we don't burn
+        // Firecrawl budget re-checking known-negative queries.
+        if (await hasRecentSearchCache(book)) continue;
+        await searchAllSources(book);
+        L.info("suggestions", `Warmed cache for: ${book.slice(0, 50)}`);
       } catch {}
     }
   } catch (e) {
