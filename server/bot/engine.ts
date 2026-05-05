@@ -169,10 +169,35 @@ interface FirecrawlSearchResponse {
 
 type ResultAccess = BookResult["access"];
 
+// FIX-PAID-FALSE-POSITIVE: الـ patterns القديمة كانت تطابق كلمات مفردة
+// زي "premium" / "subscribe" / "price" / "checkout" / "حقوق النشر" /
+// "اشتر" — كلها بتظهر في UI شريطي/footer لمواقع كتب مجانية تماماً
+// (newsletter signup، Premium membership banner، copyright notice،
+// كلمة "اشتراك" اللي بتبدأ بـ "اشتر")، فكتب مجانية كانت تنحتسب
+// على إنها مدفوعة. النتيجة: المستخدم يستلم رسالة "كتاب مدفوع" حتى
+// لو الكتاب موجود مجاناً على kutubm.com / hindawi.org.
+//
+// التشديد:
+//   - شيلنا الكلمات المفردة الغامضة (premium، subscribe، price، paid،
+//     checkout، حقوق النشر، شراء/اشتر بدون context).
+//   - أضفنا context صريح للأفعال (buy NOW، add to cart، اشتر الآن،
+//     شراء الكتاب).
+//   - أضفنا pattern للـ price tags الفعلية (currency + رقم) — أقوى
+//     إشارة على إن الصفحة بتبيع.
+//   - حافظنا على الإشارات القاطعة (out of stock، نفدت الكمية،
+//     غير متوفر مجاناً، read-only signals صريحة).
 const PROTECTED_ACCESS_PATTERNS = [
-  /شراء|اشتر|اشتري|سعر|أضف إلى السلة|اضف الى السلة|السلة|الدفع|مدفوع|غير مجاني|نفدت الكمية/i,
-  /buy now|add to cart|checkout|price|paid|subscription|subscribe|premium|out of stock/i,
-  /حقوق النشر|الكتب المرخصة|المرخصة والقانونية|قراءة ومراجعة|قراءة أونلاين|اقرأ أونلاين/i,
+  // Action verbs in commerce context (Arabic)
+  /(?:شراء|اشتري?(?:ه)?)\s+(?:الآن|الكتاب|المنتج|النسخة)|أضف(?:ه)?\s+(?:إلى|الى)\s+(?:السلة|عربة|عربتك)|اضف(?:ه)?\s+(?:إلى|الى)\s+(?:السلة|عربة|عربتك)|نفد(?:ت)?\s+(?:الكمية|المخزون)|غير\s+متوفر\s+مجان(?:اً|ا)?|متوفر\s+للبيع|للبيع\s+فقط|الدفع\s+(?:الإلكتروني|عبر|بـ)|أتمم?\s+(?:عملية\s+)?الشراء/i,
+  // Action verbs in commerce context (English)
+  /\b(?:buy\s+now|add\s+to\s+(?:cart|basket)|out\s+of\s+stock|sold\s+out|not\s+(?:available\s+)?for\s+free|proceed\s+to\s+checkout|complete\s+(?:your\s+)?purchase|paid\s+(?:only|content|version|access))\b/i,
+  // Price tags — currency symbol/code + number (very specific signal)
+  // ملاحظة: \b ما بيشتغلش مع حروف عربية في JS regex، لذا نستخدم
+  // (?:^|[^\d.,]) قبل الرقم و (?:[\s.,;:،؛]|$) بعد العملة بدلاً من \b.
+  /[\$€£¥]\s?\d+(?:[.,]\d+)?(?!\s*(?:%|سنة|years?))|(?:^|[^\d.,])\d+(?:[.,]\d+)?\s*(?:USD|EUR|GBP|JPY|SAR|AED|EGP|KWD|QAR|BHD|OMR|JOD|ر\.?س\.?|ج\.?م\.?|د\.?ك\.?|د\.?\u0625\.?|ريال|دينار|درهم|جنيه|ليرة)(?=[\s.,;:،؛]|$)/i,
+  // Read-only / licensing signals (specific, not the generic "قراءة أونلاين"
+  // that just means "read online" — many free libraries offer that)
+  /قراءة\s+فقط(?!\s+ل(?:جزء|بعض))|للاطلاع\s+فقط|لا\s+يسمح\s+ب?التحميل|غير\s+قابل\s+للتنزيل|read[\-\s]only\s+access|preview\s+only\s+\(?\s*\d+\s*pages?\s*\)?/i,
 ];
 
 const DOWNLOAD_ACCESS_PATTERNS = [
@@ -332,7 +357,16 @@ function classifyAccess(doc: FirecrawlDoc, directPdfUrl: string | null): { kind:
     doc.markdown?.slice(0, 12_000),
   ].filter(Boolean).join("\n");
 
-  if (PROTECTED_ACCESS_PATTERNS.some((p) => p.test(haystack))) {
+  // FIX-PAID-FALSE-POSITIVE: نحتاج matches من *2 patterns مختلفة على الأقل*
+  // عشان نتأكد. صفحة فيها فقط "buy now" في زر شراء كتب أخرى (sidebar)
+  // ما تكفيش لنصنّف الكتاب نفسه على إنه مدفوع. لازم تكون فيها إشارتين
+  // مستقلتين (مثلاً "buy now" + price tag، أو price tag + "out of stock").
+  let protectedHits = 0;
+  for (const p of PROTECTED_ACCESS_PATTERNS) {
+    if (p.test(haystack)) protectedHits++;
+    if (protectedHits >= 2) break;
+  }
+  if (protectedHits >= 2) {
     return { kind: "protected_page", reason: "paid_or_read_only_signals" };
   }
   if (DOWNLOAD_ACCESS_PATTERNS.some((p) => p.test(haystack))) {
