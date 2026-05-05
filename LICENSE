@@ -1,25 +1,21 @@
-PROPRIETARY SOFTWARE LICENSE
+MIT License
 
-Copyright (c) 2024-2026 خلاصة الكتب — Kholasa Books Bot
-All Rights Reserved.
+Copyright (c) 2024-2026 Ahmed Allam (@ahmedallam222) and contributors
 
-NOTICE: This software and its source code are the exclusive property of the
-copyright holder. Unauthorized copying, modification, distribution, or use
-of this software, in whole or in part, is strictly prohibited without prior
-written permission from the copyright holder.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-PERMITTED USES:
-- Running this software on your own servers for personal or commercial use
-  after obtaining explicit written permission from the copyright holder.
-
-PROHIBITED USES:
-- Copying, distributing, or sublicensing the source code
-- Modifying and distributing modified versions
-- Reverse engineering for competitive purposes
-- Removing or altering copyright notices
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
-DAMAGES OR OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
-
-For licensing inquiries, contact: [your-email@example.com]
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
