@@ -598,13 +598,14 @@ async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void>
     const rate = s.total > 0 ? Math.round(s.successRate * 100) : 0;
     const trust = s.totalWithRejects > 0 ? Math.round(s.trustRate * 100) : rate;
     let badge: string;
-    if (s.manuallyDisabled)        badge = "🚫"; // معطّل يدوياً
-    else if (s.hardAutoDisabled)   badge = "⛔"; // معطّل تلقائياً (catastrophic)
-    else if (s.trustAutoDisabled)  badge = "🟣"; // معطّل تلقائياً (Mistral trust)
-    else if (s.autoDisabled)       badge = "🟠"; // معطّل تلقائياً (low rate)
-    else if (rate >= 70)           badge = "🟢";
-    else if (rate >= 40)           badge = "🟡";
-    else                           badge = "🔴";
+    if (s.manuallyDisabled)             badge = "🚫"; // معطّل يدوياً
+    else if (s.hardAutoDisabled)        badge = "⛔"; // معطّل تلقائياً (catastrophic)
+    else if (s.trustAutoDisabled)       badge = "🟣"; // معطّل تلقائياً (Mistral trust)
+    else if (s.mistralOnlyAutoDisabled) badge = "💛"; // معطّل تلقائياً (Mistral-only catastrophic)
+    else if (s.autoDisabled)            badge = "🟠"; // معطّل تلقائياً (low rate)
+    else if (rate >= 70)                badge = "🟢";
+    else if (rate >= 40)                badge = "🟡";
+    else                                badge = "🔴";
     const domain = s.domain.replace(/^www\./, "").slice(0, 22);
     const mistralPart = s.mistralRejected > 0 ? ` (m:${s.mistralRejected})` : "";
     // اعرض الـ trust rate لما يختلف عن النسبة العادية (يعني Mistral رفض كتير)
