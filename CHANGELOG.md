@@ -7,6 +7,33 @@
 
 ---
 
+## [31.3.12] — 2026-05-04
+
+### 🐛 إصلاح حرج — `SEARCH_CACHE_TTL` كانت بالـ milliseconds لكن بتُمرَّر لـ `setex` (يقبل ثواني)
+
+السياق: في `config.ts` كان فيه:
+```ts
+// ── Cache TTLs (ms) ───────────────────────────
+export const SEARCH_CACHE_TTL_HIT     = 3_600_000;  // 1 hour
+export const SEARCH_CACHE_TTL_MISS    = 300_000;    // 5 minutes
+```
+الـ header annotation بيقول `(ms)` والقيم متطابقة مع milliseconds (3,600,000ms = 1h)، لكن الاستخدام في `engine.ts:110, 112` هو `redis.setex(key, ttl, value)` — والـ `setex` في ioredis (و Redis نفسه) بياخد **ثواني** فقط (تأكدت من النوع في `node_modules/ioredis/built/utils/RedisCommander.d.ts`: `setex(key, seconds: number | string, value, ...)`).
+
+التأثير الفعلي:
+- **Hit cache**: 3,600,000 ثانية ≈ **41 يوم** بدل 1 ساعة. النتايج الناجحة بتفضل في cache شهر+ بعد أول بحث، فلو URL اتـ blacklist، أو مصدر اتـ disable يدوياً، أو الـ ranking اتغيّر، التحسينات بتاخد أسابيع عشان تـ propagate.
+- **Miss cache**: 300,000 ثانية ≈ **3.5 يوم** بدل 5 دقايق. أخطر بكثير: استعلام رجع بدون نتايج بيـ cache كـ `[]` لـ 3.5 يوم. لو Firecrawl ما لقاش الكتاب أول مرة (بسبب transient issue، أو لأن الكتاب ما كانش متاح وقتها)، أي مستخدم تاني يـ search نفس الاستعلام في الـ 3.5 يوم اللي جايين هيشوف "لم أعثر على هذا الكتاب" بدون أي بحث حقيقي — حتى لو الكتاب موجود فعلاً.
+
+الإصلاح: تغيير القيم لتطابق وحدة `setex` (ثواني):
+```ts
+export const SEARCH_CACHE_TTL_HIT     = 3_600;      // 1 hour
+export const SEARCH_CACHE_TTL_MISS    = 300;        // 5 minutes
+```
++ تحديث الـ header annotation من `(ms)` إلى `(seconds; consumed by redis.setex)`. دلوقتي الـ TTL الفعلي في Redis مطابق للنية.
+
+ملاحظة على الانتشار: الـ keys اللي اتكتبت في Redis قبل النشر هتفضل بالـ TTL القديم (41 يوم/3.5 يوم) لحد ما تنتهي طبيعياً أو تُمسح. عشان ينتقل البوت للسلوك الصحيح فوراً ممكن نعمل `redis-cli --scan --pattern 'sc:*' | xargs redis-cli del` على السيرفر بعد النشر (اختياري).
+
+---
+
 ## [31.3.11] — 2026-05-04
 
 ### 🐛 إصلاح صحة — "ملف خاطئ؟" ما كانش بيمسح الـ search cache فعلياً
