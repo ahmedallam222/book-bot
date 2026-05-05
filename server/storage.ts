@@ -6,7 +6,7 @@ import {
   type User, type InsertUser, type SearchLog, type InsertSearchLog,
   type CachedBook, type InsertCachedBook, type DailyLimit, type InsertDailyLimit,
 } from "@shared/schema";
-import { canonicalizeForCache } from "./bot/text.js";
+import { canonicalizeForCache, cairoDateString } from "./bot/text.js";
 
 // ══════════════════════════════════════════════
 // DB POOL — معدَّل وغير مُعرَّض للـ pool exhaustion
@@ -209,7 +209,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getDailyDownloadCount(telegramUserId: string): Promise<number> {
-    const today = new Date().toISOString().split("T")[0];
+    // Cairo TZ — كل اليوزرز في توقيت القاهرة. UTC date كان بيخلّي اللميت
+    // يتجدد 02:00–03:00 صباح بدل منتصف الليل القاهرة، واليوزر اللي شغّال
+    // بين 22:00–02:00 ممكن يقرا/يكتب على صفّين تاريخ مختلفين في نفس الليلة.
+    const today = cairoDateString();
     const result = await db
       .select({ downloadCount: dailyLimits.downloadCount })
       .from(dailyLimits)
@@ -227,7 +230,9 @@ export class DatabaseStorage implements IStorage {
    * عملية ذرية واحدة لا يمكن تجزئتها
    */
   async incrementDailyDownload(telegramUserId: string): Promise<void> {
-    const today = new Date().toISOString().split("T")[0];
+    // Cairo TZ — لازم نفس الـ today اللي بيستعمله getDailyDownloadCount
+    // عشان الـ read/write يقعوا على نفس الـ row.
+    const today = cairoDateString();
     await db
       .insert(dailyLimits)
       .values({ telegramUserId, date: today, downloadCount: 1 })
@@ -251,9 +256,11 @@ export class DatabaseStorage implements IStorage {
    * = 3.6M صف بعد سنة، كلهم irrelevant بعد 7 أيام.
    */
   async cleanupOldDailyLimits(retentionDays = 7): Promise<number> {
-    const cutoff = new Date();
-    cutoff.setUTCDate(cutoff.getUTCDate() - retentionDays);
-    const cutoffStr = cutoff.toISOString().split("T")[0];
+    // Cairo TZ — daily_limits.date entries بتتكتب بـ Cairo date دلوقتي،
+    // فالـ cutoff لازم يتحسب بنفس الـ TZ عشان نحذف صح. لو حسبناه بـ UTC،
+    // ممكن نحذف row من اليوم الـ "today" لو UTC اتقدّم على Cairo.
+    const cutoffMs = Date.now() - retentionDays * 24 * 3600 * 1000;
+    const cutoffStr = cairoDateString(new Date(cutoffMs));
     const result = await db
       .delete(dailyLimits)
       .where(sql`${dailyLimits.date} < ${cutoffStr}`)
