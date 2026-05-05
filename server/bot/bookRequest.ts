@@ -6,7 +6,7 @@ import { isBanned, isAdmin, setLastBook } from "./guards.js";
 import { isRateLimited, isSearchRateLimited, RATE_LIMIT_MAX, SEARCH_RATE_MAX } from "./rateLimit.js";
 import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, canonicalizeForCache, buildResetTime } from "./text.js";
 import { searchWithFuzzyFallback } from "./fuzzy.js";
-import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
+import { isFirecrawlDown } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
@@ -381,7 +381,6 @@ async function serveFromCache(
         storage.incrementUserDownloads(userId),
       ]).catch(() => {});
       logSearch(userId, userName, bookName, true, true, 1);
-      invalidateRecentSearchesCache();
       setLastBook(userId, bookName).catch(() => {});
       warmRelatedCache(bookName).catch(() => {});
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
@@ -411,7 +410,6 @@ async function serveFromCache(
           storage.incrementUserDownloads(userId),
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, 1);
-        invalidateRecentSearchesCache();
         setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
@@ -830,7 +828,6 @@ async function performFullSearch(
           storage.incrementUserDownloads(userId),
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, results.length);
-        invalidateRecentSearchesCache();
         setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, false, sentDomain, Date.now() - t0).catch(() => {});
