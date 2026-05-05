@@ -887,27 +887,41 @@ async function performFullSearch(
         globalCapReached,
       });
     }
-    // FIX-PAID-BOOK-MSG: لما ما يتسلّمش PDF فعلاً (zero successful deliveries)
-    // نبعت رسالة قاطعة "غير متوفر مجاناً" بدل قائمة معاينة من كتب خطأ.
-    // قائمة المعاينة القديمة كانت بتعرض روابط Hindawi/archive.org لكتب خطأ
-    // (نفس النطاق، عنوان مختلف) — كانت بتربك المستخدم بدل ما تساعده.
-    // النص الموحَّد (`buildPaidBookMessage`) يغطي 3 احتمالات: مدفوع / قراءة فقط
-    // على موقع الناشر / غير منشور رقمياً بعد، فهو مناسب للحالتين.
-    // نحتفظ بفصل العدّاد ليعرف الـ admin هل البحث وجد إشارات paid صريحة أم لا.
-    if (paidSignalCount > 0) {
+    // FIX-PAID-FALSE-POSITIVE: قبل ده كنا نبعت buildPaidBookMessage *دايماً*
+    // لما الـ download يفشل، حتى لو paidSignalCount = 0. ده كان غلط لأن
+    // فشل التحميل ممكن يكون لأسباب كتيرة (URL محجوب، PDF تالف، Firecrawl
+    // لقى الكتاب لكن ما قدرناش نـ verify المحتوى)، مش بس عشان الكتاب مدفوع.
+    //
+    // الـ engine دلوقتي (بعد تشديد الـ PROTECTED_ACCESS_PATTERNS) بيتطلب
+    // 2 إشارات مستقلة ليعلّم نتيجة protected_page. فلو اثنين أو أكتر
+    // من النتائج اتعلّموا protected_page دلوقتي (إشارة عالية الثقة)
+    // فرسالة "مدفوع" فعلاً صح. أقل من كده رسالة "لم أجد PDF" الأمينة.
+    const paidThreshold       = Math.max(2, Math.ceil(results.length * 0.4));
+    const showPaidBookMessage = paidSignalCount >= paidThreshold;
+
+    if (showPaidBookMessage) {
       redis.incr("tel:dl:fail_paid_signal").catch(() => {});
-      L.info("bot", "Sending fail message — paid signals present", {
+      L.info("bot", "Sending paid-book message — high-confidence paid signals", {
         book: bookName.slice(0, 50),
         paidSignalCount,
+        results: results.length,
+        threshold: paidThreshold,
       });
     } else {
       redis.incr("tel:dl:fail_no_signal").catch(() => {});
-      L.info("bot", "Sending fail message — no paid signals, all candidates failed", {
+      L.info("bot", "Sending no-results message — download failed without paid signals", {
         book: bookName.slice(0, 50),
+        paidSignalCount,
         results: results.length,
+        threshold: paidThreshold,
       });
     }
-    await bot.sendMessage(chatId, buildPaidBookMessage(bookName), {
+
+    const failMsg = showPaidBookMessage
+      ? buildPaidBookMessage(bookName)
+      : buildNoResults(bookName, false);
+
+    await bot.sendMessage(chatId, failMsg, {
       parse_mode: "Markdown", disable_web_page_preview: true,
       reply_markup: kbNoResults(bookName),
     });
