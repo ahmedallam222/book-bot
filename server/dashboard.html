@@ -195,6 +195,13 @@ async function loadPrem()   { return (await apiFetch("users/premium"))          
 async function loadBanned() { return (await apiFetch("users/banned"))              ?? MOCK.bannedUsers; }
 async function loadFunnel() { return (await apiFetch("telemetry/funnel"))           ?? null; }
 async function loadTraces() { return (await apiFetch("telemetry/traces?limit=30"))  ?? []; }
+// DASH 2.0
+async function loadLogs(limit=200,level)  {
+  const q = `system/logs?limit=${limit}${level?`&level=${level}`:""}`;
+  return (await apiFetch(q)) ?? null;
+}
+async function loadBackup() { return (await apiFetch("system/backup")) ?? null; }
+async function loadCosts()  { return (await apiFetch("system/costs"))  ?? null; }
 
 // ══════════════════════════════════════════════
 // CSV Export
@@ -334,7 +341,7 @@ function KPI({icon,label,value,sub,color=T.gold,trend}){
 // TABS
 // ══════════════════════════════════════════════
 
-function OverviewTab({ov}){
+function OverviewTab({ov,costs}){
   if(!ov) return h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}},
     Array(12).fill(0).map((_,i)=>h(Card,{key:i},h(Sk,{h:70}))));
   const {today,total,queue,premium,banned,system}=ov;
@@ -358,7 +365,11 @@ function OverviewTab({ov}){
       kpis.map((k,i)=>h(KPI,{key:i,...k}))),
     system.maintenance&&h("div",{style:{marginTop:16,background:T.redDim,border:`1px solid ${T.red}55`,
       borderRadius:12,padding:"12px 18px",color:T.red,fontWeight:600,fontSize:13}},
-      "🔴 وضع الصيانة مفعّل — البوت لا يستقبل طلبات")
+      "🔴 وضع الصيانة مفعّل — البوت لا يستقبل طلبات"),
+    // ── DASH 2.0: Costs widget ──
+    h("div",{style:{marginTop:16}},
+      h(CostsCard,{costs})
+    )
   );
 }
 
@@ -491,19 +502,36 @@ function BooksTab({books}){
 
 function SourcesTab({sources}){
   if(!sources?.length) return h(Card,null,h(Sk,{h:200}));
+  // DASH 2.0 — derive a tiny synthetic sparkline if the API didn't give one.
+  // Shows last 7d trend if `s.history` is provided as [{ok,fail}], else flat bar.
+  const trendOf = (s) => {
+    if(Array.isArray(s.history)&&s.history.length){
+      return s.history.map(h2=>{ const t=(h2.ok||0)+(h2.fail||0); return t>0?(h2.ok/t)*100:0; });
+    }
+    return null;
+  };
+  // Sort: best success rate at top
+  const sorted = [...sources].sort((a,b)=>{
+    const ra = (a.ok+a.fail)>0 ? a.ok/(a.ok+a.fail) : 0;
+    const rb = (b.ok+b.fail)>0 ? b.ok/(b.ok+b.fail) : 0;
+    return rb-ra;
+  });
   return h("div",{className:"fade-up"},
     h(Card,null,
-      h(SH,{icon:"🔌",title:"صحة المصادر"}),
+      h(SH,{icon:"🔌",title:`صحة المصادر — ${sources.length} مصدر`,actions:
+        h("span",{style:{fontSize:11,color:T.muted}},"مرتّبة حسب النسبة")
+      }),
       h("table",null,
         h("thead",null,h("tr",{style:{borderBottom:`2px solid ${T.border}`}},
-          ["المصدر","✅ نجاح","❌ فشل","النسبة","الشريط","الحالة"].map(hd=>
+          ["المصدر","✅ نجاح","❌ فشل","النسبة","الشريط","الاتجاه","الحالة"].map(hd=>
             h("th",{key:hd,style:{color:T.muted,fontWeight:500,fontSize:11,paddingBottom:10}},hd)
           )
         )),
-        h("tbody",null,sources.map((s,i)=>{
+        h("tbody",null,sorted.map((s,i)=>{
           const t=s.ok+s.fail, r=t>0?(s.ok/t)*100:0, c=r>=90?T.green:r>=75?T.orange:T.red;
+          const trend = trendOf(s);
           return h("tr",{key:i,style:{borderBottom:`1px solid ${T.border}20`}},
-            h("td",{style:{fontWeight:600}},s.domain),
+            h("td",{style:{fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis"}},s.domain),
             h("td",null,h("span",{className:"mono",style:{color:T.green,fontWeight:700}},s.ok)),
             h("td",null,h("span",{className:"mono",style:{color:s.fail>0?T.red:T.muted}},s.fail)),
             h("td",null,h(Tag,{color:c},s.rate)),
@@ -512,6 +540,7 @@ function SourcesTab({sources}){
                 h("div",{style:{background:c,width:`${r}%`,height:"100%",borderRadius:4}})
               )
             ),
+            h("td",{style:{width:80}}, trend ? h(SourceSparkline,{values:trend,color:c,w:64,h:22}) : h("span",{style:{color:T.muted,fontSize:10}},"—")),
             h("td",{style:{fontSize:12}},r>=90?"🟢 ممتاز":r>=75?"🟡 جيد":"🔴 ضعيف")
           );
         }))
@@ -769,7 +798,7 @@ function BroadcastBox({onToast}){
   );
 }
 
-function SystemTab({system,maintenance,onToggleMaint,onClearBL,onToast}){
+function SystemTab({system,backup,maintenance,onToggleMaint,onClearBL,onToast}){
   if(!system) return h(Card,null,h(Sk,{h:300}));
   return h("div",{className:"fade-up",style:{display:"flex",flexDirection:"column",gap:16}},
     maintenance&&h("div",{style:{background:T.redDim,border:`1px solid ${T.red}55`,
@@ -779,6 +808,8 @@ function SystemTab({system,maintenance,onToggleMaint,onClearBL,onToast}){
       h(Btn,{variant:"ghost",onClick:onClearBL},"🧹 مسح Blacklist")
     ),
     h(BroadcastBox,{onToast}),
+    // ── DASH 2.0: Backup status ──
+    h(BackupCard,{backup}),
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}},
       [["Node.js",system.nodeVersion,T.green],["PID",system.pid,T.muted],
        ["Heap Used",`${system.memory.heapUsed} MB`,T.blue],["Heap Total",`${system.memory.heapTotal} MB`,T.muted],
@@ -883,7 +914,13 @@ function TraceModal({trace,onClose}){
         trace.totalMs&&h("span",{style:{fontSize:11,color:T.muted}},`⏱ ${trace.totalMs}ms`)
       ),
       trace.phases?.length
-        ? trace.phases.map((p,i)=>h(PhaseLine,{key:i,phase:p,i}))
+        ? h("div",null,
+            // الـ waterfall أوّلاً (visual)، بعدها التفاصيل النصية المتدرّجة
+            h(TraceWaterfall,{trace}),
+            h(HR),
+            h("div",{style:{fontSize:11,color:T.muted,marginBottom:6,fontWeight:600}},"📋 التفاصيل المرحلية"),
+            trace.phases.map((p,i)=>h(PhaseLine,{key:i,phase:p,i}))
+          )
         : h("div",{style:{color:T.muted,fontSize:12,padding:"12px 0",textAlign:"center"}},
             "⏳ تفاصيل المراحل لم تعد متاحة (انتهت TTL 6h) — metadata الأساسية موجودة")
     )
@@ -965,8 +1002,9 @@ const TABS=[
   {id:"sources",icon:"🔌",label:"المصادر"},
   {id:"queue",icon:"🔄",label:"الطابور"},
   {id:"users",icon:"👥",label:"المستخدمون"},
-  {id:"system",icon:"💻",label:"النظام"},
   {id:"telemetry",icon:"📡",label:"Telemetry"},
+  {id:"logs",icon:"📜",label:"السجلات"},
+  {id:"system",icon:"💻",label:"النظام"},
 ];
 
 // ── Cached Books Tab ──────────────────────────────────────────
@@ -1274,6 +1312,471 @@ function UserModal({userId,onClose,onAction}){
   );
 }
 
+// ══════════════════════════════════════════════════════════════
+// DASH 2.0 — new components (palette, help, bell, refresh, FAB,
+// trace waterfall, logs, backup, costs, source sparkline)
+// ══════════════════════════════════════════════════════════════
+
+// ── Trace Waterfall ───────────────────────────────────────────
+// رسم gantt أفقي لمراحل الـ request — أوضح من قائمة نصية. كل bar
+// نسبة عرضه = نسبة وقت المرحلة من إجمالي الـ trace.
+function TraceWaterfall({trace}){
+  if(!trace?.phases?.length) return null;
+  const total = trace.totalMs || trace.phases.reduce((s,p)=>s+(p.data?.ms||0),0) || 1;
+  const colors = {
+    request_started:T.muted, search_done:T.blue, verify_done:T.purple,
+    download_started:T.orange, download_done:T.green, request_done:T.gold,
+  };
+  let acc = 0;
+  return h("div",{style:{marginTop:14,display:"flex",flexDirection:"column",gap:4}},
+    h("div",{style:{fontSize:11,color:T.muted,marginBottom:4,fontWeight:600}},
+      `🌊 المخطط الزمني — ${total}ms إجمالي`),
+    trace.phases.map((p,i)=>{
+      const ms = p.data?.ms||0;
+      const widthPct = Math.max(2,(ms/total)*100);
+      const offsetPct = (acc/total)*100;
+      acc += ms;
+      const c = colors[p.name]||T.gold;
+      return h("div",{key:i,style:{display:"flex",alignItems:"center",gap:8,fontSize:11}},
+        h("span",{style:{width:130,color:T.text,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:0}},p.name),
+        h("div",{style:{flex:1,height:18,background:T.surface,borderRadius:3,position:"relative",overflow:"hidden"}},
+          h("div",{title:`${ms}ms`,style:{position:"absolute",left:`${offsetPct}%`,top:0,height:"100%",
+            width:`${widthPct}%`,background:c,borderRadius:3,transition:"width .3s"}})
+        ),
+        h("span",{className:"mono",style:{width:60,textAlign:"left",color:c,fontWeight:700,flexShrink:0}},`${ms}ms`)
+      );
+    })
+  );
+}
+
+// ── Help / Keyboard Shortcuts Modal ───────────────────────────
+function HelpModal({onClose}){
+  const shortcuts = [
+    {k:"Ctrl+K",       d:"فتح قائمة الأوامر السريعة (بحث وتنقل)"},
+    {k:"r",            d:"تحديث البيانات الآن"},
+    {k:"?",            d:"إظهار هذه القائمة"},
+    {k:"g ثم o",       d:"الانتقال إلى نظرة عامة"},
+    {k:"g ثم a",       d:"الانتقال إلى التحليلات"},
+    {k:"g ثم b",       d:"الانتقال إلى الكتب"},
+    {k:"g ثم c",       d:"الانتقال إلى الكاش"},
+    {k:"g ثم q",       d:"الانتقال إلى الطابور"},
+    {k:"g ثم u",       d:"الانتقال إلى المستخدمين"},
+    {k:"g ثم s",       d:"الانتقال إلى المصادر"},
+    {k:"g ثم t",       d:"الانتقال إلى Telemetry"},
+    {k:"g ثم l",       d:"الانتقال إلى Logs"},
+    {k:"g ثم m",       d:"الانتقال إلى النظام"},
+    {k:"Esc",          d:"إغلاق أي نافذة"},
+  ];
+  return h("div",{onClick:onClose,style:{
+    position:"fixed",inset:0,background:"rgba(0,0,0,.7)",zIndex:9999,
+    display:"flex",alignItems:"center",justifyContent:"center",padding:20
+  }},
+    h("div",{onClick:e=>e.stopPropagation(),className:"fade-up",style:{
+      background:T.surface,border:`1px solid ${T.border}`,borderRadius:14,
+      padding:24,maxWidth:520,width:"100%",maxHeight:"82vh",overflowY:"auto",
+      boxShadow:"0 20px 60px rgba(0,0,0,.5)"
+    }},
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}},
+        h("div",{style:{fontWeight:800,fontSize:15,color:T.gold}},"⌨️  اختصارات لوحة المفاتيح"),
+        h("button",{onClick:onClose,style:{background:"transparent",border:"none",color:T.muted,fontSize:22,cursor:"pointer"}},"×")
+      ),
+      h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+        shortcuts.map((s,i)=>h("div",{key:i,style:{display:"flex",justifyContent:"space-between",alignItems:"center",
+          padding:"9px 12px",background:T.card,borderRadius:8,border:`1px solid ${T.border}`}},
+          h("span",{style:{fontSize:12,color:T.text}},s.d),
+          h("span",{className:"mono",style:{padding:"3px 8px",background:T.bg,border:`1px solid ${T.border}`,borderRadius:5,fontSize:11,color:T.gold,fontWeight:700}},s.k)
+        ))
+      )
+    )
+  );
+}
+
+// ── Command Palette (Ctrl+K) ──────────────────────────────────
+function CommandPalette({open,onClose,onNavigate,onAction,users,books,traces}){
+  const [q,setQ]=useState("");
+  const [idx,setIdx]=useState(0);
+  const inputRef=useRef(null);
+  useEffect(()=>{ if(open){ setQ(""); setIdx(0); setTimeout(()=>inputRef.current?.focus(),50);} },[open]);
+  const list = (function(){
+    const all = [
+      ...["overview:🏠 نظرة عامة","analytics:📊 التحليلات","books:📚 الكتب","failed:❌ فشل البحث",
+          "cache:💾 مكتبة الكاش","recent:🕐 آخر الطلبات","sources:🔌 المصادر","queue:🔄 الطابور",
+          "users:👥 المستخدمون","system:💻 النظام","telemetry:📡 Telemetry","logs:📜 السجلات"]
+        .map(s=>{ const [id,label]=s.split(":"); return {type:"nav",id,label,sub:"الانتقال"};}),
+      {type:"action",id:"refresh",label:"🔄 تحديث الآن",sub:"إجراء"},
+      {type:"action",id:"help",   label:"❓ عرض المساعدة",sub:"إجراء"},
+      ...(users?.users||[]).slice(0,30).map(u=>({type:"user",id:String(u.userId),label:`👤 ${u.userId}${u.username?" (@"+u.username+")":""}`,sub:`${u.searches||0} بحث`})),
+      ...(books||[]).slice(0,15).map(b=>({type:"book",id:b.title||b.book,label:`📚 ${(b.title||b.book||"").slice(0,60)}`,sub:`${b.count||0} طلب`})),
+      ...(traces||[]).slice(0,10).map(t=>({type:"trace",id:t.id,label:`📡 ${(t.bookName||"").slice(0,50)}`,sub:`#${t.id.slice(0,10)}`})),
+    ];
+    if(!q.trim()) return all.slice(0,40);
+    const qq = q.toLowerCase();
+    return all.filter(x=>x.label.toLowerCase().includes(qq)).slice(0,40);
+  })();
+  const choose = (it)=>{
+    if(!it) return;
+    if(it.type==="nav")    onNavigate(it.id);
+    if(it.type==="action") onAction(it.id);
+    if(it.type==="user")   onAction("user:"+it.id);
+    if(it.type==="trace")  onAction("trace:"+it.id);
+    onClose();
+  };
+  const onKey = (e)=>{
+    if(e.key==="ArrowDown"){ e.preventDefault(); setIdx(i=>Math.min(list.length-1,i+1)); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); setIdx(i=>Math.max(0,i-1)); }
+    else if(e.key==="Enter"){ e.preventDefault(); choose(list[idx]); }
+    else if(e.key==="Escape"){ onClose(); }
+  };
+  if(!open) return null;
+  return h("div",{onClick:onClose,style:{
+    position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:10000,
+    display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"10vh 20px 20px"
+  }},
+    h("div",{onClick:e=>e.stopPropagation(),className:"fade-up",style:{
+      background:T.surface,border:`1px solid ${T.border}`,borderRadius:14,
+      width:"100%",maxWidth:560,boxShadow:"0 20px 60px rgba(0,0,0,.5)",overflow:"hidden",direction:"rtl"
+    }},
+      h("div",{style:{display:"flex",alignItems:"center",gap:10,padding:"14px 16px",borderBottom:`1px solid ${T.border}`}},
+        h("span",{style:{fontSize:18,color:T.gold}},"⌨"),
+        h("input",{ref:inputRef,value:q,onChange:e=>{setQ(e.target.value);setIdx(0);},
+          onKeyDown:onKey,placeholder:"ابحث: مستخدم، كتاب، أو إجراء…",
+          style:{flex:1,background:"transparent",border:"none",outline:"none",fontSize:14,color:T.text}}),
+        h("span",{className:"mono",style:{padding:"3px 8px",background:T.bg,border:`1px solid ${T.border}`,borderRadius:5,fontSize:10,color:T.muted,whiteSpace:"nowrap"}},"Esc للإغلاق")
+      ),
+      h("div",{style:{maxHeight:"58vh",overflowY:"auto"}},
+        list.length===0 && h("div",{style:{padding:"24px 20px",textAlign:"center",color:T.muted,fontSize:13}},"لا نتائج"),
+        list.map((it,i)=>h("div",{key:`${it.type}:${it.id}:${i}`,onClick:()=>choose(it),onMouseEnter:()=>setIdx(i),
+          style:{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",cursor:"pointer",
+            background: i===idx ? T.goldDim+"22" : "transparent",
+            borderRight: i===idx ? `2px solid ${T.gold}` : "2px solid transparent"}},
+          h("span",{style:{flex:1,fontSize:13,color:i===idx?T.gold:T.text,fontWeight:i===idx?600:400,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},it.label),
+          h("span",{style:{fontSize:11,color:T.muted}},it.sub)
+        ))
+      ),
+      h("div",{style:{padding:"8px 16px",borderTop:`1px solid ${T.border}`,fontSize:11,color:T.muted,display:"flex",gap:14}},
+        h("span",null,"↑↓ للتنقل"),
+        h("span",null,"↵ للاختيار"),
+        h("span",null,`${list.length} نتيجة`)
+      )
+    )
+  );
+}
+
+// ── Notification Bell — uses log buffer to surface recent ERROR/WARN ──
+function NotificationBell({logs,onClick}){
+  const issues = (logs?.lines||[]).filter(l=>l.level==="ERROR"||l.level==="WARN").slice(-20).reverse();
+  const recent = issues.filter(l=>Date.now()-l.ts < 30*60*1000); // last 30min
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!open) return;
+    const fn = (e)=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown",fn);
+    return ()=>document.removeEventListener("mousedown",fn);
+  },[open]);
+  return h("div",{ref,style:{position:"relative"}},
+    h("button",{onClick:()=>setOpen(o=>!o),"aria-label":"تنبيهات",style:{
+      background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+      width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:15,position:"relative"
+    }},"🔔",
+      recent.length>0 && h("span",{style:{position:"absolute",top:-4,left:-4,background:T.red,color:"#fff",
+        fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}},recent.length)
+    ),
+    open && h("div",{className:"fade-up",style:{
+      position:"absolute",top:"calc(100% + 8px)",left:0,zIndex:200,
+      width:340,background:T.surface,border:`1px solid ${T.border}`,borderRadius:12,
+      boxShadow:"0 12px 40px rgba(0,0,0,.4)",overflow:"hidden"
+    }},
+      h("div",{style:{padding:"12px 14px",borderBottom:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between"}},
+        h("span",{style:{fontWeight:700,fontSize:13,color:T.gold}},"🔔 تنبيهات حديثة"),
+        h("span",{style:{fontSize:11,color:T.muted}},`${issues.length} مدخل`)
+      ),
+      h("div",{style:{maxHeight:360,overflowY:"auto"}},
+        issues.length===0 && h("div",{style:{padding:"22px 16px",textAlign:"center",color:T.muted,fontSize:12}},"لا تنبيهات — كل شيء على ما يرام"),
+        issues.map((l,i)=>{
+          const c = l.level==="ERROR" ? T.red : T.orange;
+          const ago = Math.floor((Date.now()-l.ts)/1000);
+          const agoStr = ago<60?`${ago}ث`:ago<3600?`${Math.floor(ago/60)}د`:`${Math.floor(ago/3600)}س`;
+          return h("div",{key:i,style:{padding:"10px 14px",borderBottom:i<issues.length-1?`1px solid ${T.border}55`:"none"}},
+            h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}},
+              h("span",{style:{fontSize:11,fontWeight:700,color:c}},`${l.level} • ${l.ns}`),
+              h("span",{style:{fontSize:10,color:T.muted}},agoStr)
+            ),
+            h("div",{style:{fontSize:12,color:T.text,lineHeight:1.4}},(l.msg||"").slice(0,120))
+          );
+        })
+      ),
+      h("div",{style:{padding:"8px 14px",borderTop:`1px solid ${T.border}`}},
+        h("button",{onClick:()=>{ setOpen(false); onClick?.(); },style:{
+          background:"transparent",border:"none",color:T.gold,fontSize:11,cursor:"pointer",fontWeight:600
+        }},"عرض كل السجلات →")
+      )
+    )
+  );
+}
+
+// ── Auto-Refresh Control ──────────────────────────────────────
+function AutoRefreshControl({intervalMs,setIntervalMs,onRefreshNow,lastTs}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!open) return;
+    const fn = (e)=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown",fn);
+    return ()=>document.removeEventListener("mousedown",fn);
+  },[open]);
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{ const t=setInterval(()=>setNow(Date.now()),500); return ()=>clearInterval(t); },[]);
+  const elapsed = now - (lastTs||now);
+  const remainingMs = intervalMs ? Math.max(0, intervalMs - elapsed) : 0;
+  const pct = intervalMs ? Math.max(0, 1 - elapsed/intervalMs) : 0;
+  const opts = [
+    {ms:0,         label:"إيقاف"},
+    {ms:10000,     label:"10 ث"},
+    {ms:30000,     label:"30 ث"},
+    {ms:60000,     label:"1 د"},
+    {ms:5*60*1000, label:"5 د"},
+  ];
+  const current = opts.find(o=>o.ms===intervalMs)?.label || "30 ث";
+  const size = 32, r = 13, c = 2*Math.PI*r;
+  return h("div",{ref,style:{position:"relative"}},
+    h("button",{onClick:()=>setOpen(o=>!o),title:"التحديث التلقائي",style:{
+      background:"transparent",border:`1px solid ${T.border}`,padding:"4px 10px",
+      borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",gap:8,
+      color:T.text,fontSize:12,height:34
+    }},
+      // mini countdown ring
+      h("svg",{width:size,height:size,style:{transform:"rotate(-90deg)"}},
+        h("circle",{cx:size/2,cy:size/2,r,fill:"none",stroke:T.border,strokeWidth:2}),
+        intervalMs>0 && h("circle",{cx:size/2,cy:size/2,r,fill:"none",stroke:T.gold,strokeWidth:2,
+          strokeDasharray:c,strokeDashoffset:c*(1-pct),strokeLinecap:"round",style:{transition:"stroke-dashoffset 0.3s linear"}})
+      ),
+      h("span",null,intervalMs===0?"إيقاف":current),
+      h("span",{style:{color:T.muted,fontSize:10}},"▾")
+    ),
+    open && h("div",{className:"fade-up",style:{
+      position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:200,
+      background:T.surface,border:`1px solid ${T.border}`,borderRadius:10,
+      boxShadow:"0 8px 24px rgba(0,0,0,.4)",minWidth:160,padding:6
+    }},
+      opts.map(o=>h("button",{key:o.ms,onClick:()=>{setIntervalMs(o.ms);setOpen(false);},style:{
+        display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",
+        background: o.ms===intervalMs ? T.goldDim+"30" : "transparent",
+        border:"none",color:o.ms===intervalMs?T.gold:T.text,
+        padding:"8px 12px",borderRadius:6,cursor:"pointer",fontSize:12,textAlign:"right"
+      }}, o.label, o.ms===intervalMs ? h("span",{style:{color:T.gold}},"✓") : null)),
+      h("div",{style:{borderTop:`1px solid ${T.border}`,marginTop:4,paddingTop:4}},
+        h("button",{onClick:()=>{ onRefreshNow(); setOpen(false); },style:{
+          width:"100%",background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,color:T.gold,
+          padding:"7px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600
+        }},"🔄 تحديث الآن")
+      )
+    )
+  );
+}
+
+// ── Quick Actions FAB ─────────────────────────────────────────
+function QuickActionsFAB({onPalette,onMaint,maintenance}){
+  const [open,setOpen]=useState(false);
+  const actions = [
+    {id:"palette",icon:"⌨️",label:"قائمة الأوامر (Ctrl+K)",onClick:onPalette,color:T.gold},
+    {id:"maint",icon:maintenance?"✅":"🔴",label:maintenance?"إيقاف الصيانة":"تفعيل الصيانة",onClick:onMaint,color:maintenance?T.green:T.red},
+  ];
+  return h("div",{style:{position:"fixed",bottom:20,left:20,zIndex:90}},
+    open && h("div",{className:"fade-up",style:{
+      position:"absolute",bottom:60,left:0,display:"flex",flexDirection:"column",gap:8
+    }},
+      actions.map(a=>h("button",{key:a.id,onClick:()=>{a.onClick();setOpen(false);},style:{
+        background:T.surface,border:`1px solid ${a.color}55`,color:a.color,
+        padding:"10px 14px",borderRadius:10,fontSize:12,fontWeight:600,
+        whiteSpace:"nowrap",cursor:"pointer",boxShadow:"0 4px 14px rgba(0,0,0,.3)",display:"flex",alignItems:"center",gap:8
+      }}, h("span",null,a.icon)," ",a.label))
+    ),
+    h("button",{onClick:()=>setOpen(o=>!o),"aria-label":"إجراءات سريعة",style:{
+      width:50,height:50,borderRadius:"50%",border:"none",cursor:"pointer",
+      background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
+      color:"#1a1208",fontSize:22,fontWeight:800,
+      boxShadow:`0 8px 24px ${T.gold}55`,
+      transition:"transform .2s",transform:open?"rotate(45deg)":"rotate(0)"
+    }},"+")
+  );
+}
+
+// ── Backup Status Card ────────────────────────────────────────
+function BackupCard({backup}){
+  if(!backup) return h(Card,null,h(SH,{icon:"💾",title:"النسخ الاحتياطي"}),h(Sk,{h:120}));
+  const {dirOk,latest,ageHours,total,healthy,retention,files,dir} = backup;
+  if(!dirOk) return h(Card,null,
+    h(SH,{icon:"💾",title:"النسخ الاحتياطي"}),
+    h("div",{style:{padding:"10px 12px",background:T.redDim+"30",border:`1px solid ${T.red}55`,borderRadius:8,color:T.red,fontSize:12}},
+      `🚫 المسار ${dir} غير متاح للـ container — أضف volume mount أو غيّر BACKUP_DIR`)
+  );
+  if(!latest) return h(Card,null,
+    h(SH,{icon:"💾",title:"النسخ الاحتياطي"}),
+    h("div",{style:{padding:"10px 12px",background:T.redDim+"30",border:`1px solid ${T.red}55`,borderRadius:8,color:T.red,fontSize:12}},
+      `❌ لا توجد نسخ احتياطية في ${dir} — تأكّد إن الـ cron شغّال`)
+  );
+  const sizeKB = Math.round(latest.size/1024);
+  const ageStr = ageHours==null ? "—" : ageHours<1 ? "أحدث من ساعة" : `${ageHours} ساعة`;
+  const dt = new Date(latest.mtime);
+  const dtStr = dt.toLocaleString("ar-EG",{dateStyle:"short",timeStyle:"short"});
+  return h(Card,null,
+    h(SH,{icon:"💾",title:"النسخ الاحتياطي اليومي"}),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:10,marginBottom:14}},
+      [["الحالة",healthy?"🟢 صحّية":"⚠️ قديمة",healthy?T.green:T.orange],
+       ["العمر",ageStr,healthy?T.text:T.orange],
+       ["حجم آخر نسخة",`${sizeKB} KB`,T.blue],
+       ["النسخ المحفوظة",`${total} / ${retention} يوم`,T.gold]]
+      .map(([l,v,c])=>h("div",{key:l,style:{padding:"10px 12px",background:T.surface,borderRadius:8,border:`1px solid ${T.border}`}},
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:3}},l),
+        h("div",{className:"mono",style:{fontWeight:700,fontSize:13,color:c}},v)
+      ))
+    ),
+    h("div",{style:{fontSize:11,color:T.muted,marginBottom:8}},
+      `آخر نسخة: ${latest.name} — ${dtStr}`),
+    files?.length>1 && h("details",null,
+      h("summary",{style:{cursor:"pointer",color:T.gold,fontSize:12,padding:"6px 0"}},`📦 كل النسخ (${files.length})`),
+      h("div",{style:{fontSize:11,marginTop:6,maxHeight:160,overflowY:"auto",border:`1px solid ${T.border}`,borderRadius:6}},
+        files.map((f,i)=>h("div",{key:i,style:{padding:"6px 10px",borderBottom:i<files.length-1?`1px solid ${T.border}55`:"none",display:"flex",justifyContent:"space-between",gap:8}},
+          h("span",{className:"mono",style:{color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},f.name),
+          h("span",{style:{color:T.muted,whiteSpace:"nowrap"}},`${Math.round(f.size/1024)} KB`)
+        ))
+      )
+    )
+  );
+}
+
+// ── Costs Card (Firecrawl + AI providers) ─────────────────────
+function CostsCard({costs}){
+  if(!costs) return h(Card,null,h(SH,{icon:"💰",title:"التكلفة التقريبية"}),h(Sk,{h:120}));
+  const fc = costs.firecrawl||{};
+  const providers = Object.entries(costs.aiByProvider||{}).sort(([,a],[,b])=>b-a);
+  const totalAi = providers.reduce((s,[,v])=>s+v,0);
+  return h(Card,null,
+    h(SH,{icon:"💰",title:"التكلفة التقريبية الشهرية",actions:
+      h(Tag,{color:T.muted,size:10},"تقدير — راجع فواتير المزوّد")
+    }),
+    h("div",{style:{display:"flex",gap:18,alignItems:"center",marginBottom:14,flexWrap:"wrap"}},
+      h("div",null,
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:4}},"إجمالي تقديري الشهر"),
+        h("div",{style:{fontSize:28,fontWeight:800,color:T.gold,fontFamily:"'IBM Plex Mono',monospace"}},`$${(costs.estimatedMonthUsd||0).toFixed(2)}`)
+      ),
+      h("div",{style:{height:48,width:1,background:T.border}}),
+      h("div",null,
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:4}},"Firecrawl credits (الشهر)"),
+        h("div",{className:"mono",style:{fontSize:18,fontWeight:700,color:T.blue}},(fc.month||0).toLocaleString())
+      ),
+      h("div",null,
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:4}},"AI calls (الشهر)"),
+        h("div",{className:"mono",style:{fontSize:18,fontWeight:700,color:T.purple}},totalAi.toLocaleString())
+      )
+    ),
+    providers.length>0 && h("div",null,
+      h("div",{style:{fontSize:11,color:T.muted,marginBottom:6,fontWeight:600}},"التوزيع حسب المزوّد:"),
+      h("div",{style:{display:"flex",flexDirection:"column",gap:5}},
+        providers.map(([p,v])=>{
+          const pct = totalAi>0 ? (v/totalAi)*100 : 0;
+          return h("div",{key:p,style:{display:"flex",alignItems:"center",gap:8,fontSize:11}},
+            h("span",{style:{width:90,color:T.text}},p),
+            h("div",{style:{flex:1,height:8,background:T.surface,borderRadius:4,overflow:"hidden"}},
+              h("div",{style:{height:"100%",width:`${pct}%`,background:T.purple,borderRadius:4}})
+            ),
+            h("span",{className:"mono",style:{width:64,textAlign:"left",color:T.text,fontWeight:700}},v.toLocaleString())
+          );
+        })
+      )
+    ),
+    !providers.length && h("div",{style:{fontSize:11,color:T.muted,padding:"12px 0"}},"لا توجد بيانات استدعاءات بعد لهذا الشهر")
+  );
+}
+
+// ── Source Sparkline (mini line chart of last 7d success rate) ──
+function SourceSparkline({values=[],color=T.gold,w=64,h:height=22}){
+  if(!values.length) return h("div",{style:{width:w,height,color:T.muted,fontSize:10,textAlign:"center"}},"—");
+  const max = Math.max(...values, 1);
+  const points = values.map((v,i)=>{
+    const x = (i/(values.length-1||1)) * w;
+    const y = height - (v/max)*height + 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return h("svg",{width:w,height,style:{display:"block"}},
+    h("polyline",{points,fill:"none",stroke:color,strokeWidth:1.5,strokeLinejoin:"round",strokeLinecap:"round"})
+  );
+}
+
+// ── Logs Tab — live tail of bot logs from in-memory ring buffer ──
+function LogsTab({logs,onRefresh}){
+  const [level,setLevel]=useState("");
+  const [autoScroll,setAutoScroll]=useState(true);
+  const scrollRef=useRef(null);
+  useEffect(()=>{ if(autoScroll && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+  if(!logs) return h(Card,null,h(Sk,{h:300}));
+  const filtered = level ? (logs.lines||[]).filter(l=>l.level===level) : (logs.lines||[]);
+  const stats = logs.stats||{};
+  const counts = (logs.lines||[]).reduce((m,l)=>{ m[l.level]=(m[l.level]||0)+1; return m; },{});
+  const colors = {DEBUG:T.muted,INFO:T.blue,WARN:T.orange,ERROR:T.red};
+  const Filter = ({lvl})=>h("button",{onClick:()=>setLevel(level===lvl?"":lvl),style:{
+    background: level===lvl ? (colors[lvl]||T.gold)+"22" : "transparent",
+    border:`1px solid ${level===lvl ? (colors[lvl]||T.gold) : T.border}`,
+    color: level===lvl ? (colors[lvl]||T.gold) : T.muted,
+    padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer"
+  }}, lvl, " ", h("span",{style:{color:T.muted,marginRight:4}},`(${counts[lvl]||0})`));
+  return h("div",{className:"fade-up"},
+    h(Card,null,
+      h(SH,{icon:"📜",title:`السجلات الحيّة — ${stats.size||0}/${stats.max||0} سطر في الذاكرة`,actions:[
+        h(Btn,{key:"r",onClick:onRefresh,size:"sm"},"🔄 تحديث"),
+      ]}),
+      h("div",{style:{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap",alignItems:"center"}},
+        h("span",{style:{fontSize:11,color:T.muted,marginLeft:4}},"تصفية:"),
+        h(Filter,{lvl:"DEBUG"}),
+        h(Filter,{lvl:"INFO"}),
+        h(Filter,{lvl:"WARN"}),
+        h(Filter,{lvl:"ERROR"}),
+        h("label",{style:{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.muted,cursor:"pointer",marginRight:"auto"}},
+          h("input",{type:"checkbox",checked:autoScroll,onChange:e=>setAutoScroll(e.target.checked),style:{width:14}})," تمرير تلقائي"
+        ),
+        h(Btn,{onClick:()=>{
+          const text = filtered.map(l=>{
+            const ts = new Date(l.ts).toISOString();
+            return `[${ts}] [${l.level}] [${l.ns}] ${l.msg}${l.meta?" "+JSON.stringify(l.meta):""}`;
+          }).join("\n");
+          const blob = new Blob([text],{type:"text/plain"});
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `bot-logs-${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.log`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        },size:"sm"},"⬇ تنزيل")
+      ),
+      h("div",{ref:scrollRef,style:{
+        background:T.bg,border:`1px solid ${T.border}`,borderRadius:8,
+        padding:"8px 10px",height:"60vh",overflowY:"auto",
+        fontFamily:"'IBM Plex Mono',monospace",fontSize:11,direction:"ltr"
+      }},
+        filtered.length===0 && h("div",{style:{color:T.muted,padding:"20px 0",textAlign:"center"}},"لا سطور تطابق الفلتر"),
+        filtered.map((l,i)=>{
+          const ts = new Date(l.ts).toISOString().slice(11,23);
+          const c = colors[l.level]||T.text;
+          return h("div",{key:i,style:{padding:"2px 0",lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word",borderBottom:i<filtered.length-1?`1px solid ${T.border}33`:"none"}},
+            h("span",{style:{color:T.muted}},ts," "),
+            h("span",{style:{color:c,fontWeight:700,minWidth:48,display:"inline-block"}},`[${l.level}]`),
+            h("span",{style:{color:T.purple}},` [${l.ns}]`),
+            h("span",{style:{color:T.text}},` ${l.msg}`),
+            l.meta && h("span",{style:{color:T.muted}},` ${JSON.stringify(l.meta)}`)
+          );
+        })
+      )
+    )
+  );
+}
+
+// ── Topbar Theme/Density toggle (visual density) ──────────────
+function DensityToggle({dense,setDense}){
+  return h("button",{onClick:()=>setDense(!dense),title:dense?"كثافة عالية":"كثافة عادية",
+    style:{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+      width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:14}},dense?"▤":"▥");
+}
+
 function App({onLogout}){
   const [tab,setTab]=useState("overview");
   // mobile detection — react to viewport changes
@@ -1304,6 +1807,17 @@ function App({onLogout}){
   const [traces,setTraces]=useState([]);
   const [isMock,setIsMock]=useState(false);
   const [ago,setAgo]=useState("الآن");
+  // ── DASH 2.0 state ──────────────────────────────
+  const [logs,setLogs]=useState(null);
+  const [bgLogs,setBgLogs]=useState(null);   // background poll for bell badge
+  const [backup,setBackup]=useState(null);
+  const [costs,setCosts]=useState(null);
+  const [paletteOpen,setPaletteOpen]=useState(false);
+  const [helpOpen,setHelpOpen]=useState(false);
+  const [refreshInterval,setRefreshInterval]=useState(()=>{
+    try { const v = parseInt(localStorage.getItem("bookbot_dash_refresh")||"30000",10); return isNaN(v)?30000:v; } catch { return 30000; }
+  });
+  useEffect(()=>{ try { localStorage.setItem("bookbot_dash_refresh",String(refreshInterval)); } catch {} },[refreshInterval]);
 
   const showToast=(msg,type="ok")=>setToast({msg,type});
 
@@ -1348,6 +1862,29 @@ function App({onLogout}){
       if(r)setRecent(r);
     }
 
+    // ── DASH 2.0: Logs tab يحتاج refresh على كل tick ──
+    if(tabRef.current==="logs"){
+      const r=await loadLogs(300).catch(()=>null);
+      if(r)setLogs(r);
+    }
+
+    // ── DASH 2.0: Costs widget في overview tab ──
+    if(tabRef.current==="overview"){
+      const r=await loadCosts().catch(()=>null);
+      if(r)setCosts(r);
+    }
+
+    // ── DASH 2.0: Backup card في system tab ──
+    if(tabRef.current==="system"){
+      const r=await loadBackup().catch(()=>null);
+      if(r)setBackup(r);
+    }
+
+    // ── DASH 2.0: Background log poll للـ notification bell (50 سطر فقط) ──
+    // كل 60 ثانية حتى لو لم نكن في logs tab — عشان الجرس يحدّث الـ badge.
+    const r = await loadLogs(50).catch(()=>null);
+    if(r) setBgLogs(r);
+
     setIsMock(_mock);
     setTs(Date.now());
   },[]);
@@ -1377,13 +1914,64 @@ function App({onLogout}){
     if(tab==="analytics"&&prevTabRef.current!=="analytics"&&!heatmap){
       apiFetch("db/hourly-heatmap").then(r=>{if(r)setHeatmap(r);}).catch(()=>{});
     }
+    // ── DASH 2.0 — fetch immediately when tab opens ──
+    if(tab==="logs"&&prevTabRef.current!=="logs"){
+      loadLogs(300).then(r=>{if(r)setLogs(r);}).catch(()=>{});
+    }
+    if(tab==="system"&&prevTabRef.current!=="system"){
+      loadBackup().then(r=>{if(r)setBackup(r);}).catch(()=>{});
+    }
+    if(tab==="overview"&&prevTabRef.current!=="overview"){
+      loadCosts().then(r=>{if(r)setCosts(r);}).catch(()=>{});
+    }
     prevTabRef.current=tab;
   },[tab]);
 
   useEffect(()=>{
     loadAll();
-    const t=setInterval(loadAll,REFRESH);
+    if(refreshInterval<=0) return; // الإيقاف اليدوي
+    const t=setInterval(loadAll,refreshInterval);
     return()=>clearInterval(t);
+  },[loadAll,refreshInterval]);
+
+  // ── DASH 2.0: Keyboard shortcuts (Ctrl+K, ?, r, g+letter) ──────
+  useEffect(()=>{
+    const tabIdByKey = {o:"overview",a:"analytics",b:"books",c:"cache",q:"queue",
+                       u:"users",s:"sources",t:"telemetry",l:"logs",m:"system"};
+    let gPending = false;
+    let gTimer = null;
+    const isTyping = () => {
+      const a = document.activeElement;
+      if(!a) return false;
+      const t = (a.tagName||"").toLowerCase();
+      return t==="input"||t==="textarea"||t==="select"||a.isContentEditable;
+    };
+    const onKey = (e)=>{
+      // Ctrl+K / Cmd+K — أفضل ما يكون فعّال حتى أثناء الكتابة
+      if((e.ctrlKey||e.metaKey)&&(e.key==="k"||e.key==="K")){
+        e.preventDefault();
+        setPaletteOpen(o=>!o);
+        return;
+      }
+      if(isTyping()) return;
+      if(e.key==="?"){ e.preventDefault(); setHelpOpen(true); return; }
+      if(e.key==="r"||e.key==="R"){ e.preventDefault(); loadAll(); return; }
+      if(e.key==="Escape"){ setPaletteOpen(false); setHelpOpen(false); return; }
+      if(e.key==="g"||e.key==="G"){
+        gPending = true;
+        if(gTimer) clearTimeout(gTimer);
+        gTimer = setTimeout(()=>{ gPending=false; }, 1000);
+        return;
+      }
+      if(gPending && tabIdByKey[e.key.toLowerCase()]){
+        gPending = false;
+        if(gTimer) clearTimeout(gTimer);
+        setTab(tabIdByKey[e.key.toLowerCase()]);
+        return;
+      }
+    };
+    document.addEventListener("keydown",onKey);
+    return ()=>{ document.removeEventListener("keydown",onKey); if(gTimer) clearTimeout(gTimer); };
   },[loadAll]);
 
   useEffect(()=>{
@@ -1468,18 +2056,28 @@ function App({onLogout}){
           maintenance&&h(Tag,{color:T.red},"🔴 صيانة"),
           isMock&&h(Tag,{color:T.orange},"🟡 بيانات تجريبية")
         ),
-        h("div",{style:{display:"flex",alignItems:"center",gap:10,flexShrink:0}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:8,flexShrink:0}},
           !isMock&&h("span",{className:"topbar-status"},h(Tag,{color:T.green,size:11},"🟢 متصل")),
           h("div",{className:"topbar-status",style:{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.muted}},
             h(Dot)," ",ago),
-          h(Btn,{variant:"gold",size:"sm",onClick:loadAll},"🔄"),
+          // DASH 2.0: Auto-refresh control + bell + palette + help
+          !isMobile && h(AutoRefreshControl,{intervalMs:refreshInterval,setIntervalMs:setRefreshInterval,onRefreshNow:loadAll,lastTs:ts}),
+          h(NotificationBell,{logs:bgLogs,onClick:()=>setTab("logs")}),
+          h("button",{onClick:()=>setPaletteOpen(true),title:"قائمة الأوامر (Ctrl+K)",style:{
+            background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+            width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:14
+          }},"⌨"),
+          h("button",{onClick:()=>setHelpOpen(true),title:"اختصارات (?)",style:{
+            background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+            width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:14
+          }},"?"),
           !isMobile && h("div",{style:{background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,
             color:T.gold,padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:600}},"🛡️ أدمن")
         )
       ),
       // Content
       h("div",{className:"content",style:{flex:1,overflowY:"auto",padding:"22px 18px"}},
-        tab==="overview"  &&h(OverviewTab,{ov}),
+        tab==="overview"  &&h(OverviewTab,{ov,costs}),
         tab==="analytics" &&h(AnalyticsTab,{weekly:ov?.weekly||[],heatmap}),
         tab==="books"     &&h(BooksTab,{books}),
         tab==="failed"    &&h(FailedTab,{failed}),
@@ -1488,10 +2086,24 @@ function App({onLogout}){
         tab==="sources"   &&h(SourcesTab,{sources}),
         tab==="queue"     &&h(QueueTab,{queue:ov?.queue,dlq,onToast:showToast,onRefresh:loadAll}),
         tab==="users"     &&h(UsersTab,{prem,banned,allUsers,onToast:showToast,onRefresh:loadAll,onUserClick:setDrillId}),
-        tab==="system"    &&h(SystemTab,{system:ov?.system,maintenance,onToggleMaint:handleToggleMaint,onClearBL:handleClearBL,onToast:showToast}),
-        tab==="telemetry" &&h(TelemetryTab,{funnel,traces})
+        tab==="system"    &&h(SystemTab,{system:ov?.system,backup,maintenance,onToggleMaint:handleToggleMaint,onClearBL:handleClearBL,onToast:showToast}),
+        tab==="telemetry" &&h(TelemetryTab,{funnel,traces}),
+        tab==="logs"      &&h(LogsTab,{logs,onRefresh:()=>loadLogs(300).then(r=>r&&setLogs(r))})
       )
     ),
+    // ── DASH 2.0 overlays ──
+    h(CommandPalette,{open:paletteOpen,onClose:()=>setPaletteOpen(false),
+      onNavigate:(id)=>setTab(id),
+      onAction:(id)=>{
+        if(id==="refresh") loadAll();
+        else if(id==="help") setHelpOpen(true);
+        else if(id.startsWith("user:")) setDrillId(id.slice(5));
+        // trace:<id> — simple navigation to telemetry
+        else if(id.startsWith("trace:")) setTab("telemetry");
+      },
+      users:allUsers, books, traces}),
+    helpOpen && h(HelpModal,{onClose:()=>setHelpOpen(false)}),
+    h(QuickActionsFAB,{onPalette:()=>setPaletteOpen(true),onMaint:handleToggleMaint,maintenance}),
     toast&&h(Toast,{msg:toast.msg,type:toast.type,onDone:()=>setToast(null)}),
     drillId&&h(UserModal,{userId:drillId,onClose:()=>setDrillId(null),onAction:async(type,id2)=>{
       const m={
