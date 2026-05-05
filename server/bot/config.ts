@@ -205,6 +205,24 @@ export const SOURCE_AUTO_DISABLE_TRUST_MAX_RATE = parseFloat(
   process.env.SOURCE_AUTO_DISABLE_TRUST_MAX_RATE || "0.20",
 );
 
+// ── Mistral-only catastrophic tier ────────────
+// مصادر بـ ok/fail قليلين لكن Mistral بيرفض بكثافة — يعني الـ search
+// بيلاقي PDF صحيح من ناحية الشكل لكن المحتوى كتاب غلط مرارا. الـ TRUST
+// tier محتاج 10 محاولات إجمالية، لكن لو المصدر رجّع 7 رفض Mistral و 0
+// نجاح فعلي، الـ trust tier ما يقدرش يحجبه (totalWithRejects=7 < 10).
+// مثال حقيقي: dn790009.ca.archive.org → 0 ok / 0 fail / 7 mistralRejected،
+// ظل بيتحاول كل بحث فيه نتائج archive.org ثقيلة.
+//
+// نحجب لو: mistralRejected ≥ MIN_REJECTS، و mistralRejected ≥ ok × RATIO
+// (يعني الرفض غالب على النجاح).
+export const SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS || "5",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO || "2.0",
+);
+
 // ── Trusted PDF domains ───────────────────────
 // Aggregators / mirrors. Anything served from these download/dl paths
 // is assumed to be the requested book — we skip Mistral entirely.
