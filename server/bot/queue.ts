@@ -1,5 +1,5 @@
-import { redis }    from "./redis.js";
-import { L }        from "./logger.js";
+import { redis, scanKeys } from "./redis.js";
+import { L }               from "./logger.js";
 import type { QueueJob, EnqueueResult } from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -80,9 +80,10 @@ export async function enqueue(
 // ── Dequeue ───────────────────────────────────
 
 export async function dequeue(): Promise<QueueJob | null> {
+  let raw: string | null = null;
   try {
     // high priority أولاً
-    let raw = await redis.lpop(Q_HIGH);
+    raw = await redis.lpop(Q_HIGH);
     if (!raw) raw = await redis.lpop(Q_NORMAL);
     if (!raw) return null;
 
@@ -91,7 +92,13 @@ export async function dequeue(): Promise<QueueJob | null> {
 
     await redis.sadd(Q_ACTIVE, job.id);
     return job;
-  } catch {
+  } catch (e) {
+    // كان `catch {}` صامت — الآن نسجل عشان لو فيه entry فاسد في Redis
+    // ما نضيع الإشارة ولا نقع في حلقة failure مخفية.
+    L.error("queue", `Dequeue failed`, {
+      err:    String(e).slice(0, 100),
+      sample: raw ? raw.slice(0, 80) : null,
+    });
     return null;
   }
 }
@@ -203,7 +210,6 @@ export async function getUserPendingCount(userId: string): Promise<number> {
 export async function recoverStuckJobs(): Promise<void> {
   try {
     const activeIds = await redis.smembers(Q_ACTIVE);
-    if (!activeIds.length) return;
 
     // اجمع كل الـ job IDs الموجودة في الطابورَين
     const [highItems, normalItems] = await Promise.all([
@@ -226,12 +232,57 @@ export async function recoverStuckJobs(): Promise<void> {
       L.warn("queue", `Found ${stuckIds.length} stuck job IDs in Q_ACTIVE — clearing (jobs were lost in crash)`);
     }
 
+    // FIX-AUDIT: تنظيف USER_JOBS lists الـ orphan.
+    // قبل هذا الإصلاح: لما البوت يرجع بعد crash، Q_ACTIVE بيتمسح لكن USER_JOBS
+    // كانت بتفضل عاملة reference لـ jobs مفقودة — `getUserPendingCount` كان
+    // يرجع >0 غلط ويقفل اليوزر على MAX_USER_PENDING للأبد.
+    // الحل: نقرا كل USER_JOBS list، نشيل أي ID مش موجود في الطابورَين.
+    let orphanIds  = 0;
+    let cleanedKeys = 0;
+    let removedKeys = 0;
+    try {
+      const userJobKeys = await scanKeys("queue:user:*");
+      if (userJobKeys.length > 0) {
+        const lrangePipe = redis.pipeline();
+        for (const key of userJobKeys) lrangePipe.lrange(key, 0, -1);
+        const lrangeRes = await lrangePipe.exec();
+
+        const cleanupPipe = redis.pipeline();
+        for (let i = 0; i < userJobKeys.length; i++) {
+          const key = userJobKeys[i];
+          const ids = (lrangeRes?.[i]?.[1] as string[] | null) || [];
+          if (ids.length === 0) continue;
+
+          const orphans = ids.filter((id) => !queuedIds.has(id));
+          if (orphans.length === 0) continue;
+
+          orphanIds += orphans.length;
+
+          if (orphans.length === ids.length) {
+            // كل الـ list orphan — احذف المفتاح كله
+            cleanupPipe.del(key);
+            removedKeys++;
+          } else {
+            // بعض الـ IDs orphan — شيلهم بـ lrem
+            for (const orphan of orphans) cleanupPipe.lrem(key, 0, orphan);
+            cleanedKeys++;
+          }
+        }
+        if (cleanedKeys + removedKeys > 0) await cleanupPipe.exec();
+      }
+    } catch (e) {
+      L.warn("queue", `USER_JOBS cleanup partial fail`, { err: String(e).slice(0, 100) });
+    }
+
     // مسح Q_ACTIVE — جميع الـ workers توقفوا عند restart
     await redis.del(Q_ACTIVE);
 
     L.info("queue", `recoverStuckJobs done`, {
       cleared:  activeIds.length,
       stuckIds: stuckIds.length,
+      orphanUserJobIds: orphanIds,
+      cleanedUserKeys:  cleanedKeys,
+      removedUserKeys:  removedKeys,
     });
   } catch (e) {
     L.error("queue", `recoverStuckJobs error`, { err: String(e).slice(0, 100) });
