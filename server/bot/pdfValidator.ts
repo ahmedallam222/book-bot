@@ -228,6 +228,7 @@ const ARABIC_STOPWORDS = new Set<string>([
 
 export type PdfValidationEvent =
   | "candidate_accepted_title_match"
+  | "candidate_accepted_filename_strong"
   | "candidate_rejected_title_mismatch"
   | "trusted_domain_title_mismatch"
   | "mistral_rerank_used"
@@ -973,10 +974,51 @@ export async function validatePdfContent(
       return { accepted: false, score: 0, event: "candidate_rejected_title_mismatch", mistralUsed: false, metaTitle: "" };
     }
 
+    // ── Strong-filename-match short-circuit ─────────────────
+    // PR E (#3): When metaTitle is empty but the filename has high word
+    // overlap with the requested book name, accept directly without
+    // calling Mistral. Saves both API cost and ~3-5s of latency per
+    // request. We require both:
+    //   (a) filenameRelevance ≥ FILENAME_STRONG_MATCH_THRESHOLD (0.70)
+    //   (b) ≥ 6 alpha chars in filename (avoids accepting on a tiny
+    //       coincidental match like "x.pdf" matching "x bookname")
+    // Telemetry: tel:pdf:filename_strong_match — counts saves.
+    // We synth a fake URL because urlFilenameRelevance() expects a URL,
+    // and we want the reading to be from filenameHint (CD-preferred)
+    // not the raw pdfUrl (which may be opaque even when CD has the
+    // real filename).
+    const synthUrlForRel = "http://x/" + encodeURIComponent(filenameHint || "");
+    const filenameRelevance = urlFilenameRelevance(bookName, synthUrlForRel);
+    const FILENAME_STRONG_MATCH_THRESHOLD = 0.70;
+    if (
+      filenameRelevance >= FILENAME_STRONG_MATCH_THRESHOLD &&
+      _alphaOnly.length >= 6
+    ) {
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      redis.incr("tel:pdf:filename_strong_match").catch(() => {});
+      L.info(
+        "pdfValidator",
+        "candidate_accepted_filename_strong (no metaTitle, strong filename match — Mistral skipped)",
+        {
+          book: bookName.slice(0, 50),
+          filename: filenameHint.slice(0, 60),
+          relevance: filenameRelevance.toFixed(2),
+        },
+      );
+      return {
+        accepted: true,
+        score: filenameRelevance,
+        event: "candidate_accepted_filename_strong",
+        mistralUsed: false,
+        metaTitle: "",
+      };
+    }
+
     if (MISTRAL_API_KEY) {
       L.info("pdfValidator", "No metaTitle — delegating to Mistral", {
         book: bookName.slice(0, 50),
         filenameSource,
+        filenameRelevance: filenameRelevance.toFixed(2),
       });
       redis.incr(TEL_MISTRAL).catch(() => {});
       const accepted = await askMistral(bookName, "", pdfUrl, filenameHint);

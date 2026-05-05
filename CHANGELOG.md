@@ -7,64 +7,49 @@
 
 ---
 
-## [31.6.0] — 2026-05-05
+## [31.7.0] — 2026-05-05
 
-### 🛡️ Auto-disable tier جديد — Mistral-only catastrophic sources
+### ⚡ توفير Mistral — Strong-filename-match short-circuit
 
-أضفنا طبقة auto-disable رابعة تستهدف المصادر التي:
-- لها `mistralRejected ≥ 5` (أي Mistral رفضها 5+ مرات كمحتوى غلط)
-- و `mistralRejected ≥ ok × 2` (الرفض غالب على النجاح بضعف)
+عندما يكون الـ PDF بدون `/Title` metadata قابل للقراءة (شائع في PDFs العربية لأن CIDFont/Type0)، الـ validator كان دائماً يدلّق لـ Mistral للحُكم على المُحتوى. لكن لو كان اسم الملف نفسه يحتوي على كلمات اسم الكتاب بقوّة (مثلاً "كتاب-أرض-زيكولا.pdf" لطلب "أرض زيكولا")، Mistral مش هيضيف معلومة — هو حياكي ما اسم الملف يقوله.
 
-#### المشكلة
+#### الـ Logic
 
-من بيانات بروداكشن:
-- `dn790009.ca.archive.org` → 0 ok / 0 fail / **7 mistralRejected** = 0% trust
-- `dn790006.ca.archive.org` → 2 ok / 0 fail / **5 mistralRejected** = 29% trust
-- `dn790003.ca.archive.org` → 0 ok / 0 fail / **3 mistralRejected**
+في الـ "no metaTitle" branch بعد الـ meaningless-filename rejection:
 
-كل واحد منهم بيطلع في كل بحث ينتج نتائج archive.org كثيفة، يتم
-تنزيل الـ PDF بنجاح، ثم Mistral يرفضه (كتاب غلط). الـ TRUST tier
-الحالي محتاج `totalWithRejects ≥ 10` فالـ subdomains اللي عندها
-5-9 rejects تعدّي بدون حجب وتستمر تستهلك Mistral credits ووقت المستخدم.
+1. احسب `urlFilenameRelevance(bookName, filenameHint)` (0–1)
+2. لو ≥ **0.70** و الاسم فيه ≥ 6 حرف ألفبائي حقيقي:
+   - اقبل مباشرة (`event: candidate_accepted_filename_strong`)
+   - زِد counter `tel:pdf:filename_strong_match`
+   - **لا** نستدعي Mistral
 
-#### الـ Tier الجديد
+#### التأثير المتوقّع
 
-| Tier | الشرط | الباجة |
-|------|-------|--------|
-| Manual | `src:off:domain` exists | 🚫 |
-| Hard | `total ≥ 5 AND rate = 0%` | ⛔ |
-| Trust | `totalWithRejects ≥ 10 AND mr > 0 AND trust ≤ 20%` | 🟣 |
-| **Mistral-only (NEW)** | **`mr ≥ 5 AND mr ≥ ok × 2`** | **💛** |
-| Regular | `total ≥ 8 AND rate ≤ 15%` | 🟠 |
+من بيانات بروداكشن الـ 5 أيام:
+- `tel:pdf:mistral_used = 106`
+- `tel:pdf:extract_failed = 67` (PDFs بدون metaTitle قابل للقراءة)
 
-تأثير القاعدة الجديدة على الـ snapshot الحالي:
-- ✅ dn790009.ca.archive.org (0 ok, 7 mr) → disabled
-- ✅ dn790006.ca.archive.org (2 ok, 5 mr) → disabled (5 ≥ 4)
-- ✅ Hindawi (15 ok, 50 mr) → كان disabled بالفعل (TRUST)، لسّه disabled (Mistral-only)
+من الـ 67 المستدعاة لـ Mistral بسبب metaTitle empty، التقدير: 30-50% منها أسماء ملفات قويّة المطابقة → توفير **20-35 Mistral call** لكل 5 أيام (~ 3-7/يوم).
 
-#### Env vars جديدة (كلها قابلة للتعديل)
+كل short-circuit يوفر:
+- مكالمة Mistral (~$0.001 + ~3-5s latency)
+- تقليل احتمال false-negative من Mistral (مثل ما حصل في PR #31 — Mistral رفضت ملف صحيح بسبب pattern في الـ prompt)
 
-```
-SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS  = 5    # min rejects to trigger
-SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO = 2.0  # rejects ≥ ratio × ok
-```
+#### الحماية
+
+- العتبة 0.70 (يعني: ≥ 70% من كلمات اسم الكتاب موجودة في اسم الملف)
+- شرط ثاني: ≥ 6 حرف ألفبائي حقيقي — يمنع الـ false-positive من أسماء قصيرة
+- لا يلمس مسار الـ metaTitle الموجود (المسار الـ "score-based" لسّه شغّال كما هو)
+- لا يلمس مسار الـ trusted domains (PR #31/#33 — الـ title-gate لسّه شغّال)
+- في حال مفيش filename مطابق → يدلّق لـ Mistral كالمعتاد (سلوك قديم)
 
 #### التغييرات
 
 | ملف | التغيير |
 |-----|---------|
-| `server/bot/config.ts` | env vars جديدة + توثيق |
-| `server/bot/analytics.ts` | `mistralOnlyAutoDisabled` field + logic |
-| `server/bot/admin.ts` | باجة 💛 جديدة في sources panel |
-| `package.json` | bump 31.5.0 → 31.6.0 |
-| `test-mistral-only-tier.mjs` | probes deterministic |
-
-#### الحماية
-
-- env-tunable للسيطرة على العتبات بدون redeploy
-- لا يلمس مصادر بدون mistralRejected (مفيش false positive للـ archive.org الأصل)
-- `getAutoDisabledSourceDomains` بيشمله تلقائياً عبر `s.autoDisabled = ... || mistralOnlyAutoDisabled`
-- يعمل invalidation طبيعي عبر الـ TTL cache الموجود
+| `server/bot/pdfValidator.ts` | event جديد + branch قبل الـ Mistral call |
+| `package.json` | bump 31.6.0 → 31.7.0 |
+| `test-filename-shortcircuit.mjs` | probes deterministic |
 
 ---
 
