@@ -30,6 +30,12 @@ import { runFailover } from "./aiProviders/registry.js";
 import { fetchWikipediaContext } from "./wikipedia.js";
 import { PROVIDER_MAX_PDF_BYTES } from "./aiProviders/types.js";
 import type { SummaryResponse } from "./aiProviders/types.js";
+import {
+  parsePdfBuffer,
+  scrapeRemotePdf,
+  buildSummaryContext,
+  isFirecrawlParseConfigured,
+} from "./firecrawlParse.js";
 
 const CACHE_PREFIX  = "summary:v1:";
 const USAGE_PREFIX  = "summary:usage:";
@@ -228,10 +234,88 @@ export async function getBookSummary(
   const [wiki, freshPdf] = await Promise.all([wikiP, pdfP]);
   if (!pdfBuffer && freshPdf) pdfBuffer = freshPdf;
 
-  const context = wiki?.extract || undefined;
+  const wikiContext = wiki?.extract || undefined;
+  // Will be augmented with Firecrawl markdown for premium users (step 3.5).
+  // The text-only failover path (step 5) consumes this combined context.
+  let context = wikiContext;
+  // Set to true when the Firecrawl fast-path produced usable markdown
+  // for a premium user. Skips the multimodal Gemini PDF tier (step 4)
+  // entirely so we don't spend the Gemini free-tier quota on premium
+  // users whose summary will come from you.com anyway.
+  let firecrawlEnriched = false;
+
+  // 3.5  Premium fast-path — Firecrawl /parse (or /scrape) extracts the
+  //      PDF text directly, then the text-only AI tier (you.com first,
+  //      since it's premium-only at priority 0) generates the summary.
+  //      Two wins: (a) the user gets a citation-rich you.com response
+  //      instead of multimodal Gemini noise, and (b) the free Gemini
+  //      quota is preserved for non-premium users.
+  //
+  //      We only run this when:
+  //        - global cap not hit
+  //        - opts.premium is true (gates the cost — /parse is ~5
+  //          credits per call; we don't want to spend it on free users
+  //          when Gemini's free tier handles them fine)
+  //        - Firecrawl is configured AND we have either a buffer or URL
+  //
+  //      Failure here falls through to the existing PDF tier — no
+  //      regression for premium users if Firecrawl is down.
+  if (globalOk && opts.premium && isFirecrawlParseConfigured() && (pdfBuffer || opts.pdfUrl)) {
+    try {
+      const fc = pdfBuffer
+        ? await parsePdfBuffer(pdfBuffer, `${normalizeForCache(bookName).slice(0, 60) || "book"}.pdf`)
+        : await scrapeRemotePdf(opts.pdfUrl!);
+
+      // Telemetry — observe the rollout. Non-blocking.
+      const telKey = fc.ok
+        ? "tel:summary:firecrawl_used"
+        : `tel:summary:firecrawl_skipped:${fc.reason || "unknown"}`;
+      redis.incr(telKey).catch(() => {});
+
+      if (fc.ok) {
+        const fcContext = buildSummaryContext(fc);
+        if (fcContext) {
+          // Combine Wikipedia + Firecrawl markdown — Wikipedia gives
+          // the canonical title/author/genre signal, Firecrawl gives
+          // the actual book content. The text-tier provider is fed
+          // both so it can ground its answer in the real text.
+          context = wikiContext
+            ? `${wikiContext}\n\n---\n\n${fcContext}`
+            : fcContext;
+          firecrawlEnriched = true;
+          L.info("summary", "Firecrawl premium fast-path engaged", {
+            book:       bookName.slice(0, 50),
+            mdLen:      fc.markdown?.length ?? 0,
+            ctxLen:     context.length,
+            hasFcSummary: !!fc.summary,
+            ms:         fc.ms,
+          });
+        }
+      } else {
+        L.info("summary", "Firecrawl premium fast-path skipped — falling through", {
+          book:   bookName.slice(0, 50),
+          reason: fc.reason,
+          status: fc.status,
+          ms:     fc.ms,
+        });
+      }
+    } catch (e) {
+      // Defensive — buildSummaryContext / parsePdfBuffer already swallow
+      // their own errors, but if anything escapes we still want to fall
+      // through to the existing pipeline rather than fail the summary.
+      L.warn("summary", "Firecrawl fast-path threw — ignored", {
+        err: String(e).slice(0, 200),
+      });
+      redis.incr("tel:summary:firecrawl_skipped:exception").catch(() => {});
+    }
+  }
 
   // 4. Try PDF-native tier first if we have bytes (and the cap is not hit).
-  if (globalOk && pdfBuffer) {
+  //    Premium users with a successful Firecrawl extract skip this — the
+  //    text-tier path (step 5) will use you.com (priority 0, premium-only)
+  //    with the rich Firecrawl context, which is faster + higher quality
+  //    than multimodal Gemini for those users.
+  if (globalOk && pdfBuffer && !firecrawlEnriched) {
     try {
       const out = await runFailover({
         bookName,
