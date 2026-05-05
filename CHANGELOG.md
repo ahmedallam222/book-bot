@@ -7,6 +7,52 @@
 
 ---
 
+## [31.7.0] — 2026-05-05
+
+### ⚡ توفير Mistral — Strong-filename-match short-circuit
+
+عندما يكون الـ PDF بدون `/Title` metadata قابل للقراءة (شائع في PDFs العربية لأن CIDFont/Type0)، الـ validator كان دائماً يدلّق لـ Mistral للحُكم على المُحتوى. لكن لو كان اسم الملف نفسه يحتوي على كلمات اسم الكتاب بقوّة (مثلاً "كتاب-أرض-زيكولا.pdf" لطلب "أرض زيكولا")، Mistral مش هيضيف معلومة — هو حياكي ما اسم الملف يقوله.
+
+#### الـ Logic
+
+في الـ "no metaTitle" branch بعد الـ meaningless-filename rejection:
+
+1. احسب `urlFilenameRelevance(bookName, filenameHint)` (0–1)
+2. لو ≥ **0.70** و الاسم فيه ≥ 6 حرف ألفبائي حقيقي:
+   - اقبل مباشرة (`event: candidate_accepted_filename_strong`)
+   - زِد counter `tel:pdf:filename_strong_match`
+   - **لا** نستدعي Mistral
+
+#### التأثير المتوقّع
+
+من بيانات بروداكشن الـ 5 أيام:
+- `tel:pdf:mistral_used = 106`
+- `tel:pdf:extract_failed = 67` (PDFs بدون metaTitle قابل للقراءة)
+
+من الـ 67 المستدعاة لـ Mistral بسبب metaTitle empty، التقدير: 30-50% منها أسماء ملفات قويّة المطابقة → توفير **20-35 Mistral call** لكل 5 أيام (~ 3-7/يوم).
+
+كل short-circuit يوفر:
+- مكالمة Mistral (~$0.001 + ~3-5s latency)
+- تقليل احتمال false-negative من Mistral (مثل ما حصل في PR #31 — Mistral رفضت ملف صحيح بسبب pattern في الـ prompt)
+
+#### الحماية
+
+- العتبة 0.70 (يعني: ≥ 70% من كلمات اسم الكتاب موجودة في اسم الملف)
+- شرط ثاني: ≥ 6 حرف ألفبائي حقيقي — يمنع الـ false-positive من أسماء قصيرة
+- لا يلمس مسار الـ metaTitle الموجود (المسار الـ "score-based" لسّه شغّال كما هو)
+- لا يلمس مسار الـ trusted domains (PR #31/#33 — الـ title-gate لسّه شغّال)
+- في حال مفيش filename مطابق → يدلّق لـ Mistral كالمعتاد (سلوك قديم)
+
+#### التغييرات
+
+| ملف | التغيير |
+|-----|---------|
+| `server/bot/pdfValidator.ts` | event جديد + branch قبل الـ Mistral call |
+| `package.json` | bump 31.6.0 → 31.7.0 |
+| `test-filename-shortcircuit.mjs` | probes deterministic |
+
+---
+
 ## [31.5.0] — 2026-05-05
 
 ### 💎 ميزة جديدة — Firecrawl `/parse` كمسار سريع لـ Premium summary
