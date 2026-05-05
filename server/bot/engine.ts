@@ -2,7 +2,7 @@ import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
 import { getAutoDisabledSourceDomains } from "./analytics.js";
-import { normalizeArabic, normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
+import { normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import {
@@ -114,7 +114,7 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     .map((s) => s.domain);
 
   const results = await unifiedSearch(arabicDomains, query, true);
-  const enriched = (await enrichWithMarkdown(results))
+  const enriched = (await enrichWithMarkdown(results, query))
     .sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
   // Cache the results
@@ -308,7 +308,7 @@ async function unifiedSearch(
             isArabic,
           };
         }
-        return makeResult(doc, srcConfig, idx);
+        return makeResult(doc, srcConfig, idx, query);
       });
 
   } catch (e: any) {
@@ -329,7 +329,12 @@ async function unifiedSearch(
 
 // ── makeResult ────────────────────────────────
 
-function makeResult(doc: FirecrawlDoc, source: SourceConfig, idx: number): BookResult {
+function makeResult(
+  doc:       FirecrawlDoc,
+  source:    SourceConfig,
+  idx:       number,
+  userQuery: string,
+): BookResult {
   const url          = doc.url || doc.metadata?.sourceURL || "";
   const directPdfUrl = isPdfUrl(url) ? url : extractPdfLink(doc.markdown || "", url, source);
   const title        = doc.metadata?.title?.replace(/\s*[-|–—].*$/, "").trim() || url;
@@ -343,7 +348,7 @@ function makeResult(doc: FirecrawlDoc, source: SourceConfig, idx: number): BookR
     source,
     access: access.kind,
     accessReason: access.reason,
-    _score: scoreResult(doc, directPdfUrl, access.kind),
+    _score: scoreResult(doc, directPdfUrl, access.kind, userQuery),
   };
 }
 
@@ -378,26 +383,62 @@ function classifyAccess(doc: FirecrawlDoc, directPdfUrl: string | null): { kind:
   return { kind: "catalog_page", reason: "no_direct_pdf" };
 }
 
-function scoreResult(doc: FirecrawlDoc, directPdfUrl: string | null, access: ResultAccess): number {
-  const accessScore: Record<ResultAccess, number> = {
-    direct_pdf: 1,
-    download_page: 0.7,
-    catalog_page: 0.35,
+// BUG #10 — was scoring `urlFilenameRelevance(searchResultTitle, directPdfUrl)`
+// which is meaningless: the title from Firecrawl is itself derived from the
+// PDF URL/filename (so the score was almost always near 1.0, regardless of
+// whether the result matched what the USER asked for). This let `direct_pdf`
+// access types dominate ranking even when the actual PDF was an unrelated
+// book — root cause for the dalilkuwa wrong-delivery class fixed at the
+// download-stage in PR #39. We close the loop here so wrong-book PDFs sort
+// LOWER than relevant download-pages.
+//
+// New scoring: split into three signals.
+//   - accessPrior  — base probability by access type
+//   - userMatch    — how well user query overlaps the result title
+//   - filenameMatch — how well user query overlaps the directPdfUrl (or url)
+// Combined as `accessPrior * 0.5 + max(userMatch, filenameMatch) * 0.5`
+// so a `direct_pdf` with completely irrelevant filename collapses from
+// ~0.95 → 0.5 (still a fallback option, but loses to a download_page that
+// strongly matches the user query).
+function scoreResult(
+  doc:          FirecrawlDoc,
+  directPdfUrl: string | null,
+  access:       ResultAccess,
+  userQuery:    string,
+): number {
+  const accessPrior: Record<ResultAccess, number> = {
+    direct_pdf:     1,
+    download_page:  0.7,
+    catalog_page:   0.35,
     protected_page: 0.1,
   };
-  const titleText = `${doc.metadata?.title || ""} ${doc.url || ""}`;
-  const normalizedTitle = normalizeArabic(titleText)
-    .replace(/[^\u0600-\u06FFa-z0-9\s]/gi, " ")
-    .toLowerCase();
-  const urlScore = directPdfUrl ? urlFilenameRelevance(normalizedTitle, directPdfUrl) : 0.5;
-  return Math.max(0.05, Math.min(1, accessScore[access] * 0.85 + urlScore * 0.15));
+
+  // Relevance of the user's query to the result title — uses the same word-
+  // overlap algorithm as `urlFilenameRelevance` for consistency, but against
+  // the title text rather than a URL filename.
+  const title = doc.metadata?.title || "";
+  const titleAsUrl = `https://example.com/${encodeURIComponent(title)}.pdf`;
+  const userMatch = userQuery && title
+    ? urlFilenameRelevance(userQuery, titleAsUrl)
+    : 0;
+
+  // Relevance of the user's query to the actual file/URL the user would
+  // receive — strongest signal for catching wrong PDFs (cache-poisoning,
+  // unrelated direct downloads).
+  const targetUrl = directPdfUrl || doc.url || "";
+  const filenameMatch = userQuery && targetUrl
+    ? urlFilenameRelevance(userQuery, targetUrl)
+    : 0;
+
+  const queryScore = Math.max(userMatch, filenameMatch);
+  return Math.max(0.05, Math.min(1, accessPrior[access] * 0.5 + queryScore * 0.5));
 }
 
 // ── enrichWithMarkdown ─────────────────────────
 
 const MAX_ENRICH = 1;  // FIX: خُفِّض من 2 → 1 لتوفير ~20% من Firecrawl credits
 
-async function enrichWithMarkdown(results: BookResult[]): Promise<BookResult[]> {
+async function enrichWithMarkdown(results: BookResult[], userQuery: string): Promise<BookResult[]> {
   try {
     const [quota, rate] = await Promise.all([
       redis.get(FC_QUOTA_EXCEEDED_KEY),
@@ -483,7 +524,7 @@ async function enrichWithMarkdown(results: BookResult[]): Promise<BookResult[]> 
       directPdfUrl,
       access: access.kind,
       accessReason: access.reason,
-      _score: scoreResult({ url: r.url, markdown, metadata: { title: r.title } }, directPdfUrl, access.kind),
+      _score: scoreResult({ url: r.url, markdown, metadata: { title: r.title } }, directPdfUrl, access.kind, userQuery),
     };
   });
 }
