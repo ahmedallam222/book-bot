@@ -69,9 +69,6 @@ export async function handleSummaryCallback(
     return;
   }
 
-  const bookName  = entry.bookName;
-  const sourceUrl = entry.url;
-
   // In-flight guard: if the user double-tapped, the second call
   // sees the lock and we just acknowledge without re-running. This
   // prevents duplicate AI calls (and double quota consumption) when
@@ -87,6 +84,38 @@ export async function handleSummaryCallback(
     }).catch(() => {});
     return;
   }
+
+  await runSummaryFlow(bot, chatId, userId, entry.bookName, entry.url, {
+    callbackQueryId,
+    lockKey,
+  });
+}
+
+/**
+ * Core summary flow — extracted from `handleSummaryCallback` so
+ * `bookRequest.ts` can auto-trigger a summary right after a book is
+ * delivered when the user's original message had summary intent
+ * (e.g. "لخصلي أرض زيكولا"). PR G — auto-summary trigger.
+ *
+ * The auto-trigger path passes its own per-(userId,bookName) lock key
+ * to dedupe with the manual button click; if the user clicks the
+ * "📘 ملخص الكتاب" button while the auto-trigger is still running,
+ * the second call sees the lock and is silently dropped.
+ */
+export async function runSummaryFlow(
+  bot:        TelegramBot,
+  chatId:     number,
+  userId:     string,
+  bookName:   string,
+  sourceUrl:  string | undefined,
+  opts: {
+    callbackQueryId?: string;
+    /** Lock key already acquired by the caller. We release it on exit. */
+    lockKey?: string;
+  } = {},
+): Promise<void> {
+  const lockKey = opts.lockKey;
+  const callbackQueryId = opts.callbackQueryId;
 
   // Tracking state across try/catch/finally — the watchdog & placeholder
   // need to be visible to the error path so we can edit-in-place rather
@@ -105,7 +134,7 @@ export async function handleSummaryCallback(
     // hits (no upstream cost, treat as free).
     const cached = await getCachedSummary(bookName);
     if (cached) {
-      await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
+      if (callbackQueryId) await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
       await deliverSummary(bot, chatId, bookName, cached);
       return;
     }
@@ -116,7 +145,7 @@ export async function handleSummaryCallback(
     const usage = await checkAndConsumeUsage(userId, premium);
     if (!usage.blocked) usageConsumed = true;
     if (usage.blocked) {
-      await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
+      if (callbackQueryId) await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
       await bot.sendMessage(chatId,
         `⚠️ *وصلت إلى حد الملخصات اليومي* (${SUMMARY_DAILY_LIMIT_FREE} ملخصات/يوم).\n\n` +
         `🌟 ترقّى إلى *Premium* للحصول على:\n` +
@@ -135,9 +164,13 @@ export async function handleSummaryCallback(
 
     // Acknowledge the click immediately; the orchestrator may take
     // 5–30s and Telegram complains if we don't ack within ~3s.
-    await bot.answerCallbackQuery(callbackQueryId, {
-      text: "⏳ جاري تجهيز الملخص...",
-    }).catch(() => {});
+    // (Only if we came from a button click — auto-trigger has no
+    // callback to acknowledge.)
+    if (callbackQueryId) {
+      await bot.answerCallbackQuery(callbackQueryId, {
+        text: "⏳ جاري تجهيز الملخص...",
+      }).catch(() => {});
+    }
 
     // Send a *visible, persistent* placeholder so the user sees the bot is
     // working. PDF-tier summaries can take 25–30s; the toast disappears
@@ -237,7 +270,7 @@ export async function handleSummaryCallback(
     if (typingInterval) clearInterval(typingInterval);
     if (watchdogTimer)  clearTimeout(watchdogTimer);
     // Release the inflight lock so a subsequent retry is allowed.
-    redis.del(lockKey).catch(() => {});
+    if (lockKey) redis.del(lockKey).catch(() => {});
   }
 }
 

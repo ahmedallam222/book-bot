@@ -57,6 +57,41 @@ const NOISE_PATTERNS: RegExp[] = [
 // (تحميل، تنزيل، حمّل، نزّل) للنية.
 const LEADING_NOISE = /^(?:كتاب|رواية|قصة|ديوان|كتب|روايات|تحميل|تنزيل|حمّل|نزّل|اقرأ|قراءة|لخصلي|لخّصلي|لخّص\s+لي|لخص\s+لي|لخّص|لخص|ملخص|ملخّص|مُلخّص|تلخيص|اختصرلي|اختصر\s+لي|اختصر)\s+/i;
 
+// ── Summary-intent words ───────────────────────────────────
+// نفصل هذه عن باقي الـ noise words لأن parseBookName يُجرّدها من
+// اسم الكتاب (لازم — كي لا تظهر في caption/filename)، لكننا
+// نريد كَشْف وجودها على رسالة المستخدم *قبل* التجريد كي يُصدر
+// البوت ملخصًا تلقائيًا بعد الإرسال (PR G — auto-summary trigger).
+const SUMMARY_INTENT_WORDS: string[] = [
+  "لخصلي", "لخّصلي", "لخّص لي", "لخص لي", "لخّص", "لخص",
+  "تلخيص", "ملخص", "مُلخّص", "ملخّص",
+  "اختصرلي", "اختصر لي", "اختصر",
+];
+
+// نستخدم flag `i` فقط (بدون `g`) كي يكون .test() مستقلاً عن
+// lastIndex الـ stateful — وليس هناك حاجة للـ global match هنا.
+const SUMMARY_INTENT_PATTERNS: RegExp[] = SUMMARY_INTENT_WORDS.map(
+  (w) => new RegExp(`(^|\\s)${w}(\\s|$)`, "i"),
+);
+
+/**
+ * يكشف نية المستخدم لطلب تلخيص الكتاب من الرسالة الخام (قبل
+ * parseBookName) — مثلاً: "لخصلي كتاب أرض زيكولا" أو "ملخص فن
+ * قراءة العقول".
+ *
+ * يستخدمه bookRequest عبر QueueJob.wantsSummary لتشغيل تدفّق
+ * الملخص تلقائيًا بعد الإرسال الناجح بدلاً من انتظار ضغطة زر.
+ */
+export function detectSummaryIntent(rawBookName: string): boolean {
+  if (!rawBookName) return false;
+  const text = rawBookName.trim();
+  if (!text) return false;
+  for (const pattern of SUMMARY_INTENT_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
 /**
  * يُنظّف اسم الكتاب ويُحسّن صياغته للبحث
  *

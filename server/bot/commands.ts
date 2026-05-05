@@ -13,7 +13,7 @@ import { SOURCES } from "./sources.js";
 import { isPremium, getUserDailyLimit, setPremium, setUserDailyLimit, resetUserDailyLimit, setUserNote, clearUserNote, getPremiumExpiry } from "./userSettings.js";
 import { storage } from "../storage.js";
 import { escMd, normalizeArabic, buildResetTime } from "./text.js";
-import { parseBookName } from "./bookNameParser.js";
+import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { storeRetryKey } from "./session.js";
 import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
@@ -113,8 +113,9 @@ export function registerCommands(
     }
     react(bot, chatId, msg.message_id, "👀").catch(() => {});
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
+    const wantsSummary = detectSummaryIntent(bookName);
     const parsedName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedName, token, username, msg.message_id);
+    await handleBookRequest(bot, chatId, userId, parsedName, token, username, msg.message_id, wantsSummary);
   });
 
   // ── /random ────────────────────────────────────
@@ -630,8 +631,9 @@ export function registerMessageHandler(
     // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
 
+    const wantsSummary = detectSummaryIntent(bookName);
     const parsedBookName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id);
+    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id, wantsSummary);
   });
 }
 
