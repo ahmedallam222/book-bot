@@ -105,14 +105,76 @@ export function cleanSearchQuery(query: string): string {
   return cleaned;
 }
 
+// ── Cairo timezone helpers ─────────────────────
+// المستخدمون كلهم في توقيت القاهرة (Africa/Cairo، UTC+2 شتاءً، UTC+3
+// صيفاً مع DST). كل اللميتات اليومية لازم تتجدد منتصف ليل القاهرة،
+// مش UTC. بدون كده اليوزر الساعة 23:50 القاهرة بيشوف "متبقي 5 ساعات"
+// بدل "10 دقايق"، وممكن ياخد 2× quota لو دخل بين 21:00–00:00 UTC.
+//
+// نستخدم Intl.DateTimeFormat بـ timeZone: "Africa/Cairo" لأنه DST-aware
+// ويرجع الـ wall-clock الحقيقي. (Date object داخلياً UTC، فالحسابات
+// بـ getUTC* أو setUTC* بتكون غلط للقاهرة).
+const CAIRO_TZ = "Africa/Cairo";
+
+const _cairoDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: CAIRO_TZ,
+  year:     "numeric",
+  month:    "2-digit",
+  day:      "2-digit",
+});
+
+const _cairoDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: CAIRO_TZ,
+  hour12:   false,
+  year:     "numeric",
+  month:    "2-digit",
+  day:      "2-digit",
+  hour:     "2-digit",
+  minute:   "2-digit",
+  second:   "2-digit",
+});
+
+/**
+ * Returns the current Cairo-local date as `YYYY-MM-DD`. Drop-in
+ * replacement for `new Date().toISOString().split("T")[0]` that
+ * respects Africa/Cairo DST.
+ */
+export function cairoDateString(now: Date = new Date()): string {
+  return _cairoDateFormatter.format(now);
+}
+
+/**
+ * Milliseconds remaining until the next Cairo-local midnight.
+ * DST-aware (the Cairo day boundary moves forward/back 1h on DST
+ * change days; this routine handles that correctly because it parses
+ * the actual wall-clock components in the target timezone).
+ */
+export function msUntilCairoMidnight(now: Date = new Date()): number {
+  const parts = _cairoDateTimeFormatter.formatToParts(now);
+  let h = 0, m = 0, s = 0;
+  for (const p of parts) {
+    if      (p.type === "hour")   h = parseInt(p.value, 10);
+    else if (p.type === "minute") m = parseInt(p.value, 10);
+    else if (p.type === "second") s = parseInt(p.value, 10);
+  }
+  // عدد الميلي ثانية اللي عدت من بداية اليوم القاهري
+  const elapsedMs = ((h * 60 + m) * 60 + s) * 1000;
+  // الباقي للوصول لمنتصف الليل القاهري (24h بالكامل)
+  const remaining = 24 * 3600 * 1000 - elapsedMs;
+  // safety: لو فيه DST shift خلّى الـ remaining < 0 (نادر)، رجّع ساعة كحد أدنى
+  return remaining > 0 ? remaining : 3600 * 1000;
+}
+
 /**
  * وقت التجديد التالي — يُستخدم في رسائل الـ stats والـ daily limit
  * يُعيد مثلاً: "5 ساعة و23 دقيقة" أو "47 دقيقة" أو "دقائق قليلة"
+ *
+ * Anchored to Africa/Cairo midnight (not UTC) so the displayed
+ * countdown matches the actual quota reset boundary that Egyptian
+ * users experience.
  */
 export function buildResetTime(): string {
-  const midnight = new Date();
-  midnight.setUTCHours(24, 0, 0, 0);
-  const diffMs = midnight.getTime() - Date.now();
+  const diffMs = msUntilCairoMidnight();
   const diffH  = Math.floor(diffMs / 3_600_000);
   const diffM  = Math.floor((diffMs % 3_600_000) / 60_000);
   return diffH > 0
