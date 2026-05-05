@@ -7,6 +7,42 @@
 
 ---
 
+## [31.3.15] — 2026-05-05
+
+### 🐛 إصلاح حرج (security/limit-bypass) — `ipRateLimit` كان يولّد member متطابق في كل EVAL
+
+في `server/bot/ipRateLimit.ts:24` كان فيه:
+
+```lua
+redis.call("ZADD", key, now, tostring(now) .. "-" .. tostring(math.random(1, 1000000)))
+```
+
+**المشكلة**: Redis بيـ reset الـ Lua RNG seed قبل **كل** EVAL عشان السكربتات تفضل deterministic للـ replication ([Redis docs](https://redis.io/docs/latest/develop/programmability/eval-intro/)). معنى ده إن `math.random(1, 1000000)` بترجع نفس الرقم في كل invocation. 
+
+**التأثير على الحماية الفعلية:**
+
+تخيّل سيناريو هجوم مع طلبات متزامنة على `/api/search`:
+- request A و request B وصلوا في نفس الـ millisecond من نفس الـ IP.
+- الاتنين بياخدوا نفس `now` و نفس `math.random()` → نفس الـ ZSET member: `"<now>-<same_rand>"`.
+- request A: `ZCARD = 0 < 20`، يضيف member جديد، يرجع 1 ✓
+- request B: `ZCARD = 1 < 20`، يحاول يضيف **نفس** الـ member → `ZADD` is no-op، يرجع 2 لكن الـ ZSET لسه فيه entry واحد فقط.
+
+في النافذة (60s)، أقصى ما يقدر يضيفه الـ ZSET هو entry واحد لكل millisecond مهما كان عدد الـ requests في نفس الـ ms. يعني الحد الأقصى الفعلي = 60,000 طلب/دقيقة بدل الـ 20 طلب/دقيقة المُعلَن. **bypass بنسبة 3000×** على concurrent burst.
+
+ده مش مشكلة على الـ bot Telegram نفسه (مش web-facing مباشرة، الـ rate limit هنا للـ HTTP API endpoints على dashboard/public). لكن `/api/search` بتستهلك Firecrawl quota — burst attack من نفس الـ IP بيقدر يستنزف الـ quota في ثواني.
+
+**الإصلاح:** نفس النمط المطبَّق في `rateLimit.ts:30` (للـ user-level rate limit): توليد الـ random في Node.js (Math.random ← system-seeded) وتمريره كـ `ARGV[4]`. كده كل EVAL عنده rand فريد، والـ ZSET member يبقى unique لكل request حتى لو الـ `now` متطابق.
+
+```lua
+local rand = ARGV[4]
+…
+redis.call("ZADD", key, now, tostring(now) .. "-" .. rand)
+```
+
+**اختبار:** إضافة `test-iprate-lua-rand.mjs` (5 probes) بتـ verify إن الـ Lua source ما بيـ call `math.random()` تاني، وإن الـ Node call site بيمرّر 4th ARGV.
+
+---
+
 ## [31.3.14] — 2026-05-05
 
 ### 🐛 إصلاح — `warmRelatedCache` ما كانش بيشتغل أصلاً (truthiness bug على array)
