@@ -980,7 +980,13 @@ async function maybeAutoSummary(
 ): Promise<void> {
   if (!wantsSummary) return;
   try {
-    const lockKey = `summary:auto:${userId}:${canonicalizeForCache(bookName)}`;
+    // BUG #18 — unified key with summaryHandler.inflightKey. Both auto
+    // and manual paths now reduce to `summary:lock:{userId}:{canonical}`
+    // so they dedupe each other. If the user typed "لخصلي X" and ALSO
+    // tapped the button, only the first call runs AI; the second sees
+    // the lock and bails (silently for auto, with a friendly toast for
+    // manual). Lock is released by `runSummaryFlow`'s finally block.
+    const lockKey = `summary:lock:${userId}:${canonicalizeForCache(bookName)}`;
     const locked  = await redis.set(lockKey, "1", "EX", 90, "NX").catch(() => null);
     if (!locked) {
       L.info("bookRequest", "auto-summary already in flight — skipping", {
