@@ -7,6 +7,42 @@
 
 ---
 
+## [31.9.0] — 2026-05-05
+
+### 🐛 Fix — Cairo timezone everywhere
+
+كل الـ daily counters/quotas (downloads, summaries, AI calls, Firecrawl credits) و رسالة "متبقي X ساعة" كانت بـ UTC — في حين إن كل اليوزرز في Africa/Cairo (UTC+2 شتاءً، UTC+3 صيفاً مع DST). النتيجة:
+
+- اليوزر الساعة 23:50 القاهرة كان يشوف "متبقي ~5 ساعات" والحقيقة 10 دقايق
+- الـ quota row في الـ DB كانت تتحط على تاريخ UTC، فاليوزر اللي شغّال بين 22:00–02:00 القاهرة قد يقع على صفّين (يومين) مختلفين، يمكن نظرياً يستهلك 2× quota
+- analytics keys (`stats:daily:{date}`) و AI usage (`ai:usage:{provider}:{date}`) و Firecrawl (`counter:firecrawl:credits:{date}`) كل ده بـ UTC date → الـ daily-rollover يقع 02:00–03:00 القاهرة بدل منتصف الليل
+
+#### الإصلاح
+
+- **`text.ts`** — جديد:
+  - `cairoDateString(now?)` يرجع `YYYY-MM-DD` بـ Africa/Cairo (drop-in replacement لـ `new Date().toISOString().split("T")[0]`)
+  - `msUntilCairoMidnight(now?)` يحسب الـ ms المتبقية لمنتصف الليل القاهري الـ DST-aware (يستخدم `Intl.DateTimeFormat` بـ `timeZone: "Africa/Cairo"`)
+  - `buildResetTime()` معدَّل ليستخدم `msUntilCairoMidnight` بدل `setUTCHours(24,0,0,0)`
+- **`storage.ts`** — `getDailyDownloadCount`، `incrementDailyDownload`، `cleanupOldDailyLimits` كلهم بـ `cairoDateString()`
+- **`summary.ts`** — `todayKey()` بـ `cairoDateString().replace(/-/g, "")` (YYYYMMDD format)
+- **`analytics.ts`** — `todayKey()` و `getWeeklyStats` (آخر 7 أيام بـ Cairo TZ)
+- **`aiProviders/registry.ts`** — `todayKey()` للـ AI usage counters
+- **`firecrawlParse.ts`** — `trackCredits` للـ Firecrawl credit counter
+- **`routes.ts`** — `/api/admin/system/costs` يقرا بـ Cairo date
+- **`admin.ts`** — `kholasa_top_books_{date}.csv` filename للاتساق
+
+#### Tests
+- `test-cairo-timezone.mjs` — 10 probes (DST summer, winter، midnight rollover، reset countdown sanity، regression check إن UTC-based reset كان فعلاً مختلف عن Cairo)
+- 22/22 deterministic tests كلهم PASS
+- typecheck + build clean (478.5kb)
+
+#### Migration / Backwards-compat
+- مفيش downtime needed: على deploy، الـ keys الجديدة (Cairo date) قد تكون مختلفة عن الـ keys القديمة (UTC date) لمدة 1–3 ساعات (الفرق بين منتصف الليل UTC ومنتصف الليل القاهرة). فعلياً هذا يعني إن اليوزرز اللي حصلوا على download في الـ window ده يمكن يحصلوا على download إضافي في الفترة. ده one-shot effect مرة واحدة عند الـ deploy، وبعدها تطبيع.
+- `summary:usage:` keys بنفس الفورمات (YYYYMMDD)، التغيير في القيمة فقط، فالـ key يتجدد بعد 25h TTL تلقائياً.
+- `stats:daily:` لو محسوبة بـ UTC قبل الـ deploy، تفضل موجودة لـ 90 يوم. الـ getWeeklyStats بعد الـ deploy يبدأ يقرا Cairo dates، فالـ analytics dashboard ممكن يظهر "زيرو" ليوم الانتقال أو لليوم اللي قبله. مقبول.
+
+---
+
 ## [31.8.0] — 2026-05-03
 
 ### ✨ Auto-summary trigger — "لخصلي" → ملخص تلقائي بعد الإرسال
