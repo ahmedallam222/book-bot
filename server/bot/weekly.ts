@@ -15,9 +15,9 @@ async function getWeeklyTopBooks(limit = 10): Promise<{ book: string; count: num
     // FIX-WEEKLY: استخدام zrangebyscore مع REV بطريقة متوافقة مع ioredis v4+
     // zrevrange هو الأكثر توافقاً عبر إصدارات Redis المختلفة
     // نستخدمه مباشرةً بدل الـ triple-fallback المعقّد
-    const raw = await (redis as any).zrevrange(
+    const raw = await redis.zrevrange(
       "stats:top_books", 0, limit - 1, "WITHSCORES"
-    ) as string[];
+    );
 
     if (!Array.isArray(raw) || raw.length === 0) return [];
 
