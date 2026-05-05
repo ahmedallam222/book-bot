@@ -7,6 +7,55 @@
 
 ---
 
+## [31.3.17] — 2026-05-05
+
+### 🧹 تنظيف — حذف 3 نداءات `invalidateRecentSearchesCache()` ميتة في `bookRequest.ts`
+
+في `server/bot/engine.ts:62-68` الدالة:
+
+```ts
+export function invalidateRecentSearchesCache(bookName?: string): void {
+  if (!bookName) return;          // ← early-return لو ما فيش argument
+  const key = searchCacheKey(bookName);
+  redis.del(key).catch(() => {});
+  const normalizedKey = searchCacheKey(normalizeForCache(bookName));
+  if (normalizedKey !== key) redis.del(normalizedKey).catch(() => {});
+}
+```
+
+كان فيه 3 نداءات في `bookRequest.ts` (سطور 384، 414، 833) بدون أي argument:
+
+- `bookRequest.ts:384` — مسار نجاح cache hit بـ `telegramFileId`
+- `bookRequest.ts:414` — مسار نجاح cache hit بـ `sourceUrl`
+- `bookRequest.ts:833` — مسار نجاح بحث كامل + تحميل + إرسال
+
+النداءات الـ 3 دي كانت **no-ops تماماً** — الـ early-return بيخرج بدون عمل أي شيء. فحص git history (`git log -G '_recentInvalidated'`) أكد إن:
+
+1. النسخة الأصلية للدالة كانت `_recentInvalidated = Date.now()` — flag global ما حدش قراه أبداً (write-only).
+2. PR #62 غيّر الدالة لتعمل `redis.del` مع `bookName` المُمرَّر، لكن الـ 3 نداءات في `bookRequest.ts` ما اتـ updated.
+3. الـ flag الأصلي كان (في الأرجح) للـ dashboard's recent-searches cache اللي إما اتشال أو اتنقل لمكان تاني — مفيش قارئ ليه في الكود الحالي.
+
+**ليه ما عملناش fix بإضافة `bookName` للنداءات بدل الحذف؟** لأن المسارات الـ 3 كلها مسارات **نجاح**:
+
+- في cache-hit، الـ Redis search cache هو اللي بيخدم عمليات بحث المستخدمين القادمين — حذفه هيرغم Firecrawl re-search وقت ما الكاش لسه شغال صح.
+- في fresh download، لسه كتبنا الكاش لتوّه (`engine.ts:122-123`) — حذفه فوراً يلغي فايدة الكاش بالكامل.
+
+يعني الـ correct behavior في المسارات الـ 3 هو **عدم حذف الكاش** — وده اللي بيحصل فعلاً (لأن الـ no-arg call هو no-op). فالحل الـ minimal هو حذف الـ dead calls + تنظيف الـ import.
+
+**التأثير:** كود أنظف. مفيش تغيير في السلوك — الـ no-ops كانت no-ops، فحذفها مكافئ تماماً.
+
+**النداء الوحيد المتبقي والصحيح:** `callbacks.ts:313` في `bad_file:` handler، بيمرّر `entry.bookName` صح. ده اللي اتـ-installed في PR #62 وبيشتغل بشكل سليم.
+
+**اختبار:** إضافة `test-no-noop-cache-invalidation.mjs` (8 probes) بتـ verify:
+- `bookRequest.ts` ما فيهاش أي نداء لـ `invalidateRecentSearchesCache`
+- الـ import من `engine.js` فيه `isFirecrawlDown` بس
+- الدالة لسه مُصدَّرة من `engine.ts` للنداء الصحيح في `callbacks.ts`
+- الـ early-return guard مازال موجود في الدالة (دفاع في العمق)
+- النداء الصحيح في `callbacks.ts` (مع `entry.bookName`) ما اتأثرش
+- مسارات النجاح الـ 3 في `bookRequest.ts` لسه بتنده `logSearch` و `setLastBook` (تليمتري حقيقية ما اتشالش)
+
+---
+
 ## [31.3.16] — 2026-05-05
 
 ### 🐛 إصلاح — `summaryHandler` بيستهلك من حد الملخصات اليومي حتى لو الـ AI فشل
