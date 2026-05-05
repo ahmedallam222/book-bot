@@ -6,6 +6,7 @@ import {
   type User, type InsertUser, type SearchLog, type InsertSearchLog,
   type CachedBook, type InsertCachedBook, type DailyLimit, type InsertDailyLimit,
 } from "@shared/schema";
+import { canonicalizeForCache } from "./bot/text.js";
 
 // ══════════════════════════════════════════════
 // DB POOL — معدَّل وغير مُعرَّض للـ pool exhaustion
@@ -30,8 +31,15 @@ pool.on("error", (err) => {
 
 export const db = drizzle(pool);
 
+// FIX-WRONG-FILE (BUG-2/6/7/8): استخدم canonicalizeForCache الموحَّدة
+// (تطبيع عربي + إزالة كلمات الحشو + تطبيع المسافات).
+// السابقة كانت تطبيق سطحي: `toLowerCase().trim().replace(/\s+/g, " ")` فقط
+// → "أرض زيكولا" و "ارض زيكولا" مفاتيح كاش منفصلة (تخزين مكرّر).
+// → "تحميل كتاب أرض زيكولا pdf" و "أرض زيكولا" مفاتيح منفصلة (قراءة عمياء).
+// canonicalizeForCache مُعرَّفة في bot/text.ts لتُستخدَم بنفس الشكل في
+// كل المسارات (cache write + cache lookup + dashboard) بدون انحراف.
 function normalizeQuery(q: string): string {
-  return q.toLowerCase().trim().replace(/\s+/g, " ");
+  return canonicalizeForCache(q);
 }
 
 // ══════════════════════════════════════════════
@@ -51,9 +59,11 @@ export interface IStorage {
   incrementCacheServed(id: number): Promise<void>;
   getCacheStats(): Promise<{ totalCached: number; totalServed: number }>;
   deleteCachedBook(id: number): Promise<void>;
+  purgeCachedBookByQuery(query: string): Promise<number>;
   getDailyDownloadCount(telegramUserId: string): Promise<number>;
   incrementDailyDownload(telegramUserId: string): Promise<void>;
   canDownload(telegramUserId: string, limit?: number): Promise<boolean>;
+  cleanupOldDailyLimits(retentionDays?: number): Promise<number>;
   getAllUserIds(): Promise<string[]>;
   getUserSearchHistory(telegramUserId: string, limit?: number): Promise<{ query: string; createdAt: Date | null }[]>;
   getAllUsersWithDetails(limit?: number, offset?: number): Promise<{ users: User[]; total: number }>;
@@ -73,9 +83,19 @@ export class DatabaseStorage implements IStorage {
     const updateSet: Record<string, any> = {};
     if (firstName) updateSet.firstName = firstName;
     if (username)  updateSet.username  = username;
+
+    // لو ما فيش حقول للتحديث (مثلاً نفس الـ id بدون firstName/username)
+    // الكود القديم كان يضيف `telegramId = telegramId` كـ no-op لإرضاء Drizzle.
+    // الأنظف: استخدم onConflictDoNothing ثم SELECT للحصول على الصف.
     if (Object.keys(updateSet).length === 0) {
-      updateSet.telegramId = telegramId;
+      await db
+        .insert(users)
+        .values({ telegramId, firstName: null, username: null, totalSearches: 0, totalDownloads: 0 })
+        .onConflictDoNothing({ target: users.telegramId });
+      const rows = await db.select().from(users).where(eq(users.telegramId, telegramId)).limit(1);
+      return rows[0];
     }
+
     const result = await db
       .insert(users)
       .values({ telegramId, firstName: firstName || null, username: username || null, totalSearches: 0, totalDownloads: 0 })
@@ -176,6 +196,18 @@ export class DatabaseStorage implements IStorage {
     await db.delete(cachedBooks).where(eq(cachedBooks.id, id));
   }
 
+  // FIX-WRONG-FILE (BUG-9): admin-triggered purge by query.
+  // Used by /purge_cache <book> and the cleanup script for the
+  // 34 pre-fix opaque-URL entries. Returns the number of rows deleted.
+  async purgeCachedBookByQuery(query: string): Promise<number> {
+    const normalized = canonicalizeForCache(query);
+    const result = await db
+      .delete(cachedBooks)
+      .where(eq(cachedBooks.bookQueryNormalized, normalized))
+      .returning({ id: cachedBooks.id });
+    return result.length;
+  }
+
   async getDailyDownloadCount(telegramUserId: string): Promise<number> {
     const today = new Date().toISOString().split("T")[0];
     const result = await db
@@ -208,6 +240,25 @@ export class DatabaseStorage implements IStorage {
   async canDownload(telegramUserId: string, limit = 6): Promise<boolean> {
     const count = await this.getDailyDownloadCount(telegramUserId);
     return count < limit;
+  }
+
+  /**
+   * حذف صفوف daily_limits الأقدم من retentionDays. الجدول لا يحتاج
+   * أكثر من آخر يوم لتطبيق الحد، لكن نحتفظ بأسبوع للـ debugging
+   * (مثلاً مراجعة سلوك مستخدم خلال آخر 7 أيام).
+   *
+   * يُستدعى من index.ts كل 24 ساعة. بدونه: 10K مستخدم × 365 يوم
+   * = 3.6M صف بعد سنة، كلهم irrelevant بعد 7 أيام.
+   */
+  async cleanupOldDailyLimits(retentionDays = 7): Promise<number> {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - retentionDays);
+    const cutoffStr = cutoff.toISOString().split("T")[0];
+    const result = await db
+      .delete(dailyLimits)
+      .where(sql`${dailyLimits.date} < ${cutoffStr}`)
+      .returning({ id: dailyLimits.id });
+    return result.length;
   }
 
   async getAllUserIds(): Promise<string[]> {

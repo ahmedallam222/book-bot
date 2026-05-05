@@ -13,15 +13,26 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://bookbot:bookbot_pass@db:5432/bookbot
+      # SECURITY: كلمة المرور تأتي من .env (POSTGRES_PASSWORD) — لا قيمة
+      # افتراضية ضعيفة في الـ repo. لو غير مُعرَّفة، compose سيفشل بـ
+      # warning واضح بدلاً من نشر deployment ضعيف.
+      DATABASE_URL: postgresql://bookbot:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/bookbot
       REDIS_URL: redis://redis:6379
       NODE_ENV: production
     volumes:
       - bot_temp:/app/temp
     ports:
-      - "5000:5000"
+      # SECURITY: تُربَط الواجهة بـ 127.0.0.1 افتراضياً — الـ dashboard
+      # يجب أن يكون خلف reverse proxy (Nginx/Caddy) مع HTTPS وBasic Auth.
+      # للاستثناء (مثل local dev بدون proxy) اضبط: BOT_PORT_BIND=0.0.0.0
+      - "${BOT_PORT_BIND:-127.0.0.1}:5000:5000"
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'node dist/index.cjs' >/dev/null && wget -q --spider --timeout=5 https://api.telegram.org"]
+      # كان يفحص api.telegram.org → بطء/انقطاع Telegram يُعلَن البوت غير صحي
+      # ويُعاد تشغيله بلا داعٍ. الآن نفحص /api/health المحلي الذي يكشف
+      # حقيقة أن العملية شغّالة وتستجيب لـ HTTP.
+      # FIX-HEALTH: pgrep -fx (full + exact) للتطابق التام، يقلّل false-
+      # positives لو شيلين/scripts أخرى تحتوي السلسلة "node dist/index.cjs".
+      test: ["CMD-SHELL", "pgrep -fx 'node dist/index.cjs' >/dev/null && wget -q --spider --timeout=5 http://127.0.0.1:5000/api/health"]
       interval: 60s
       timeout: 15s
       retries: 3
@@ -32,12 +43,15 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: bookbot
-      POSTGRES_PASSWORD: bookbot_pass
+      # SECURITY: لا قيمة افتراضية — لو POSTGRES_PASSWORD غير مُعرَّفة في .env
+      # سيفشل compose مبكّراً بدل ما يعمل deploy بكلمة مرور افتراضية ضعيفة.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: bookbot
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
+    # SECURITY: لا host port binding — DB متاحة فقط داخل شبكة Docker للـ bot.
+    # لو احتجت psql محلي للتشخيص استعمل: docker compose exec db psql -U bookbot
+    # أو فعّل الـ port مؤقتاً عبر docker-compose.override.yml.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bookbot -d bookbot"]
       interval: 5s
@@ -50,8 +64,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
-    ports:
-      - "127.0.0.1:6379:6379"
+    # SECURITY: لا host port binding — Redis متاح فقط داخل شبكة Docker.
+    # للتشخيص: docker compose exec redis redis-cli
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
