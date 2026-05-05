@@ -16,6 +16,7 @@ import {
   getBookSummary,
   getCachedSummary,
   checkAndConsumeUsage,
+  refundUserSummaryUsage,
   GlobalSummaryLimitError,
 } from "./summary.js";
 import type { SummaryResponse } from "./aiProviders/types.js";
@@ -93,6 +94,11 @@ export async function handleSummaryCallback(
   let placeholderMsgId: number | undefined;
   let watchdogTimer:    NodeJS.Timeout | undefined;
   let typingInterval:   NodeJS.Timeout | undefined;
+  // Hoisted so the catch block can refund the per-user quota slot if
+  // we charged it in checkAndConsumeUsage but the upstream call
+  // failed before producing a SummaryResponse.
+  let premium       = false;
+  let usageConsumed = false;
 
   try {
     // Cache fast-path — skip the quota check entirely for cached
@@ -104,10 +110,11 @@ export async function handleSummaryCallback(
       return;
     }
 
-    const premium = await isPremium(userId).catch(() => false);
+    premium = await isPremium(userId).catch(() => false);
 
     // Quota check — only consumes when we'll actually call AI.
     const usage = await checkAndConsumeUsage(userId, premium);
+    if (!usage.blocked) usageConsumed = true;
     if (usage.blocked) {
       await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
       await bot.sendMessage(chatId,
@@ -199,6 +206,14 @@ export async function handleSummaryCallback(
     });
     await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId);
   } catch (e: any) {
+    // The per-user counter was incremented by checkAndConsumeUsage
+    // before this AI call ran. The user is not getting a summary, so
+    // refund the slot — otherwise a user near the cap loses their
+    // last allowance to a transient provider failure or a global cap
+    // hit (which is the bot's fault, not theirs).
+    if (usageConsumed) {
+      refundUserSummaryUsage(userId, premium).catch(() => {});
+    }
     // Distinguish bot-wide cap exhaustion from a generic failure so
     // the user gets actionable wording ("try later") instead of a
     // confusing "something went wrong".
