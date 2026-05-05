@@ -26,6 +26,14 @@ Do not print production `.env` values. Production runtime secrets live in `/home
 - Dashboard/admin API is served by the running bot server on port 5000. Use `DASHBOARD_SECRET` from inside the bot container for authenticated admin API probes.
 - `/home/ubuntu/posts/bot.py` is a separate daily-posting script. Do not modify or delete it during book-bot tests.
 
+## Admin auth
+
+`ADMIN_IDS` is computed in `server/bot/config.ts:55-58` as `new Set(["5469997406", ...envIds])` — Ahmed's user ID `5469997406` is hard-coded as a permanent primary admin even when the `ADMIN_IDS` env var is empty (which it is on prod). Practical implications:
+
+- `isAdmin("5469997406")` always returns `true`.
+- Admin-only chat commands (`/purge_cache`, `/ban`, `/premium_add`, `/note`, etc.) can only be exercised end-to-end via Ahmed's own Telegram account — non-admin users get a silent no-op (the handler returns early with no reply).
+- For shell-only verification of admin-handler logic, call `storage.purgeCachedBookByQuery(query)` directly (see synthetic-row pattern below) instead of trying to send a `/purge_cache` message from a different account.
+
 ## Critical safety rule
 
 Do **not** run `node -e 'require("/app/dist/index.cjs")'` or otherwise import the bundled production entrypoint inside the running bot container. Importing the entrypoint starts a second Telegram polling process and can cause `ETELEGRAM 409 Conflict` errors.
@@ -91,7 +99,7 @@ Useful checks:
 
 ```bash
 # Verify smart cache key behavior without secrets.
-npx tsx -e 'import { normalizeBookCacheKey } from "./server/bot/text.ts"; const cases=["أرض زيكولا","ارض زيكولا","تحميل كتاب أرض زيكولا pdf","رواية أرض زيكولا نسخة pdf"]; for (const c of cases) console.log(c,"=>",normalizeBookCacheKey(c));'
+npx tsx -e 'import { canonicalizeForCache } from "./server/bot/text.ts"; const cases=["أرض زيكولا","ارض زيكولا","تحميل كتاب أرض زيكولا pdf","رواية أرض زيكولا نسخة pdf"]; for (const c of cases) console.log(c,"=>",canonicalizeForCache(c));'
 
 # Always verify TypeScript and bundled output.
 npm run typecheck
@@ -99,6 +107,46 @@ npm run build
 ```
 
 Expected for smart cached-PDF query matching: Arabic spelling variants and generic request wrappers such as `تحميل كتاب ... pdf` should resolve to the same canonical cache key. If storage cache behavior changes, also verify reads remain backward-compatible with legacy `book_query_normalized` rows.
+
+### Synthetic-row insertion for cache fixes
+
+For testing cache-hit re-validation (BUG-3) or `/purge_cache` (BUG-9), insert deterministic synthetic rows directly via the bot container's pg client. Two gotchas:
+
+- The script must run **from `/app`** (where `node_modules/pg` lives) — running from `/tmp` fails with `Cannot find module 'pg'`.
+- The container's loader uses CommonJS for arbitrary node scripts, so use `.cjs` (or use `require` syntax in a `.js` file) rather than ESM.
+
+```bash
+ssh -i $HOME/.ssh/devin_aws_ubuntu_key ubuntu@<production-host>
+cat > /tmp/synth.cjs <<'EOF'
+const { Client } = require("pg");
+const c = new Client({ connectionString: process.env.DATABASE_URL });
+(async () => {
+  await c.connect();
+  await c.query(
+    `INSERT INTO cached_books
+       (book_query, book_query_normalized, book_name, source_url, telegram_file_id, times_served)
+     VALUES ($1,$2,$3,$4,$5,0)`,
+    [
+      "devin_test_synthetic",
+      "devin_test_synthetic",                  // canonicalizeForCache(book_query)
+      "كتاب لا علاقة له بالاستعلام",            // unrelated cached name → re-validation rejects
+      "https://example.org/files/00001.pdf",  // example.org never serves real PDFs
+      "BAQACAgIAaaaaaaaaaaaaaaaa",            // fake file_id (never used — re-validation aborts first)
+    ],
+  );
+  await c.end();
+})().catch((e) => { console.error(e.message); process.exit(1); });
+EOF
+docker cp /tmp/synth.cjs book-bot-bot-1:/app/synth.cjs
+docker exec book-bot-bot-1 sh -c 'cd /app && node synth.cjs && rm /app/synth.cjs'
+```
+
+Then ask Ahmed to send the matching query as a Telegram message; tail logs with `--since=<UTC TS>` to capture the response. Expected log markers for the cache-hit re-validation path:
+
+- `[WARN] [cache] cache hit looked suspicious — falling through to full search`
+- Redis counter `tel:cache:hit_revalidated_skip` increments by 1.
+
+Always `DELETE FROM cached_books WHERE book_query LIKE 'devin_test_%'` at the end of the test run.
 
 ### `tsx` probe gotchas
 
