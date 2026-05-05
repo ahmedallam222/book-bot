@@ -7,6 +7,76 @@
 
 ---
 
+## [31.5.0] — 2026-05-05
+
+### 💎 ميزة جديدة — Firecrawl `/parse` كمسار سريع لـ Premium summary
+
+دمجنا Firecrawl `/v2/parse` و `/v1/scrape` كطبقة استخراج نصّ سريعة قبل
+الـ AI tier، مفعّلة فقط للمستخدمين Premium. النتيجة: ملخّص أسرع
+وأعلى جودة، مع توفير الـ Gemini quota المجاني للمستخدمين العاديين.
+
+#### السلوك القديم (للمستخدمين Premium)
+
+```
+طلب الملخّص
+  → Wikipedia context
+  → Gemini PDF inline (multimodal، 25-45s، يأكل من الـ daily quota)
+  → fallback: text-tier (you.com priority 0 + باقي المزوّدين)
+```
+
+#### السلوك الجديد
+
+```
+طلب الملخّص
+  → Wikipedia context
+  → [Premium] Firecrawl /parse (5-15s، يستخرج نصّ من الـ PDF)
+                     ↓
+                 markdown context
+                     ↓
+  → text-tier (you.com priority 0 + grounded by real PDF text)
+```
+
+النتيجة: 25-45s → 8-15s متوسطًا للمستخدمين Premium، وما يستهلكش من
+الـ Gemini free tier (1500/day) المخصّص لباقي المستخدمين.
+
+#### التغييرات
+
+| ملف | التغيير |
+|------|---------|
+| `server/bot/firecrawlParse.ts` | **جديد** — `parsePdfBuffer()` (multipart upload) و `scrapeRemotePdf()` (URL-based) و `buildSummaryContext()` (دمج Wikipedia + Firecrawl) |
+| `server/bot/summary.ts` | step 3.5 جديد قبل الـ PDF tier — يفعّل الـ fast-path لو `opts.premium===true` |
+| `package.json` | bump 31.4.0 → 31.5.0 |
+
+#### الحماية والـ fallback
+
+- **Quota share**: نفس مفاتيح `FC_QUOTA_EXCEEDED_KEY` و `FC_RATE_LIMITED_KEY`
+  المستخدمة في `engine.ts`. لو Firecrawl وقع في 402/429 أثناء البحث،
+  الـ /parse path يـ skip تلقائياً.
+- **Graceful fallback**: لو Firecrawl فشل لأي سبب (timeout, auth,
+  empty response, paused)، الكود يكمل للـ existing PDF tier (Gemini).
+  مفيش regression لمستخدم Premium لو Firecrawl نزل.
+- **Free users unaffected**: `if (opts.premium && ...)` — المسار الجديد
+  مغلق تماماً لغير الـ Premium. الـ free quota محمي.
+
+#### Telemetry
+
+- `tel:summary:firecrawl_used` — عداد للنجاح
+- `tel:summary:firecrawl_skipped:<reason>` — عدّاد لكل fallback path:
+  - `no_api_key` / `fc_paused` / `too_large` / `http_error` / `rate_limited`
+  - `quota_exceeded` / `auth_error` / `empty_response` / `timeout` / `exception`
+- `counter:firecrawl:credits:{date}` — يكتب الآن لكل /parse و /scrape
+  call (5 و 1 credits على التوالي)، مما يجعل dashboard التكلفة دقيق.
+
+#### الإعدادات
+
+- `FIRECRAWL_PARSE_MAX_BYTES = 18 MB` — يطابق `PROVIDER_MAX_PDF_BYTES`
+- `TIMEOUT_FC_PARSE = 60_000` ms (للـ /parse)
+- `TIMEOUT_FC_SCRAPE_PDF = 45_000` ms (للـ /scrape PDF)
+- `FIRECRAWL_CONTEXT_MAX_CHARS = 24_000` — حدّ على الـ context المرسَل
+  لمزوّد النصّ، يتفادى تجاوز input limits
+
+---
+
 ## [31.4.0] — 2026-05-05
 
 ### ✨ ميزة جديدة — مصدر `mktbtypdf.com` (مكتبتي PDF)
