@@ -520,20 +520,53 @@ export function registerMessageHandler(
   bot.on("message", async (msg) => {
     // ── Successful payment — يجب معالجته قبل فحص msg.text ──
     if (msg.successful_payment) {
-      const userId  = String(msg.from?.id || "");
-      const chatId  = msg.chat.id;
-      const payload = msg.successful_payment.invoice_payload || "";
+      const userId   = String(msg.from?.id || "");
+      const chatId   = msg.chat.id;
+      const payload  = msg.successful_payment.invoice_payload || "";
+      const chargeId = msg.successful_payment.telegram_payment_charge_id || "";
       if (payload.startsWith("premium:") && userId) {
-        // 30 يوم اشتراك مدفوع — by نفس المستخدم لأن الدفع منه
-        await setPremium(userId, true, 30, {
-          by:     userId,
-          source: "stars-payment",
-          reason: `stars=${msg.successful_payment.total_amount} payload=${payload.slice(0, 40)}`,
-        });
-        L.info("payment", "Premium activated via Stars", {
-          userId,
-          stars: msg.successful_payment.total_amount,
-        });
+        // Idempotency: NTBA polling offset is in-memory only — a bot
+        // crash between handling a successful_payment and the next
+        // poll round, a multi-instance race, or a Telegram-side retry
+        // can redeliver the same update. Without dedup, setPremium
+        // runs twice and grants 60 days for a single payment (TTL
+        // extension semantics). Use Redis SET NX on the unique
+        // telegram_payment_charge_id to grant only once. We still
+        // send the success message in both cases so the user gets
+        // confirmation if the original reply was lost.
+        let alreadyProcessed = false;
+        if (chargeId) {
+          const dedupKey  = `payment:processed:${chargeId}`;
+          // 90-day window — far longer than any reasonable retry. After
+          // that the dedup key naturally expires; the chance of a real
+          // 90-day-old replay is effectively zero.
+          const acquired = await redis.set(
+            dedupKey, String(Date.now()), "EX", 90 * 24 * 3600, "NX",
+          ).catch(() => null);
+          alreadyProcessed = acquired !== "OK";
+        }
+
+        if (!alreadyProcessed) {
+          // 30 يوم اشتراك مدفوع — by نفس المستخدم لأن الدفع منه
+          await setPremium(userId, true, 30, {
+            by:     userId,
+            source: "stars-payment",
+            reason: `stars=${msg.successful_payment.total_amount} payload=${payload.slice(0, 40)} charge=${chargeId.slice(0, 24)}`,
+          });
+          L.info("payment", "Premium activated via Stars", {
+            userId,
+            stars:    msg.successful_payment.total_amount,
+            chargeId: chargeId.slice(0, 24),
+          });
+        } else {
+          L.warn("payment", "Duplicate successful_payment redelivered — premium NOT re-granted", {
+            userId,
+            chargeId: chargeId.slice(0, 24),
+            stars:    msg.successful_payment.total_amount,
+          });
+          redis.incr("tel:payment:duplicate_redelivery").catch(() => {});
+        }
+
         await bot.sendMessage(chatId,
           `🎉 *تم تفعيل Premium بنجاح!*\n\n` +
           `⭐ الآن لديك *${PREMIUM_LIMIT} تحميل يومياً*\n` +
