@@ -2,6 +2,8 @@
 // LOGGER — خلاصة الكتب
 // ══════════════════════════════════════════════
 
+import { pushLog } from "./logBuffer.js";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -17,6 +19,8 @@ function log(level: LogLevel, ns: string, msg: string, meta?: Record<string, unk
   } else {
     console.log(line);
   }
+  // FEAT-DASH: نسخة في الذاكرة للـ dashboard log viewer
+  pushLog(level.toUpperCase() as "DEBUG" | "INFO" | "WARN" | "ERROR", ns, msg, meta);
 }
 
 export const L = {

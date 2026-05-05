@@ -300,6 +300,96 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
   // System
   app.get("/api/admin/system", auth, wrap(async (_req, res) => ok(res, await getSystemInfo())));
 
+  // ── DASH 2.0: System extras (logs, backup, costs) ─────────────
+  // GET /api/admin/system/logs?limit=200&level=ERROR
+  // يعيد آخر N سطر من ring buffer في الذاكرة — بدون داعي يفتح shell
+  app.get("/api/admin/system/logs", auth, wrap(async (req, res) => {
+    const { getRecentLogs, getLogBufferStats } = await import("./bot/logBuffer.js");
+    const rawLimit = parseInt((req.query.limit as string) || "200", 10);
+    const limit    = isNaN(rawLimit) ? 200 : Math.min(500, Math.max(10, rawLimit));
+    const level    = (req.query.level as string | undefined)?.trim() || undefined;
+    const lines    = getRecentLogs(limit, level);
+    ok(res, { lines, stats: getLogBufferStats() });
+  }));
+
+  // GET /api/admin/system/backup
+  // يستعرض حالة النسخ الاحتياطي اليومي عن طريق فحص /var/backups/bookbot/
+  // (الـ container ليس عنده وصول للـ host — ندير cron من خلال host بـ root).
+  // ولأن المسار قد لا يكون mount على الـ container، نسمح بـ override عبر env.
+  app.get("/api/admin/system/backup", auth, wrap(async (_req, res) => {
+    const { readdirSync, statSync } = await import("fs");
+    const dir = process.env.BACKUP_DIR || "/var/backups/bookbot";
+    let files: { name: string; size: number; mtime: number }[] = [];
+    let dirOk = false;
+    try {
+      const list = readdirSync(dir).filter(n => /\.sql\.gz$/i.test(n));
+      for (const name of list) {
+        try {
+          const s = statSync(`${dir}/${name}`);
+          files.push({ name, size: s.size, mtime: s.mtimeMs });
+        } catch {}
+      }
+      files.sort((a, b) => b.mtime - a.mtime);
+      dirOk = true;
+    } catch {}
+    const latest    = files[0];
+    const ageHours  = latest ? Math.floor((Date.now() - latest.mtime) / 3_600_000) : null;
+    ok(res, {
+      dir,
+      dirOk,
+      total:    files.length,
+      latest:   latest ? { name: latest.name, size: latest.size, mtime: latest.mtime } : null,
+      ageHours,
+      // Healthy if last backup ≤ 26 hours old (cron runs daily, +2h grace)
+      healthy:  ageHours != null && ageHours <= 26,
+      retention: 14,   // يومًا (مذكور في script/postgres-backup.sh)
+      files:    files.slice(0, 14),
+    });
+  }));
+
+  // GET /api/admin/system/costs
+  // يجمع counters التكلفة التقريبية: Firecrawl credits + AI calls per provider.
+  // هذه عدّادات تقريبية تُحدَّث في Redis — للقيم الفعلية ارجع لفواتير المزوِّد.
+  app.get("/api/admin/system/costs", auth, wrap(async (_req, res) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const month = today.slice(0, 7);
+    // أنماط مفاتيح موجودة فعلاً: counter:firecrawl:credits:{date}, counter:ai:{provider}:{date}
+    const [fcDay, fcMonth, aiKeys] = await Promise.all([
+      redis.get(`counter:firecrawl:credits:${today}`).catch(() => null),
+      redis.keys(`counter:firecrawl:credits:${month}*`).catch(() => [] as string[]),
+      redis.keys(`counter:ai:*:${month}*`).catch(() => [] as string[]),
+    ]);
+
+    let firecrawlMonth = 0;
+    if (fcMonth.length > 0) {
+      const vals = await redis.mget(...fcMonth).catch(() => [] as (string | null)[]);
+      for (const v of vals) firecrawlMonth += parseInt(v || "0", 10) || 0;
+    }
+
+    // AI calls per provider this month
+    const providerTotals: Record<string, number> = {};
+    if (aiKeys.length > 0) {
+      const vals = await redis.mget(...aiKeys).catch(() => [] as (string | null)[]);
+      aiKeys.forEach((key, i) => {
+        const m = key.match(/^counter:ai:([^:]+):/);
+        if (!m) return;
+        const provider = m[1];
+        const v = parseInt(vals[i] || "0", 10) || 0;
+        providerTotals[provider] = (providerTotals[provider] || 0) + v;
+      });
+    }
+
+    ok(res, {
+      firecrawl: {
+        today:   parseInt(fcDay || "0", 10) || 0,
+        month:   firecrawlMonth,
+      },
+      aiByProvider: providerTotals,
+      // تقدير $ بناءً على pricing عام (تقريبي — للـ orientation فقط)
+      estimatedMonthUsd: estimateMonthlyCost(firecrawlMonth, providerTotals),
+    });
+  }));
+
   // ── Telemetry endpoints ──────────────────────────────────────
   // GET /api/admin/telemetry/funnel?date=YYYY-MM-DD
   app.get("/api/admin/telemetry/funnel", auth, wrap(async (req, res) => {
@@ -721,6 +811,20 @@ async function getSystemInfo() {
     nodeVersion: process.version,
     pid:         process.pid,
   };
+}
+
+// تقدير $ شهري — pricing تقريبي للـ orientation. للقيم الفعلية ارجع لفواتير
+// المزوِّد. الأرقام مأخوذة من tier المجاني/المنخفض كما في 2026:
+//   - Firecrawl: $19/3000 credits = $0.00633/credit
+//   - AI providers: مفترض average $0.0002/call (free tiers + cheap paid)
+function estimateMonthlyCost(
+  firecrawlCredits: number,
+  aiByProvider:     Record<string, number>,
+): number {
+  const fcCost = firecrawlCredits * 0.00633;
+  let aiCost   = 0;
+  for (const v of Object.values(aiByProvider)) aiCost += v * 0.0002;
+  return Math.round((fcCost + aiCost) * 100) / 100;
 }
 
 function formatUptime(sec: number): string {
