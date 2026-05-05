@@ -7,6 +7,57 @@
 
 ---
 
+## [31.8.0] — 2026-05-03
+
+### ✨ Auto-summary trigger — "لخصلي" → ملخص تلقائي بعد الإرسال
+
+الـ `bookNameParser.ts` كان دائماً يجرّد كلمات نية التلخيص (`لخصلي`, `ملخص`, `تلخيص`, `اختصرلي`) من اسم الكتاب — لازم — لكن هذا التجريد كان يضيع إشارة النيّة. كان المستخدم لمّا يكتب "لخصلي أرض زيكولا" يستلم الكتاب، ثم لازم يضغط زر "📘 ملخص الكتاب" ليطلب الملخص الصريح.
+
+#### الـ Logic
+
+1. **detectSummaryIntent(rawBookName)** — جديد في `bookNameParser.ts`. يكشف وجود كلمات النيّة في الرسالة الخام **قبل** ما `parseBookName()` يجرّدها.
+2. **commands.ts** — يستدعي `detectSummaryIntent()` على الـ raw book name قبل parsing، ويمرّر `wantsSummary: boolean` لـ `handleBookRequest()`.
+3. **QueueJob.wantsSummary** — حقل جديد. يُحفَظ مع الـ job في Redis ويعدّي إلى الـ worker.
+4. **maybeAutoSummary()** في bookRequest worker — لو `job.wantsSummary === true` و الإرسال نجح، يستدعي `runSummaryFlow()` بعد `sendSuccessMessage()`.
+5. **runSummaryFlow()** — مُستخرَج جديد من `handleSummaryCallback()` (refactor). نفس التدفّق (cache fast-path → quota → placeholder → orchestrator → deliver) لكن لا يحتاج `callbackQueryId`.
+6. **Lock idempotency** — auto-trigger يحجز `summary:auto:<userId>:<book>` لمدة 90 ثانية. لو المستخدم ضغط زر "📘 ملخص الكتاب" يدوياً قبل ما الـ auto يخلص، الـ button click يعدّي إلى الـ session lock — الاثنان لا يتداخلان (lock keys مختلفة) لكن الـ cache fast-path في `runSummaryFlow` تمنع double-call على نفس الـ AI.
+
+#### Telemetry جديدة
+
+- `tel:summary:auto_triggered` — counter لكل auto-trigger ناجح (الـ lock تم حجزه)
+
+#### الـ Wiring الكامل
+
+```
+user msg "لخصلي أرض زيكولا"
+        ↓
+commands.ts: detectSummaryIntent(raw) === true
+        ↓ wantsSummary=true
+handleBookRequest(...) → enqueue(...) → QueueJob{ wantsSummary: true }
+        ↓
+processBookRequest → serveFromCache OR performFullSearch
+        ↓ on success
+maybeAutoSummary(bot, chatId, userId, bookName, sourceUrl, true)
+        ↓ acquire lock summary:auto:<userId>:<book>  (NX EX 90)
+runSummaryFlow → cached? → quota? → placeholder → getBookSummary → deliverSummary
+```
+
+#### الـ Probes (29/29)
+
+- G1: bundle markers (`detectSummaryIntent`, `runSummaryFlow`, `maybeAutoSummary`, `wantsSummary`, `summary:auto:`, `tel:summary:auto_triggered`)
+- G2: detectSummaryIntent — 14 cases (8 true / 6 false)
+- G3: QueueJob round-trip via JSON
+- G4: Lock key shape
+- G5: Log message markers
+
+#### Backward compat
+
+- المستخدمون اللي يكتبوا اسم الكتاب فقط ("أرض زيكولا") مفيش تغيير — `wantsSummary` يبقى `undefined` و الـ branch ما يدخلش
+- الزر "📘 ملخص الكتاب" يبقى في الـ keyboard كالعادة (نفس التدفّق عبر `handleSummaryCallback`)
+- الـ `runSummaryFlow` refactor preserves الـ behavior الحالي للـ button click 100%
+
+---
+
 ## [31.7.0] — 2026-05-05
 
 ### ⚡ توفير Mistral — Strong-filename-match short-circuit
