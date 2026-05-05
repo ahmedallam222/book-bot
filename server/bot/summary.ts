@@ -25,7 +25,7 @@ import {
   SUMMARY_DAILY_LIMIT_FREE,
   SUMMARY_DAILY_LIMIT_GLOBAL,
 } from "./config.js";
-import { normalizeForCache } from "./text.js";
+import { normalizeForCache, cairoDateString } from "./text.js";
 import { runFailover } from "./aiProviders/registry.js";
 import { fetchWikipediaContext } from "./wikipedia.js";
 import { PROVIDER_MAX_PDF_BYTES } from "./aiProviders/types.js";
@@ -57,8 +57,10 @@ function cacheKey(bookName: string): string {
 }
 
 function todayKey(): string {
-  const d = new Date();
-  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+  // Cairo TZ — يماشي downloadCount/buildResetTime عشان يوزر بيستخدم
+  // البوت قبل منتصف ليل القاهرة وبعدها يلاقي اللميت اتجدد فعلاً (مش
+  // الساعة 03:00 صباح القاهرة زي ما UTC كان بيعمل).
+  return cairoDateString().replace(/-/g, ""); // YYYYMMDD
 }
 
 export interface UsageStatus {
