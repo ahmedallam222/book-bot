@@ -7,6 +7,29 @@
 
 ---
 
+## [31.3.13] — 2026-05-05
+
+### ⚡ تحسين أداء — `redis.keys()` → `scanKeys()` في endpoint التكلفة بالـ dashboard
+
+`/api/admin/system/costs` كان فيه نداءَين متوازيين لـ `redis.keys()`:
+
+```ts
+redis.keys(`counter:firecrawl:credits:${month}*`)
+redis.keys(`counter:ai:*:${month}*`)
+```
+
+نفس المشكلة اللي اتعالجت في PR #58 و PR #61: الأمر `KEYS` بيحجب الـ Redis event loop على كامل الـ keyspace (O(n) بغض النظر عن الـ pattern). على Redis للبوت بآلاف المفاتيح (cache search، daily limits، sessions، premium TTLs، rate limits)، كل فتح للـ dashboard من admin بيمنع الأوامر المتزامنة لمدة 5–50ms — ويأثر على البوت في نفس اللحظة لو فيه users بيبحثوا.
+
+**الإصلاح:** استخدام helper `scanKeys()` المعرّف في `redis.ts` (بنفس الطريقة المستخدمة في analytics و queue). `SCAN` بيقسّم العمل على دفعات (`COUNT 200`) فبيخلي الـ event loop يخدم أوامر تانية بين الدفعات.
+
+**التأثير:**
+- لما admin يفتح cost dashboard: ما بيحصلش stalls في معالجة الـ search/download requests للمستخدمين العاديين
+- متاح للتوسّع: لو الـ counter keys زادوا بمرور الشهور، الأداء بيفضل ثابت
+
+**ملاحظة:** الـ counter keys المعنية (`counter:firecrawl:credits:*`, `counter:ai:*:*`) حالياً مش بيُكتب فيها من أي مكان في الكود — مش feature مكتمل. لكن السلوك على Redis نفسه (KEYS scan على كل keyspace) موجود فعلاً ومستحق الإصلاح بمعزل عن إكمال الـ counters لاحقاً.
+
+---
+
 ## [31.3.12] — 2026-05-04
 
 ### 🐛 إصلاح حرج — `SEARCH_CACHE_TTL` كانت بالـ milliseconds لكن بتُمرَّر لـ `setex` (يقبل ثواني)
