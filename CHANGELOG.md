@@ -7,6 +7,48 @@
 
 ---
 
+## [31.3.19] — 2026-05-05
+
+### 🐛 إصلاح حرج — كتب مجانية كانت تُصنَّف "مدفوعة" خطأً (`classifyAccess` over-matching)
+
+في `server/bot/engine.ts:172-176` الـ `PROTECTED_ACCESS_PATTERNS` كانت بتطابق كلمات مفردة عامة جداً — `premium`, `subscribe`, `subscription`, `price`, `paid`, `checkout`, `حقوق النشر`, `شراء/اشتر بدون context` — كلها بتظهر طبيعياً في UI لمواقع كتب مجانية تماماً:
+
+- "Subscribe to our newsletter" في صناديق التسجيل
+- "Premium membership" أو "Premium account" في banners حتى للمواقع المجانية
+- "حقوق النشر محفوظة" في footer كل صفحة
+- "اشتراك" يبدأ بـ "اشتر" → يطابق pattern الشراء
+- "السعر العادل" في كتاب اقتصادي
+
+لما أي كلمة منهم تظهر في صفحة (حتى لو الكتاب مجاني تماماً)، الـ regex بيلوّن النتيجة `protected_page`. وفي `bookRequest.ts:897` لو download فشل لأي سبب (PDF تالف، URL محجوب، Firecrawl لقى لكن download ما اشتغلش)، الرسالة `buildPaidBookMessage` بتتبعت دايماً، فالمستخدم يستلم "كتاب مدفوع" لكتاب مجاني تماماً.
+
+**مثال واقعي:** المستخدم بحث عن "علمتني سورة البقرة". الكتاب موجود مجاناً على `kutubm.com/down/?id=13917` (ضمن المصادر المعتمدة). Firecrawl لقى الصفحة، لكن لأن الصفحة فيها "اشتراك" أو "Premium" في sidebar، النتيجة اتعلّمت `protected_page` → الـ download فشل → الرسالة "هذا الكتاب مدفوع" → المستخدم بياخد انطباع غلط إن البوت ما بيشتغلش.
+
+**الإصلاح:**
+
+1. **تشديد `PROTECTED_ACCESS_PATTERNS`** — 4 patterns متخصصة بدل 3 عامة:
+   - **Action verbs مع context صريح** (Arabic): `شراء الكتاب`, `اشتر الآن`, `أضف إلى السلة`, `نفدت الكمية`, `غير متوفر مجاناً`, إلخ — مش `شراء` لوحدها (تظهر في كتب اقتصادية مثلاً).
+   - **Action verbs مع context صريح** (English): `buy now`, `add to cart`, `out of stock`, `proceed to checkout`, `complete your purchase`, `paid only/content/version` — مش `paid` لوحدها (تظهر في "highly paid", "paid leave").
+   - **Price tags فعلية** — currency symbol أو ISO code + رقم، مع currency abbreviations عربية (`ر.س`, `ج.م`, `د.ك`, `ريال`, `دينار`, إلخ). أقوى إشارة على إن الصفحة بتبيع.
+   - **Read-only signals صريحة** — `قراءة فقط`, `للاطلاع فقط`, `لا يسمح بالتحميل`, `غير قابل للتنزيل`, `read-only access`, `preview only N pages`. مش `قراءة أونلاين` لوحدها (مكتبات مجانية كتير بتعرض هذه الميزة).
+
+2. **رفع threshold الـ classifyAccess** — لازم تتطابق على الأقل **2 patterns مختلفة** عشان النتيجة تتعلّم `protected_page`. صفحة فيها "buy now" بس في زر شراء كتاب مختلف في sidebar مش كافية.
+
+3. **رسالة الفشل التكيُّفية** في `bookRequest.ts` — لما الـ download يفشل:
+   - `paidSignalCount >= max(2, ceil(results.length × 0.4))` → رسالة "كتاب مدفوع" (high-confidence)
+   - أقل من كده → `buildNoResults(bookName)` (رسالة "لم أجد PDF" الأمينة + اقتراحات)
+   - الـ counter `tel:dl:fail_paid_signal` و `tel:dl:fail_no_signal` بيـ track النسبة في production.
+
+**اختبار:** 12 سيناريو في `test-classify-access-false-positive.mjs`:
+- 8 صفحات كتب **مجانية** فيها كلمات UI خادعة (premium upsell, اشتراك في النشرة, copyright footer, "السعر العادل" في كتاب اقتصادي) — كلهم passed (0 أو 1 hit ≤ threshold).
+- 4 صفحات كتب **مدفوعة** فعلية (price + buy now, out of stock + price, read-only + غير متوفر, Amazon-like page) — كلهم passed (≥ 2 hits).
+
+**التأثير:** قبل الإصلاح، كل كتاب مجاني فشل تحميله (لأي سبب) كان بيتم تصنيفه "مدفوع". بعد الإصلاح:
+- false positives بتقل بشكل كبير جداً
+- المستخدم لما الـ download يفشل بيستلم رسالة دقيقة (مدفوع فعلاً vs. لم يجد)
+- الميتركس الجديدة تساعد admins في رصد الـ paid-detection accuracy
+
+---
+
 ## [31.3.18] — 2026-05-05
 
 ### 🐛 إصلاح مالي حرج — `successful_payment` ممكن يمنح Premium مرتين لدفعة واحدة
