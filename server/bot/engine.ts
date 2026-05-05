@@ -46,6 +46,19 @@ export async function getSearchCacheResults(query: string): Promise<BookResult[]
   } catch { return []; }
 }
 
+// Returns true if a search-cache entry exists for `query` — for *either*
+// a HIT (results found) or a MISS (cached as `[]`). Callers use this to
+// decide whether the query has any recent activity at all (e.g. the
+// background cache-warmer skips queries that have already been searched
+// in the last hour / 5 min so we don't burn Firecrawl quota re-checking
+// the same negative result).
+export async function hasRecentSearchCache(query: string): Promise<boolean> {
+  try {
+    const exists = await redis.exists(searchCacheKey(query));
+    return exists === 1;
+  } catch { return false; }
+}
+
 export function invalidateRecentSearchesCache(bookName?: string): void {
   if (!bookName) return;
   const key = searchCacheKey(bookName);
