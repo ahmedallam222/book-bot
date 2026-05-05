@@ -33,9 +33,14 @@ export function safeCbWl(data: string): string {
   return t;
 }
 
-/** الحد الأقصى بناءً على نوع الحساب */
-export async function getWishlistMax(userId: string): Promise<number> {
-  const prem = await isPremium(userId).catch(() => false);
+/**
+ * الحد الأقصى بناءً على نوع الحساب.
+ * @param premHint  لو الـ caller حسب isPremium بنفسه فعلاً، يمرّره هنا بدل استدعاء تاني.
+ */
+export async function getWishlistMax(userId: string, premHint?: boolean): Promise<number> {
+  const prem = premHint !== undefined
+    ? premHint
+    : await isPremium(userId).catch(() => false);
   return prem ? WISHLIST_MAX_PREMIUM : WISHLIST_MAX;
 }
 
@@ -104,11 +109,13 @@ export async function sendWishlist(
   chatId: number,
   userId: string,
 ): Promise<void> {
-  const [list, prem, maxSlots] = await Promise.all([
+  // BUG-FIX: كان بيتعمل isPremium مرتين في Promise.all (واحدة صريحة + واحدة جوا getWishlistMax).
+  // دلوقتي: نجيب prem مرة واحدة ونمرّره لـ getWishlistMax.
+  const [list, prem] = await Promise.all([
     getWishlist(userId),
     isPremium(userId).catch(() => false),
-    getWishlistMax(userId),
   ]);
+  const maxSlots = prem ? WISHLIST_MAX_PREMIUM : WISHLIST_MAX;
   await bot.sendMessage(chatId, buildWishlistMsg(list, prem, maxSlots), {
     parse_mode:   "Markdown",
     reply_markup: buildWishlistKb(list),

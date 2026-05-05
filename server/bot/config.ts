@@ -34,8 +34,26 @@ export const FC_RATE_LIMITED_TTL_SEC  = 60;
 export const FC_QUOTA_TTL_SEC         = 86_400;     // 24h
 
 // ── PDF Validation thresholds ─────────────────
-export const PDF_VALIDATE_ACCEPT_THRESHOLD = 0.40;
-export const PDF_VALIDATE_REJECT_THRESHOLD = 0.12;
+//
+// Three bands (by score):
+//   score >= ACCEPT_THRESHOLD               → accept locally (no Mistral)
+//                                             مع علامة CONFIRM_THRESHOLD
+//                                             نضيف فحص Mistral للتأكيد لو
+//                                             الدرجة بين الاتنين
+//   REJECT_THRESHOLD <= score < ACCEPT      → ambiguous, ask Mistral
+//   score < REJECT_THRESHOLD (clear title)  → reject locally (no Mistral)
+//
+// Confirm band (CONFIRM_THRESHOLD < score < ACCEPT)
+//   تم استحداثه لأن "ACCEPT_THRESHOLD = 0.40" كانت تقبل candidates ذات
+//   تشابه ضعيف-إلى-متوسط بدون مراجعة. مثال شائع: bookName "كتاب الفقه"
+//   ضد metaTitle "الفقه السلوكي" → ratio 0.50 يقبل بدون Mistral، رغم
+//   إن الكتابين مختلفان. الـ confirm band بيمسك دي ويعدّيها على Mistral.
+//
+//   اضبطه = ACCEPT_THRESHOLD لتعطيل الـ band (back-compat).
+//   اضبطه < ACCEPT_THRESHOLD ليبدأ الفحص من تلك القيمة فما فوق.
+export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.40;
+export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.55;
+export const PDF_VALIDATE_REJECT_THRESHOLD  = 0.12;
 
 // ── Blacklist ─────────────────────────────────
 export const BLACKLIST_THRESHOLD      = 3;
@@ -47,15 +65,19 @@ export const BLACKLIST_THRESHOLD      = 3;
 export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 // ── Admin IDs ─────────────────────────────────
+// SECURITY: تُقرأ فقط من env. تم حذف الـ ID المثبت في المصدر — كان مكشوفاً
+// لأي شخص يقرأ الـ repo (والـ repo public). انظر deployment notes في الـ PR.
 const _envAdminIds = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter((s) => /^\d{5,15}$/.test(s));
 
-export const ADMIN_IDS = new Set<string>([
-  "5469997406",
-  ..._envAdminIds.filter((id) => id !== "5469997406"),
-]);
+export const ADMIN_IDS = new Set<string>(_envAdminIds);
+
+if (ADMIN_IDS.size === 0) {
+  // log فقط — لا نوقف التشغيل لأن النشر قد يكون قبل ضبط الـ env بدقيقة
+  console.warn("[config] ADMIN_IDS is empty — /admin and admin alerts will be disabled until set");
+}
 
 // ── Banned users (env, fast-path) ────────────
 export const BANNED_USERS = new Set<string>(
@@ -142,6 +164,35 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
   process.env.SOURCE_AUTO_DISABLE_MAX_RATE || "0.15",
 );
 
+// ── Hard-fail tier ────────────────────────────
+// مصادر بتفشل فشل كاتاستروفي (HTML بدل PDF، 5xx متكرر، DNS فشل …) —
+// لازم يتحجبوا أسرع. Tier ثاني: عدد محاولات أقل + نسبة نجاح ≤ 0% فعلياً.
+// المستخدم يضيع وقته 5 محاولات في مصدر باظ بدل 8.
+export const SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS || "5",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_HARD_MAX_RATE = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_HARD_MAX_RATE || "0.0",
+);
+
+// ── Trust tier (مرجع لـ Mistral) ──────────────
+// مصادر بترجّع PDFs بنجاح، لكن Mistral بيرفضها (يعني الكتاب الغلط).
+// كأنها fail من منظور المستخدم. مثال: downloads.hindawi.org عنده
+// 13 ok / 34 fail / 29 mistral_rejected. الـ successRate التقليدي = 27%،
+// أعلى من حد الـ tier-1 (15%)، فما يتحجبش. لكن الـ trustRate الحقيقي
+// (ok / total_with_rejects) = 17% وده اللي يمسّ المستخدم فعلاً.
+//
+// نحجب لو: total_with_rejects ≥ 10 محاولات، فيها mistral_rejected
+// حقيقي > 0 (مش كل rejection signal من timeout)، وtrustRate ≤ 20%.
+export const SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS = parseInt(
+  process.env.SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS || "10",
+  10,
+);
+export const SOURCE_AUTO_DISABLE_TRUST_MAX_RATE = parseFloat(
+  process.env.SOURCE_AUTO_DISABLE_TRUST_MAX_RATE || "0.20",
+);
+
 // ── Trusted PDF domains ───────────────────────
 // Aggregators / mirrors. Anything served from these download/dl paths
 // is assumed to be the requested book — we skip Mistral entirely.
@@ -190,6 +241,46 @@ export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
 // indexed the right title.
 export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
   process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
+);
+
+// ── Download attempt caps (find-to-send loss mitigation) ──
+// Production audit (2026-05-03) showed 44% of "found" searches never
+// deliver a PDF. Root cause: the download loop in bookRequest.ts had
+// NO cap — every candidate URL was tried until one succeeded. Low-
+// success domains (Hindawi 16%, foulabook 25%) crowded the loop with
+// 4-8 doomed attempts each, burning ~90s × N per request before the
+// user got "links_only".
+//
+// Two caps mitigate this without changing existing success paths:
+//
+//   * MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST — global ceiling on URL
+//     attempts per single book request. After this many tries we
+//     stop and surface "links_only" instead of timing out.
+//   * MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN — per-domain ceiling within
+//     one request. Once we've tried this many URLs from the same
+//     host and they all failed, we skip remaining URLs from that
+//     host and move to the next domain.
+//
+// Tunable via env. Set to 0 to disable a cap entirely.
+export const MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST = parseInt(
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "6",
+  10,
+);
+export const MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN = parseInt(
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "2",
+  10,
+);
+
+// Soft penalty for domains whose observed success rate (over recent
+// requests) is below this threshold. Applied in URL ranking — a low-
+// rate domain still appears in the candidate list, but gets pushed
+// behind higher-rate alternatives. Distinct from UNRELIABLE_DOMAINS
+// which is a static block-list with a hard penalty.
+//
+// Default 0.30 = "domains succeeding less than 30% of the time get
+// soft-penalized in scoring". Set to 0 to disable the soft penalty.
+export const LOW_SUCCESS_RATE_PENALTY_THRESHOLD = parseFloat(
+  process.env.LOW_SUCCESS_RATE_PENALTY_THRESHOLD || "0.30",
 );
 
 // After this many consecutive Mistral NO verdicts on the same book
