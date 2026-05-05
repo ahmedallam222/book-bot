@@ -7,6 +7,67 @@
 
 ---
 
+## [31.6.0] — 2026-05-05
+
+### 🛡️ Auto-disable tier جديد — Mistral-only catastrophic sources
+
+أضفنا طبقة auto-disable رابعة تستهدف المصادر التي:
+- لها `mistralRejected ≥ 5` (أي Mistral رفضها 5+ مرات كمحتوى غلط)
+- و `mistralRejected ≥ ok × 2` (الرفض غالب على النجاح بضعف)
+
+#### المشكلة
+
+من بيانات بروداكشن:
+- `dn790009.ca.archive.org` → 0 ok / 0 fail / **7 mistralRejected** = 0% trust
+- `dn790006.ca.archive.org` → 2 ok / 0 fail / **5 mistralRejected** = 29% trust
+- `dn790003.ca.archive.org` → 0 ok / 0 fail / **3 mistralRejected**
+
+كل واحد منهم بيطلع في كل بحث ينتج نتائج archive.org كثيفة، يتم
+تنزيل الـ PDF بنجاح، ثم Mistral يرفضه (كتاب غلط). الـ TRUST tier
+الحالي محتاج `totalWithRejects ≥ 10` فالـ subdomains اللي عندها
+5-9 rejects تعدّي بدون حجب وتستمر تستهلك Mistral credits ووقت المستخدم.
+
+#### الـ Tier الجديد
+
+| Tier | الشرط | الباجة |
+|------|-------|--------|
+| Manual | `src:off:domain` exists | 🚫 |
+| Hard | `total ≥ 5 AND rate = 0%` | ⛔ |
+| Trust | `totalWithRejects ≥ 10 AND mr > 0 AND trust ≤ 20%` | 🟣 |
+| **Mistral-only (NEW)** | **`mr ≥ 5 AND mr ≥ ok × 2`** | **💛** |
+| Regular | `total ≥ 8 AND rate ≤ 15%` | 🟠 |
+
+تأثير القاعدة الجديدة على الـ snapshot الحالي:
+- ✅ dn790009.ca.archive.org (0 ok, 7 mr) → disabled
+- ✅ dn790006.ca.archive.org (2 ok, 5 mr) → disabled (5 ≥ 4)
+- ✅ Hindawi (15 ok, 50 mr) → كان disabled بالفعل (TRUST)، لسّه disabled (Mistral-only)
+
+#### Env vars جديدة (كلها قابلة للتعديل)
+
+```
+SOURCE_AUTO_DISABLE_MISTRAL_ONLY_MIN_REJECTS  = 5    # min rejects to trigger
+SOURCE_AUTO_DISABLE_MISTRAL_ONLY_REJECT_RATIO = 2.0  # rejects ≥ ratio × ok
+```
+
+#### التغييرات
+
+| ملف | التغيير |
+|-----|---------|
+| `server/bot/config.ts` | env vars جديدة + توثيق |
+| `server/bot/analytics.ts` | `mistralOnlyAutoDisabled` field + logic |
+| `server/bot/admin.ts` | باجة 💛 جديدة في sources panel |
+| `package.json` | bump 31.5.0 → 31.6.0 |
+| `test-mistral-only-tier.mjs` | probes deterministic |
+
+#### الحماية
+
+- env-tunable للسيطرة على العتبات بدون redeploy
+- لا يلمس مصادر بدون mistralRejected (مفيش false positive للـ archive.org الأصل)
+- `getAutoDisabledSourceDomains` بيشمله تلقائياً عبر `s.autoDisabled = ... || mistralOnlyAutoDisabled`
+- يعمل invalidation طبيعي عبر الـ TTL cache الموجود
+
+---
+
 ## [31.5.0] — 2026-05-05
 
 ### 💎 ميزة جديدة — Firecrawl `/parse` كمسار سريع لـ Premium summary
