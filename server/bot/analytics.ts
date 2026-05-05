@@ -1,4 +1,5 @@
 import { redis, scanKeys } from "./redis.js";
+import { cairoDateString } from "./text.js";
 import {
   SOURCE_AUTO_DISABLE_MAX_RATE,
   SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
@@ -54,7 +55,10 @@ export async function getManualDisabledSourceDomains(): Promise<Set<string>> {
 // ══════════════════════════════════════════════
 
 function todayKey(): string {
-  return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  // Cairo TZ — يماشي downloadCount/buildResetTime/summaryUsage. لو
+  // analytics keys اتكتبت بـ UTC، الـ "اليوم" بيظهر مختلف عن الـ daily
+  // limits row في الـ DB (مما يصعّب الـ debugging والـ correlations).
+  return cairoDateString(); // YYYY-MM-DD
 }
 
 // ── Daily-stats retention ─────────────────────
@@ -204,9 +208,10 @@ export async function getWeeklyStats(): Promise<Record<string, Record<string, nu
   const keys: string[] = [];
   const pipe = redis.pipeline();
   for (let i = 6; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().split("T")[0];
+    // Cairo TZ — نسحب آخر 7 أيام بتاريخ القاهرة عشان يطابق الكتابات.
+    // 86400 يوم تقريبية: نفع لأن أنحنا بنحوّل لـ Cairo date string بعدها.
+    const d = new Date(now.getTime() - i * 86_400_000);
+    const key = cairoDateString(d);
     keys.push(key);
     pipe.hgetall(`stats:daily:${key}`);
   }
