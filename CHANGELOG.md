@@ -7,6 +7,37 @@
 
 ---
 
+## [31.3.14] — 2026-05-05
+
+### 🐛 إصلاح — `warmRelatedCache` ما كانش بيشتغل أصلاً (truthiness bug على array)
+
+في `suggestions.ts:719-727` كان فيه:
+
+```ts
+const cached = await getSearchCacheResults(book);
+if (!cached) {
+  await searchAllSources(book);
+  L.info("suggestions", `Warmed cache for: ${book.slice(0, 50)}`);
+}
+```
+
+`getSearchCacheResults` بترجع `Promise<BookResult[]>` دايماً (ولو الكاش فاضي بترجع `[]`، ما بترجعش `null`). يعني `!cached` كان `false` على طول، والـ branch جوّاه ما كانش بيتنفّذ أبداً.
+
+النتيجة: `warmRelatedCache` كانت **dead code** بالكامل من غير ما حد ياخد باله. الـ helper ده مفروض يـ warm 3 كتب من نفس التصنيف بعد كل تحميل ناجح، عشان لما يبحث مستخدم تاني عن كتاب من نفس التصنيف يلاقي النتايج جاهزة في الكاش.
+
+**الإصلاح:**
+1. إضافة helper جديد في `engine.ts` اسمه `hasRecentSearchCache(query)` — بيستخدم `redis.exists(searchCacheKey(query))`، فبيرجع `true` لو فيه أي entry (HIT أو MISS) — مش بس HIT.
+2. تغيير الـ check في suggestions.ts من `if (!cached)` إلى `if (await hasRecentSearchCache(book)) continue;`.
+
+السبب وراء استخدام `EXISTS` بدل `length === 0`: بعد PR #68 (TTL fix)، النتايج الفاضية (`[]`) بتتـ cache لمدة 5 دقايق كـ MISS. لو استخدمت `length === 0`، كنت هكرر الـ Firecrawl call على query MISS كل ما الـ helper يتنده — هدر بدون فايدة. `EXISTS` بيحترم سلوك الـ engine (HIT 1h، MISS 5min) فالـ warming بيفضل bounded.
+
+**الأثر على الميزانية:**
+- لكل تحميل ناجح: في أسوأ احتمال 3 نداءات Firecrawl خلفية (لو الـ 3 كتب المختارة عشوائياً مش متخزنة).
+- بعد الكاش يمتلئ: معظم الـ warming attempts بتبقى no-op (HIT مَخزّنة).
+- الـ Firecrawl quota guard في `searchAllSources:91-96` بيمنع الاستدعاءات لما الـ quota تتعدى — مش هيستهلك أكتر من اللازم.
+
+---
+
 ## [31.3.13] — 2026-05-05
 
 ### ⚡ تحسين أداء — `redis.keys()` → `scanKeys()` في endpoint التكلفة بالـ dashboard
