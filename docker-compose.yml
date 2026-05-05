@@ -7,6 +7,14 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # FIX-AUDIT: log rotation. الافتراضي json-file بدون حدود → الـ disk
+    # كان هيمتلي تدريجياً (~24MB/يوم على الإنتاج). الآن: max 50MB × 3 ملفات
+    # = 150MB سقف ثابت لكل container.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       db:
         condition: service_healthy
@@ -41,6 +49,11 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     environment:
       POSTGRES_USER: bookbot
       # SECURITY: لا قيمة افتراضية — لو POSTGRES_PASSWORD غير مُعرَّفة في .env
@@ -61,6 +74,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
