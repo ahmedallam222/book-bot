@@ -84,6 +84,23 @@ export async function checkAndConsumeUsage(
   return { used, limit: SUMMARY_DAILY_LIMIT_FREE, blocked: false };
 }
 
+// Refund a previously consumed slot when the upstream call failed and
+// the user did not actually receive a summary. Mirrors the rollback
+// already done inside checkAndConsumeUsage when the cap is exceeded —
+// the same guarantee should hold when the AI providers throw or the
+// global cap blocks the call after the per-user counter was charged.
+//
+// Bounded at zero by the caller paths: we only refund when consume
+// previously succeeded (blocked=false), so the counter is at least 1.
+export async function refundUserSummaryUsage(
+  userId:  string,
+  premium: boolean,
+): Promise<void> {
+  if (premium || SUMMARY_DAILY_LIMIT_FREE <= 0) return;
+  const k = `${USAGE_PREFIX}${userId}:${todayKey()}`;
+  await redis.decr(k).catch(() => {});
+}
+
 // Bot-wide daily ceiling. Increments the counter atomically and
 // rolls back if we'd exceed the cap, returning false. The caller
 // must NOT call any AI provider when this returns false. Cache hits
