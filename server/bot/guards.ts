@@ -46,13 +46,26 @@ export async function bannedCount(): Promise<number> {
   }
 }
 
-// ── Last book (in-memory per worker) ─────────
-const _lastBook = new Map<string, string>();
+// ── Last book (Redis with TTL) ──────────────
+// كان Map داخل الـ process — مشكلتان:
+//   1. تسرّب ذاكرة بطيء (لا eviction، لا TTL)
+//   2. لا يعمل بين عدّة workers/instances ويُفقد بعد restart
+// الحل: Redis مع TTL ٧ أيام — كافٍ لـ /last typical use case.
+const LAST_BOOK_KEY = (userId: string) => `lastbook:${userId}`;
+const LAST_BOOK_TTL_SEC = 7 * 24 * 60 * 60; // 7 أيام
 
-export function setLastBook(userId: string, bookName: string): void {
-  _lastBook.set(userId, bookName);
+export async function setLastBook(userId: string, bookName: string): Promise<void> {
+  try {
+    await redis.set(LAST_BOOK_KEY(userId), bookName, "EX", LAST_BOOK_TTL_SEC);
+  } catch (e) {
+    L.warn("guards", "setLastBook redis error", { err: String(e).slice(0, 80) });
+  }
 }
 
-export function getLastBook(userId: string): string | null {
-  return _lastBook.get(userId) ?? null;
+export async function getLastBook(userId: string): Promise<string | null> {
+  try {
+    return await redis.get(LAST_BOOK_KEY(userId));
+  } catch {
+    return null;
+  }
 }

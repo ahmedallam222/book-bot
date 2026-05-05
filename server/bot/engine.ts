@@ -2,7 +2,7 @@ import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
 import { getAutoDisabledSourceDomains } from "./analytics.js";
-import { normalizeArabic, normalizeForCache, urlFilenameRelevance } from "./text.js";
+import { normalizeArabic, normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import {
@@ -18,8 +18,14 @@ const FIRECRAWL_SCRAPE  = "https://api.firecrawl.dev/v1";
 
 // ── Cache helpers ─────────────────────────────
 
+// BUG FIX: كان يستخدم normalizeForCache فقط بينما الـ DB cache (storage.ts)
+// يستخدم canonicalizeForCache (normalize + filler-word removal). نتيجة عدم
+// التوحيد: استعلامات مثل "تحميل أرض زيكولا pdf" و "أرض زيكولا" تُنتِج مفاتيح
+// كاش مختلفة في طبقة الـ Firecrawl (مدفوعة) رغم أنها بحث مكافئ منطقياً.
+// الآن: التوحيد على canonicalizeForCache — مطابق لـ DB cache → cache hits أعلى
+// واستهلاك أقل لاعتمادات Firecrawl.
 function searchCacheKey(query: string): string {
-  return `sc:${normalizeForCache(query)}`;
+  return `sc:${canonicalizeForCache(query)}`;
 }
 
 export async function isFirecrawlDown(): Promise<boolean> {
@@ -53,9 +59,30 @@ export function invalidateRecentSearchesCache(bookName?: string): void {
 export async function searchAllSources(query: string): Promise<BookResult[]> {
   if (!query || query.trim().length < MIN_QUERY_LENGTH) return [];
 
+  // BUG FIX (admin manual-disable): الـ Set هنا الآن يجمع auto-disable +
+  // manual override (`src:off:*`). الكود السابق كان يقرأ auto فقط، فمحاولات
+  // الإيقاف اليدوي من الـ dashboard / Telegram كانت تُكتَب في Redis بدون أي قارئ
+  // (silent feature failure). صار getAutoDisabledSourceDomains مصدر الحقيقة.
+  // CACHE-INVALIDATION FIX: نحسبها قبل الـ cache check عشان نقدر نفلتر النتائج
+  // المخزنة. لو مصدر اتعطّل بعد ما الكاش اتكتب، النتائج الـ stale لازم
+  // تتفلتر — مش يتم تسليمها للمستخدم وتفشل التحقق.
+  const disabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
+  const isDisabled = (url: string) => {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      return disabledDomains.has(host);
+    } catch { return false; }
+  };
+
   // Check cache first
   const cached = await getSearchCacheResults(query);
-  if (cached.length) return cached;
+  if (cached.length) {
+    const filtered = cached.filter((r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || ""));
+    // لو الفلترة سحبت كل النتائج، اعتبرها cache miss — هنعمل بحث جديد.
+    // ولو فضل بعضها، رجِّعها وهات نتائج جديدة بعدين عند الحاجة.
+    if (filtered.length > 0) return filtered;
+    // fall through to fresh search
+  }
 
   // Check if Firecrawl is paused
   try {
@@ -69,9 +96,8 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     }
   } catch {}
 
-  const autoDisabledDomains = await getAutoDisabledSourceDomains().catch(() => new Set<string>());
   const arabicDomains = ARABIC_SOURCES
-    .filter((s) => !autoDisabledDomains.has(s.domain))
+    .filter((s) => !disabledDomains.has(s.domain))
     .map((s) => s.domain);
 
   const results = await unifiedSearch(arabicDomains, query, true);
@@ -101,7 +127,7 @@ function isPdfUrl(url: string): boolean {
     if (u.searchParams.get("type")   === "pdf")      return true;
     if (u.searchParams.get("format") === "pdf")      return true;
     if (u.searchParams.get("action") === "download") return true;
-    const hostname = u.hostname.replace(/^www./, "");
+    const hostname = u.hostname.replace(/^www\./, "");
     if (TRUSTED_PDF_DOMAINS.some((d) => hostname.includes(d))) {
       if (u.pathname.includes("download") || u.pathname.includes("dl")) return true;
     }
@@ -234,7 +260,7 @@ async function unifiedSearch(
           };
         } else {
           let realDomain = "";
-          try { realDomain = new URL(docUrl).hostname.replace(/^www./, ""); } catch {}
+          try { realDomain = new URL(docUrl).hostname.replace(/^www\./, ""); } catch {}
           srcConfig = {
             domain: realDomain || "unknown",
             name:   realDomain || "مصدر غير معروف",

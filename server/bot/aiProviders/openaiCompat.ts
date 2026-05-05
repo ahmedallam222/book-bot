@@ -38,7 +38,10 @@ export async function callOpenAICompat(
       { role: "user",   content: buildUserPrompt(req.bookName, req.context) },
     ],
     temperature: 0.3,
-    max_tokens:  1024,
+    // Bumped 1024 → 2048 to fit the structured non-fiction format
+    // (4 sections + 3-5 bullets + 80-150 word paragraph). Arabic
+    // tokens 1.5-2× English so the old budget truncated mid-output.
+    max_tokens:  2048,
   };
   if (cfg.jsonMode) body.response_format = { type: "json_object" };
 

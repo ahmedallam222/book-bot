@@ -23,6 +23,7 @@ import { redis } from "./redis.js";
 import {
   SUMMARY_CACHE_TTL_SECONDS,
   SUMMARY_DAILY_LIMIT_FREE,
+  SUMMARY_DAILY_LIMIT_GLOBAL,
 } from "./config.js";
 import { normalizeForCache } from "./text.js";
 import { runFailover } from "./aiProviders/registry.js";
@@ -32,6 +33,18 @@ import type { SummaryResponse } from "./aiProviders/types.js";
 
 const CACHE_PREFIX  = "summary:v1:";
 const USAGE_PREFIX  = "summary:usage:";
+const GLOBAL_PREFIX = "ai:summary:global:";
+
+// Thrown when the bot-wide daily AI ceiling is reached. The handler
+// catches this specifically and surfaces an Arabic "come back
+// tomorrow" message instead of a generic error. Cached summaries
+// keep flowing — only fresh AI calls are affected.
+export class GlobalSummaryLimitError extends Error {
+  constructor() {
+    super("Global daily summary limit reached");
+    this.name = "GlobalSummaryLimitError";
+  }
+}
 
 function cacheKey(bookName: string): string {
   return CACHE_PREFIX + (normalizeForCache(bookName) || bookName).slice(0, 200);
@@ -69,6 +82,24 @@ export async function checkAndConsumeUsage(
     return { used: SUMMARY_DAILY_LIMIT_FREE, limit: SUMMARY_DAILY_LIMIT_FREE, blocked: true };
   }
   return { used, limit: SUMMARY_DAILY_LIMIT_FREE, blocked: false };
+}
+
+// Bot-wide daily ceiling. Increments the counter atomically and
+// rolls back if we'd exceed the cap, returning false. The caller
+// must NOT call any AI provider when this returns false. Cache hits
+// must bypass this entirely (call before this function).
+async function consumeGlobalQuota(): Promise<boolean> {
+  if (SUMMARY_DAILY_LIMIT_GLOBAL <= 0) return true;
+  const k    = `${GLOBAL_PREFIX}${todayKey()}`;
+  const used = await redis.incr(k).catch(() => 0);
+  // 25h TTL ensures the counter naturally rotates with the date key.
+  await redis.expire(k, 25 * 3600).catch(() => {});
+  if (used > SUMMARY_DAILY_LIMIT_GLOBAL) {
+    // Rollback so the counter accurately reflects allowed AI calls.
+    await redis.decr(k).catch(() => {});
+    return false;
+  }
+  return true;
 }
 
 export async function getCachedSummary(bookName: string): Promise<SummaryResponse | null> {
@@ -154,11 +185,26 @@ export async function getBookSummary(
   }
 
   // 1. Best-effort Wikipedia context (parallelizable with PDF fetch).
+  //    Always fetched — both as grounding for the AI call AND as the
+  //    free fallback path when the global cap is reached.
   const wikiP = fetchWikipediaContext(bookName);
 
-  // 2. Maybe-PDF fetch.
+  // 2. Bot-wide daily AI cap — protects the free Gemini quota from a
+  //    viral spike. Checked AFTER cache so popular books keep being
+  //    served from Redis even when the cap is hit. We DO NOT throw
+  //    immediately on cap-hit; we still try the Wikipedia-only path
+  //    below so the user gets something useful instead of an error.
+  const globalOk = await consumeGlobalQuota();
+  if (!globalOk) {
+    L.warn("summary", "global daily cap reached — skipping AI tiers", {
+      book:  bookName.slice(0, 50),
+      limit: SUMMARY_DAILY_LIMIT_GLOBAL,
+    });
+  }
+
+  // 3. Maybe-PDF fetch (skipped when cap hit since we won't use it).
   let pdfBuffer: Buffer | undefined = opts.pdfBuffer;
-  const pdfP = !pdfBuffer && opts.pdfUrl
+  const pdfP = globalOk && !pdfBuffer && opts.pdfUrl
     ? fetchPdfBuffer(opts.pdfUrl)
     : Promise.resolve(null);
 
@@ -167,8 +213,8 @@ export async function getBookSummary(
 
   const context = wiki?.extract || undefined;
 
-  // 3. Try PDF-native tier first if we have bytes.
-  if (pdfBuffer) {
+  // 4. Try PDF-native tier first if we have bytes (and the cap is not hit).
+  if (globalOk && pdfBuffer) {
     try {
       const out = await runFailover({
         bookName,
@@ -192,28 +238,32 @@ export async function getBookSummary(
     }
   }
 
-  // 4. Text-only tier (with whatever Wikipedia context we got).
-  try {
-    const out = await runFailover({
-      bookName,
-      context,
-      premium: opts.premium,
-    }, { requirePDF: false });
-    await setCachedSummary(bookName, out);
-    L.info("summary", "text-tier ok", {
-      book:     bookName.slice(0, 50),
-      provider: out.providerName,
-      ms:       Date.now() - t0,
-    });
-    return out;
-  } catch (e) {
-    L.warn("summary", "All AI tiers exhausted", {
-      book: bookName.slice(0, 50),
-      err:  String(e).slice(0, 300),
-    });
+  // 5. Text-only tier (with whatever Wikipedia context we got).
+  if (globalOk) {
+    try {
+      const out = await runFailover({
+        bookName,
+        context,
+        premium: opts.premium,
+      }, { requirePDF: false });
+      await setCachedSummary(bookName, out);
+      L.info("summary", "text-tier ok", {
+        book:     bookName.slice(0, 50),
+        provider: out.providerName,
+        ms:       Date.now() - t0,
+      });
+      return out;
+    } catch (e) {
+      L.warn("summary", "All AI tiers exhausted", {
+        book: bookName.slice(0, 50),
+        err:  String(e).slice(0, 300),
+      });
+    }
   }
 
-  // 5. Last-resort: Wikipedia extract verbatim (no AI).
+  // 6. Last-resort: Wikipedia extract verbatim (no AI). Reached on
+  //    full AI failure OR when the global cap is hit. Cached too so
+  //    a popular spike-day book becomes a free hit afterwards.
   if (wiki?.extract && wiki.extract.length > 100) {
     const fallback: SummaryResponse = {
       summary:      wiki.extract,
@@ -224,9 +274,16 @@ export async function getBookSummary(
       source:       "wikipedia_only",
     };
     await setCachedSummary(bookName, fallback);
-    L.info("summary", "wikipedia-only fallback used", { book: bookName.slice(0, 50) });
+    L.info("summary", "wikipedia-only fallback used", {
+      book:        bookName.slice(0, 50),
+      capExceeded: !globalOk,
+    });
     return fallback;
   }
 
+  // 7. Truly nothing left. If the cap was the reason we skipped AI,
+  //    surface the typed error so the handler shows a "try later"
+  //    message instead of a generic failure.
+  if (!globalOk) throw new GlobalSummaryLimitError();
   throw new Error(`getBookSummary: all paths exhausted for "${bookName}"`);
 }

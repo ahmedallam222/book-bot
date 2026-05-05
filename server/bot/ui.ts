@@ -158,6 +158,27 @@ export function buildNoResults(bookName: string, _usedFuzzy: boolean): string {
   );
 }
 
+// ── رسالة كتاب مدفوع / غير متوفر مجاناً ───────
+// Sent when classifyAccess() flagged at least one search result as
+// paid/protected (matches PROTECTED_ACCESS_PATTERNS like "اشترِ", "buy now",
+// "premium", licensed-only catalogs) AND every download attempt failed.
+// This replaces the misleading silent "no PDF" outcome — and prevents
+// the bot from sending the wrong author's book just because the PDF
+// host was on the trusted list.
+export function buildPaidBookMessage(bookName: string): string {
+  return (
+    `📕 *كتاب مدفوع أو غير متوفر مجاناً*\n` +
+    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
+    `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
+    `يبدو أن هذا الكتاب لا يتوفر له *PDF مجاني* في المصادر المتاحة.\n\n` +
+    `قد يكون:\n` +
+    `◦ مدفوعاً — يُباع في متاجر الكتب\n` +
+    `◦ متاحاً للقراءة فقط على موقع الناشر\n` +
+    `◦ غير منشور رقمياً بعد\n\n` +
+    `_لو تعتقد أنه متاح مجاناً، جرّب صياغة أخرى أو أضِف اسم المؤلف._`
+  );
+}
+
 // ── رسالة الحد اليومي ────────────────────────
 
 export function buildDailyLimit(

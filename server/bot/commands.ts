@@ -2,6 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
 import { isAdmin, getLastBook, banUser, unbanUser } from "./guards.js";
 import { handleBookRequest } from "./bookRequest.js";
+import { react } from "./reactions.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
@@ -18,6 +19,7 @@ import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
 } from "./config.js";
 import { redis } from "./redis.js";
+import { recordGroup } from "./groupTracker.js";
 // FIX: wishlist module مستقل بدل global.__kholasaWishlist anti-pattern
 import {
   getWishlist, saveWishlist,
@@ -62,14 +64,22 @@ export function registerCommands(
       }
     }
     try {
-      const [prem, limit, dlRaw] = await Promise.all([
-        isPremium(userId),
-        getUserDailyLimit(userId),
+      // BUG-FIX: getUserDailyLimit بتنده isPremium جواها → كان بيتعمل مرتين. دلوقتي نمرّر prem.
+      const prem  = await isPremium(userId);
+      // أول ترحيب: redis flag NX — لو لسه ما اتعمل، نعرض الترحيب الموسّع
+      // EXPIRE 90 يوم: لو رجع المستخدم بعد فترة طويلة يتعامل معاه كأنه جديد تاني
+      const setRes = await redis.set(`welcomed:${userId}`, "1", "EX", 90 * 86400, "NX").catch(() => null);
+      const isFirstTime = setRes === "OK";
+      const [limit, dlRaw] = await Promise.all([
+        getUserDailyLimit(userId, prem),
         storage.getDailyDownloadCount(userId).catch(() => 0),
       ]);
       const remaining = Math.max(0, limit - dlRaw);
-      await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem),
+      await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem, isFirstTime),
         { parse_mode: "Markdown", reply_markup: kbMain() });
+      if (isFirstTime) {
+        react(bot, chatId, msg.message_id, "🎉").catch(() => {});
+      }
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId,
@@ -101,8 +111,10 @@ export function registerCommands(
         return;
       }
     }
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
     const parsedName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedName, token, username);
+    await handleBookRequest(bot, chatId, userId, parsedName, token, username, msg.message_id);
   });
 
   // ── /random ────────────────────────────────────
@@ -121,9 +133,10 @@ export function registerCommands(
     const userId = String(msg.from?.id || "");
     if (!userId) return;
     try {
-      const [prem, limit, dlCount] = await Promise.all([
-        isPremium(userId),
-        getUserDailyLimit(userId),
+      // BUG-FIX: getUserDailyLimit بتنده isPremium جواها. نمرّر prem تجنباً للتكرار.
+      const prem  = await isPremium(userId);
+      const [limit, dlCount] = await Promise.all([
+        getUserDailyLimit(userId, prem),
         storage.getDailyDownloadCount(userId).catch(() => 0),
       ]);
       const remaining = Math.max(0, limit - dlCount);
@@ -224,7 +237,7 @@ export function registerCommands(
     const userId   = String(msg.from?.id || "");
     const username = msg.from?.username;
     if (!userId) return;
-    const lastBook = getLastBook(userId);
+    const lastBook = await getLastBook(userId);
     if (!lastBook) {
       await bot.sendMessage(chatId,
         `ℹ️ *لم تطلب أي كتاب بعد*\n\n_ابحث عن كتاب أولاً ثم استخدم /last لإعادة تحميله_ 📚`,
@@ -237,7 +250,9 @@ export function registerCommands(
     await bot.sendMessage(chatId,
       `🔄 *إعادة تحميل:*\n_"${escMd(lastBook.slice(0,50))}"_`,
       { parse_mode: "Markdown" }).catch(() => {});
-    await handleBookRequest(bot, chatId, userId, lastBook, token, username);
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
+    await handleBookRequest(bot, chatId, userId, lastBook, token, username, msg.message_id);
   });
 
   // ── /wishlist ──────────────────────────────────
@@ -286,10 +301,27 @@ export function registerCommands(
   bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
     await bot.sendMessage(chatId,
-      `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-      `*في المحادثة الخاصة:*\n◦ اكتب اسم أي كتاب مباشرةً\n◦ /search اسم الكتاب\n\n` +
-      `*في المجموعات — ٣ طرق:*\n◦ بوت اسم الكتاب\n◦ bot اسم الكتاب\n◦ @اسم_البوت اسم الكتاب\n\n` +
-      `*أوامر مفيدة:*\n/stats · /history · /top · /queue · /cancel · /last · /random · /weekly · /wishlist · /premium`,
+      `❓ *دليل الاستخدام*\n` +
+      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+      `📖 *البحث:*\n` +
+      `◦ اكتب اسم الكتاب مباشرةً\n` +
+      `◦ \`/search عنوان الكتاب\`\n` +
+      `◦ \`/random\` — كتاب مفاجأة\n` +
+      `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
+      `📊 *حسابك:*\n` +
+      `◦ \`/stats\` — رصيدك اليومي\n` +
+      `◦ \`/history\` — آخر بحث لك\n` +
+      `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
+      `🔖 *الإدارة:*\n` +
+      `◦ \`/wishlist عنوان\` — أضف لقائمتك\n` +
+      `◦ \`/wishlist\` — اعرض قائمتك\n` +
+      `◦ \`/queue\` — حالة طلبك في الطابور\n` +
+      `◦ \`/cancel\` — ألغِ طلبك الحالي\n\n` +
+      `🌟 *الترتيبات:*\n` +
+      `◦ \`/top\` — أكثر الكتب تحميلاً\n` +
+      `◦ \`/weekly\` — تقرير الأسبوع\n` +
+      `◦ \`/premium\` — الترقية لـ Premium\n\n` +
+      `👥 *في المجموعات:* اكتب \`بوت\` ثم اسم الكتاب`,
       { parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [
           [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
@@ -339,7 +371,7 @@ export function registerCommands(
     if (!isAdmin(userId)) return;
     const targetId = (match?.[1] || "").trim();
     if (!isValidId(targetId)) { await bot.sendMessage(chatId, `❌ ID غير صالح: \`${escMd(targetId)}\``, { parse_mode: "Markdown" }).catch(() => {}); return; }
-    await setPremium(targetId, true); L.adminAction(userId, `grant premium ${targetId}`);
+    await setPremium(targetId, true, 0, { by: userId, source: "telegram-cmd" }); L.adminAction(userId, `grant premium ${targetId}`);
     await bot.sendMessage(chatId, `✅ تم منح الـ Premium لـ \`${targetId}\` ⭐`, { parse_mode: "Markdown" }).catch(() => {});
   });
 
@@ -348,7 +380,7 @@ export function registerCommands(
     if (!isAdmin(userId)) return;
     const targetId = (match?.[1] || "").trim();
     if (!isValidId(targetId)) { await bot.sendMessage(chatId, `❌ ID غير صالح: \`${escMd(targetId)}\``, { parse_mode: "Markdown" }).catch(() => {}); return; }
-    await setPremium(targetId, false); L.adminAction(userId, `revoke premium ${targetId}`);
+    await setPremium(targetId, false, 0, { by: userId, source: "telegram-cmd" }); L.adminAction(userId, `revoke premium ${targetId}`);
     await bot.sendMessage(chatId, `✅ تم إلغاء الـ Premium من \`${targetId}\``, { parse_mode: "Markdown" }).catch(() => {});
   });
 
@@ -370,6 +402,31 @@ export function registerCommands(
     if (!isValidId(targetId)) { await bot.sendMessage(chatId, `❌ ID غير صالح: \`${escMd(targetId)}\``, { parse_mode: "Markdown" }).catch(() => {}); return; }
     await resetUserDailyLimit(targetId); L.adminAction(userId, `reset_limit ${targetId}`);
     await bot.sendMessage(chatId, `✅ تم إعادة الحد الافتراضي لـ \`${targetId}\``, { parse_mode: "Markdown" }).catch(() => {});
+  });
+
+  // FIX-WRONG-FILE (BUG-9): admin tool to remove a poisoned cache entry.
+  // Usage: /purge_cache <book query>
+  // The query is canonicalized the same way the cache write did, so any
+  // wording variant the user reported as wrong will match the stored row.
+  bot.onText(/^\/purge_cache\s+(.+)$/i, async (msg, match) => {
+    const chatId = msg.chat.id; const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) return;
+    const query = (match?.[1] || "").trim();
+    if (!query) {
+      await bot.sendMessage(chatId, `❌ مثال: \`/purge_cache أرض زيكولا\``, { parse_mode: "Markdown" }).catch(() => {});
+      return;
+    }
+    try {
+      const removed = await storage.purgeCachedBookByQuery(query);
+      L.adminAction(userId, `purge_cache "${query.slice(0, 50)}" → ${removed} row(s)`);
+      const reply = removed > 0
+        ? `🧹 تم حذف *${removed}* إدخال من الكاش لاستعلام:\n_${escMd(query)}_`
+        : `ℹ️ لا توجد إدخالات في الكاش لاستعلام:\n_${escMd(query)}_`;
+      await bot.sendMessage(chatId, reply, { parse_mode: "Markdown" }).catch(() => {});
+    } catch (e) {
+      L.error("cmd", "/purge_cache failed", { err: String(e).slice(0, 120) });
+      await bot.sendMessage(chatId, `❌ فشل: \`${escMd(String(e).slice(0, 60))}\``, { parse_mode: "Markdown" }).catch(() => {});
+    }
   });
 
   bot.onText(/^\/note\s+(\S+)\s+(.+)$/, async (msg, match) => {
@@ -395,13 +452,25 @@ export function registerCommands(
 
     const prem = await isPremium(userId);
     if (prem) {
-      const expiry = await getPremiumExpiry(userId);
-      const expiryLine = expiry
-        ? `_ينتهي في: ${expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long", year: "numeric" })}_ 📅`
-        : `_اشتراك دائم_ ♾️`;
+      // BUG-FIX: نمرّر prem لـ getUserDailyLimit عشان ما يستدعي isPremium تاني.
+      const [expiry, limit] = await Promise.all([
+        getPremiumExpiry(userId),
+        getUserDailyLimit(userId, prem),
+      ]);
+      let expiryLine: string;
+      if (expiry) {
+        const daysLeft = Math.max(0, Math.ceil((expiry.getTime() - Date.now()) / 86400000));
+        const dateStr  = expiry.toLocaleDateString("ar-EG", { day: "numeric", month: "long", year: "numeric" });
+        const urgency  = daysLeft <= 3 ? "🟡" : daysLeft <= 7 ? "🟠" : "🟢";
+        expiryLine = `${urgency} _ينتهي خلال *${daysLeft}* يوم_\n📅 _${dateStr}_`;
+      } else {
+        expiryLine = `♾️ _اشتراك دائم — ممنوح من الإدارة_`;
+      }
       await bot.sendMessage(chatId,
-        `⭐ *أنت مشترك في Premium!*\n\n` +
-        `📥 لديك *${await getUserDailyLimit(userId)}* تحميل يومياً\n` +
+        `⭐ *أنت مشترك في Premium!*\n` +
+        `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+        `📥 *${limit}* تحميل يومياً\n` +
+        `⚡ أولوية قصوى في الطابور\n\n` +
         expiryLine,
         { parse_mode: "Markdown", reply_markup: kbMain() }
       ).catch(() => {});
@@ -455,7 +524,12 @@ export function registerMessageHandler(
       const chatId  = msg.chat.id;
       const payload = msg.successful_payment.invoice_payload || "";
       if (payload.startsWith("premium:") && userId) {
-        await setPremium(userId, true, 30);  // 30 يوم اشتراك مدفوع
+        // 30 يوم اشتراك مدفوع — by نفس المستخدم لأن الدفع منه
+        await setPremium(userId, true, 30, {
+          by:     userId,
+          source: "stars-payment",
+          reason: `stars=${msg.successful_payment.total_amount} payload=${payload.slice(0, 40)}`,
+        });
         L.info("payment", "Premium activated via Stars", {
           userId,
           stars: msg.successful_payment.total_amount,
@@ -477,6 +551,13 @@ export function registerMessageHandler(
     const userId  = String(msg.from?.id || "");
     const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
     if (!userId) return;
+
+    // FIX: نسجّل الجروب في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
+    // انتهاء الصيانة. fire-and-forget عشان ما يأخّرش الـ message handling.
+    if (isGroup) {
+      recordGroup(chatId, msg.chat.title || "").catch(() => {});
+    }
+
     if (text.startsWith("/")) return;
 
     let bookName = "";
@@ -510,8 +591,14 @@ export function registerMessageHandler(
       return;
     }
 
+    // 👀 reaction فوري على رسالة المستخدم — يحس أن البوت "شاف" الطلب
+    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+
+    // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
+
     const parsedBookName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username);
+    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id);
   });
 }
 

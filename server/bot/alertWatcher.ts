@@ -24,7 +24,7 @@ const SUCCESS_ALERT_THRESHOLD = 50;
 // (مثلاً: 10 محاولات، 6 نجاح = 60% → 7 فشل = 30% فجأة بسبب فشل واحد إضافي)
 // والتنبيه يُرسَل مرة واحدة/ساعة فيُزعج الأدمن دون سبب حقيقي.
 // الحل: رفع العتبة إلى 20 لأخذ عينة إحصائية أكثر موثوقية قبل التنبيه.
-const MIN_DOWNLOADS_TO_ALERT  = 20;
+const MIN_REQUESTS_TO_ALERT  = 20;
 const ALERT_COOLDOWN_SEC      = 3600; // ساعة بين كل تنبيه وآخر لنفس السبب
 
 const LAST_DLQ_ALERT    = "alert:last:dlq";
@@ -75,16 +75,22 @@ async function runCheck(bot: TelegramBot): Promise<void> {
   }
 
   // ── 2. فحص نسبة النجاح ────────────────────────
-  if (stats && stats.downloads >= MIN_DOWNLOADS_TO_ALERT) {
-    const pct = (stats.success / stats.downloads) * 100;
+  // analytics.ts يكتب `requests` (إجمالي المحاولات) و`found` (وُجد كتاب)
+  // الكود السابق كان يقرأ `stats.success` و`stats.fail` — حقول غير موجودة
+  // → النسبة تكون NaN → التنبيه لا يُرسَل أبداً (Critical bug صامت).
+  const requests = stats?.requests ?? 0;
+  const found    = stats?.found    ?? 0;
+  if (requests >= MIN_REQUESTS_TO_ALERT) {
+    const failures = Math.max(0, requests - found);
+    const pct = (found / requests) * 100;
     if (pct < SUCCESS_ALERT_THRESHOLD) {
       const lockAcquired = await redis.set(LAST_SUCC_ALERT, String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
       if (lockAcquired === "OK") {
         await sendToAdmins(
           bot,
           `⚠️ *تنبيه: نسبة النجاح منخفضة*\n\n` +
-          `📉 ${pct.toFixed(1)}% من التحميلات ناجحة اليوم\n` +
-          `📥 ${stats.downloads} محاولة — ✅ ${stats.success} — ❌ ${stats.fail}\n\n` +
+          `📉 ${pct.toFixed(1)}% من الطلبات وجدت نتيجة اليوم\n` +
+          `📥 ${requests} طلب — ✅ ${found} — ❌ ${failures}\n\n` +
           `قد تكون المصادر معطّلة — تحقق من /admin`
         );
         L.warn("alerts", `Success rate alert: ${pct.toFixed(1)}%`);
