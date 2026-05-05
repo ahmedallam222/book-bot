@@ -1,24 +1,25 @@
 import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
-import { BLACKLIST_THRESHOLD, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
+import { PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
 import { isAdmin } from "./guards.js";
 import { getSession, deleteSession, storeRetryKey } from "./session.js";
 import { blacklistUrlDirect } from "./blacklist.js";
-import { getSearchCacheResults } from "./engine.js";
 import { storage } from "../storage.js";
 import {
   buildWelcome, handleAdminCallback, buildHistoryMessage,
   buildTopBooksMessage,
 } from "./admin.js";
-import { kbAfterFail, kbMain, buildFailMessage } from "./keyboards.js";
+import { kbAfterFail, kbMain, kbNoResults } from "./keyboards.js";
+import { buildPaidBookMessage } from "./ui.js";
 import { handleBookRequest } from "./bookRequest.js";
+import { invalidateRecentSearchesCache } from "./engine.js";
 import { SOURCES } from "./sources.js";
 import { cancelUserJobs, getQueueStats, getUserPendingCount } from "./queue.js";
 import { isPremium, getUserDailyLimit, getPremiumExpiry } from "./userSettings.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { handleRandomGenreCallback } from "./random.js";
 import { redis } from "./redis.js";
-import { normalizeForCache, normalizeArabic, buildResetTime } from "./text.js";
+import { normalizeArabic, buildResetTime } from "./text.js";
 // FIX: استيراد wishlist من module مستقل — لا global، لا dynamic import زائد
 import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
@@ -29,9 +30,19 @@ import { handleSummaryCallback } from "./summaryHandler.js";
 // CALLBACK HANDLER
 // ══════════════════════════════════════════════
 
+// dedup TTL: لو الـ callback handler crashed أو العملية اتعلّقت بأي سبب،
+// الـ dedup key تيتمسح أوتوماتيكياً. فيا أغلب callbacks بتخلص في < 5واني،
+// 30 ثانية غطاء أمان واسع. السابق (Set في الذاكرة) كان لو crashed
+// وسط المعالجة الـ entry تفضل عالقة للأبد وتعمل dedup غلط للنقرات اللاحقة.
+const CB_DEDUP_TTL_SEC = 30;
+const cbDedupKey = (userId: string, data: string): string =>
+  `cb:dedup:${userId}:${data.slice(0, 100)}`;
+
 export function registerCallbackHandler(bot: TelegramBot, token: string): void {
-  // منع double-tap — نقر مرتين سريعاً
-  const processingCallbacks = new Set<string>();
+  // منع double-tap — نقر مرتين سريعاً. dedup بـ Redis (SET NX EX)
+  // بدل in-memory Set — (أ) yields auto-cleanup عبر TTL لو الـ handler crashed
+  // أو وسط معالجة، (ب) بيشتغل صح لو تشغيل عدة instances للبوت (لو حدث
+  // لاحقاً)، (ج) ثابتة عبر restarts.
 
   bot.on("callback_query", async (query) => {
     const chatId = query.message?.chat.id;
@@ -39,11 +50,6 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     const userId = String(query.from.id);
     const data   = query.data || "";
 
-    const dedupKey = `${userId}:${data}`;
-    if (processingCallbacks.has(dedupKey)) {
-      await bot.answerCallbackQuery(query.id).catch(() => {});
-      return;
-    }
     const needsDedup = data.startsWith("retry:")         ||
                        data === "cancel_my_jobs"          ||
                        data === "main_menu"               ||
@@ -59,7 +65,22 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
                        data.startsWith("wishlist_add:")   ||
                        data.startsWith("wishlist_del:")   ||
                        data.startsWith("sum:");
-    if (needsDedup) processingCallbacks.add(dedupKey);
+
+    let acquiredDedup = false;
+    if (needsDedup) {
+      try {
+        // SET key value NX EX ttl: يرجّع OK لو اتوضع، null لو في key موجود بالفعل
+        const result = await redis.set(cbDedupKey(userId, data), "1", "EX", CB_DEDUP_TTL_SEC, "NX");
+        acquiredDedup = result === "OK";
+      } catch {
+        // لو Redis باظ، نسمح بالمعالجة (fail-open) — أفضل من حجب كل callbacks
+        acquiredDedup = true;
+      }
+      if (!acquiredDedup) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        return;
+      }
+    }
 
     L.debug("bot", `Callback`, { userId, data: data.slice(0, 50) });
     try {
@@ -130,7 +151,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     if (data.startsWith("wishlist_add:")) {
       const sessionKey = data.slice(13).trim();
       // FIX: getSession مستورد مباشرة أعلاه — لا dynamic import زائد
-      const entry = getSession(sessionKey);
+      const entry = await getSession(sessionKey);
       if (!entry?.bookName) {
         await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت صلاحية هذا الزر", show_alert: true }).catch(() => {});
         return;
@@ -191,14 +212,19 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── باقي الـ callbacks: General answer ────────
-    await bot.answerCallbackQuery(query.id).catch(() => {});
+    // ══════════════════════════════════════════════
+    // BUG FIX: premium_buy و fp: محتاجين يعالَجوا قبل الـ general
+    // answerCallbackQuery — وإلا فإن toast notifications الخاصة بيهم
+    // ("⭐ أنت بالفعل مشترك" / "⏰ انتهت الجلسة") لن تظهر للمستخدم
+    // لأن Telegram يرفض تكرار answerCallbackQuery على نفس query.
+    // (نفس مبرر الـ wishlist callbacks فوق.)
+    // ══════════════════════════════════════════════
 
     // ── premium_buy — Telegram Stars invoice ─────
     if (data === "premium_buy") {
       const prem = await isPremium(userId);
       if (prem) {
-        await bot.answerCallbackQuery(query.id, { text: "⭐ أنت بالفعل مشترك في Premium!" }).catch(() => {});
+        await bot.answerCallbackQuery(query.id, { text: "⭐ أنت بالفعل مشترك في Premium!", show_alert: true }).catch(() => {});
         return;
       }
       await bot.answerCallbackQuery(query.id).catch(() => {});
@@ -219,6 +245,34 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
+    // ── legacy pagination on stale fail messages ──────────────
+    // FIX-PAID-BOOK-MSG: السلوك القديم كان يعرض قائمة معاينة من كتب خطأ.
+    // الـ handler الجديد يستبدل الرسالة القديمة بالرسالة القاطعة الموحَّدة
+    // عشان المستخدم اللي رسالة فشل قديمة لسه ظاهرة على شاشته يحصل على
+    // نفس الـ UX الجديد لما يضغط على زر التنقل.
+    if (data.startsWith("fp:")) {
+      const withoutPrefix = data.slice(3);
+      const lastColon     = withoutPrefix.lastIndexOf(":");
+      const sessionKey    = withoutPrefix.slice(0, lastColon);
+      const entry         = await getSession(sessionKey);
+      const bookName      = entry?.bookName || "";
+      if (!bookName) {
+        await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
+        return;
+      }
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      if (!query.message) return;
+      await bot.editMessageText(buildPaidBookMessage(bookName), {
+        chat_id: chatId, message_id: query.message.message_id,
+        parse_mode: "Markdown", disable_web_page_preview: true,
+        reply_markup: kbNoResults(bookName),
+      }).catch(() => {});
+      return;
+    }
+
+    // ── باقي الـ callbacks: General answer ────────
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+
     // ── summary ───────────────────────────────────
     // The "📘 ملخص الكتاب" button under a delivered file. Heavy
     // path (Wikipedia + AI providers + Redis cache) lives in
@@ -231,7 +285,7 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     // ── retry ─────────────────────────────────────
     if (data.startsWith("retry:")) {
       const sessionKey = data.slice(6).trim();
-      const entry      = getSession(sessionKey);
+      const entry      = await getSession(sessionKey);
       if (!entry?.bookName) {
         await bot.sendMessage(chatId,
           `⏰ *انتهت صلاحية هذا الزر*\n\nاكتب اسم الكتاب من جديد وسأبحث عنه.`,
@@ -242,51 +296,24 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       return;
     }
 
-    // ── pagination ────────────────────────────────
-    if (data.startsWith("fp:")) {
-      const withoutPrefix = data.slice(3);
-      const lastColon     = withoutPrefix.lastIndexOf(":");
-      const sessionKey    = withoutPrefix.slice(0, lastColon);
-      const page          = parseInt(withoutPrefix.slice(lastColon + 1) || "0", 10);
-      const entry         = getSession(sessionKey);
-      const bookName      = entry?.bookName || "";
-      if (!bookName) {
-        await bot.answerCallbackQuery(query.id, { text: "⏰ انتهت الجلسة." }).catch(() => {});
-        return;
-      }
-      const results = await getSearchCacheResults(bookName);
-      if (!query.message) return;
-      if (results.length > 0) {
-        await bot.editMessageText(buildFailMessage(bookName, results, page), {
-          chat_id: chatId, message_id: query.message.message_id,
-          parse_mode: "Markdown", disable_web_page_preview: true,
-          reply_markup: kbAfterFail(bookName, results, page),
-        }).catch(() => {});
-      } else {
-        await bot.editMessageText(
-          `⏰ انتهت النتائج. اكتب اسم الكتاب مجدداً.`,
-          { chat_id: chatId, message_id: query.message.message_id,
-            reply_markup: { inline_keyboard: [[
-              { text: "🔍 بحث جديد",  callback_data: "new_search" },
-              { text: "🔄 أعد البحث", callback_data: `retry:${storeRetryKey(bookName)}` },
-            ]]}}).catch(() => {});
-      }
-      return;
-    }
-
     // ── bad_file ──────────────────────────────────
     if (data.startsWith("bad_file:")) {
       const sessionKey = data.slice(9).trim();
-      const entry      = getSession(sessionKey);
+      const entry      = await getSession(sessionKey);
       if (entry?.url) {
-        await blacklistUrlDirect(entry.url, BLACKLIST_THRESHOLD);
+        await blacklistUrlDirect(entry.url);
         if (entry.bookName) {
           const cachedBook = await storage.getCachedBook(entry.bookName).catch(() => null);
           if (cachedBook) await storage.deleteCachedBook(cachedBook.id).catch(() => {});
-          await redis.del(`sc:${normalizeForCache(entry.bookName)}`).catch(() => {});
+          // الـ engine يكتب الـ search cache بـ canonicalizeForCache (sc:)؛
+          // الـ del المباشر اللي كان هنا بيستخدم normalizeForCache ومش
+          // بيطابق المفتاح لو الاستعلام الأصلي فيه كلمات حشو ("تحميل ...").
+          // النداء على invalidateRecentSearchesCache يعتمد searchCacheKey
+          // اللي يولّد المفتاح بنفس الطريقة فيمسحه فعلاً.
+          invalidateRecentSearchesCache(entry.bookName);
           L.info("system", `Cache cleared for bad file`, { book: entry.bookName.slice(0, 50) });
         }
-        deleteSession(sessionKey);
+        await deleteSession(sessionKey);
         L.warn("system", `Bad file reported`, { url: entry.url.slice(0, 80), userId });
         const badFileKb = entry.bookName ? {
           inline_keyboard: [[
@@ -325,9 +352,10 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
     switch (data) {
       case "main_menu": {
         const name = query.from.first_name || "صديقي";
-        const [prem, limit, dlRaw] = await Promise.all([
-          isPremium(userId),
-          getUserDailyLimit(userId),
+        // BUG-FIX: getUserDailyLimit بتنده isPremium جواها. نمرّر prem.
+        const prem  = await isPremium(userId);
+        const [limit, dlRaw] = await Promise.all([
+          getUserDailyLimit(userId, prem),
           storage.getDailyDownloadCount(userId).catch(() => 0),
         ]);
         const remaining = Math.max(0, limit - dlRaw);
@@ -346,9 +374,10 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
         break;
 
       case "my_stats": {
-        const [prem, limit, dlCount, expiry] = await Promise.all([
-          isPremium(userId),
-          getUserDailyLimit(userId),
+        // BUG-FIX: getUserDailyLimit و getPremiumExpiry تنادي Redis لـ manual flag → نجيب prem أولاً.
+        const prem  = await isPremium(userId);
+        const [limit, dlCount, expiry] = await Promise.all([
+          getUserDailyLimit(userId, prem),
           storage.getDailyDownloadCount(userId).catch(() => 0),
           getPremiumExpiry(userId),
         ]);
@@ -429,7 +458,9 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
       });
       try { await bot.answerCallbackQuery(query.id, { text: "⚠️ خطأ مؤقت، حاول مرة أخرى" }).catch(() => {}); } catch {}
     } finally {
-      if (needsDedup) processingCallbacks.delete(dedupKey);
+      if (acquiredDedup) {
+        await redis.del(cbDedupKey(userId, data)).catch(() => {});
+      }
     }
   });
 }
