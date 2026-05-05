@@ -7,6 +7,94 @@
 
 ---
 
+## [31.3.18] — 2026-05-05
+
+### 🐛 إصلاح مالي حرج — `successful_payment` ممكن يمنح Premium مرتين لدفعة واحدة
+
+في `server/bot/commands.ts` الـ `bot.on("message", ...)` كان بيـ handle حدث `msg.successful_payment` (دفع Telegram Stars الناجح) من غير أي idempotency:
+
+```ts
+if (msg.successful_payment) {
+  ...
+  if (payload.startsWith("premium:") && userId) {
+    await setPremium(userId, true, 30, {...});  // ← يُمدّد TTL بـ 30 يوم
+    await bot.sendMessage(chatId, "🎉 تم تفعيل Premium بنجاح!", ...);
+  }
+  return;
+}
+```
+
+**ليه ده bug فعلي:**
+
+1. `setPremium(uid, true, 30, ...)` بـ days>0 بيقرأ الـ TTL الحالي ويـ extend بـ 30 يوم. مش replace — `userSettings.ts:128-147`:
+   ```ts
+   const remainingSec = currentTtl > 0 ? currentTtl : 0;
+   const newTtlSec    = remainingSec + days * 24 * 3600;  // ← additive
+   ```
+
+2. البوت بيشتغل بـ `polling: true` (`server/bot/index.ts:89`). NTBA polling offset محفوظ **في الذاكرة فقط** — مفيش persistence على disk أو Redis.
+
+3. السيناريوهات اللي بتسبب redelivery لنفس الـ `successful_payment` update:
+   - **Bot crash** بين معالجة الـ payment و الـ `getUpdates` التالي. على restart، NTBA بيـ poll من offset جديد (وفي بعض الأحيان من 0)، فالـ Telegram بيرجّع نفس الـ payment update تاني (Telegram بيحتفظ بالـ updates لمدة 24h).
+   - **Multi-instance race**: لو الـ deploy ما عملش shutdown صحيح للـ instance القديم وفيه instance جديد بيشتغل، الاتنين هيشوفوا نفس الـ payment.
+   - **Telegram retries**: لو الـ bot's HTTP response timed out (نادر بس وارد)، Telegram ممكن يـ retry الـ delivery.
+
+4. النتيجة: مستخدم دفع مرة واحدة (مثلاً 100 Stars) → بياخد **60 يوم** بدل 30 يوم. خسارة إيرادات حقيقية + عدم اتساق المنطق المحاسبي.
+
+**الإصلاح:**
+
+استخدام `redis.set(key, value, "EX", ttl, "NX")` على المفتاح `payment:processed:<telegram_payment_charge_id>`. الـ `telegram_payment_charge_id` فريد لكل عملية دفع (Telegram بتضمن ده في الـ Bot Payments API).
+
+```ts
+const chargeId = msg.successful_payment.telegram_payment_charge_id || "";
+let alreadyProcessed = false;
+if (chargeId) {
+  const acquired = await redis.set(
+    `payment:processed:${chargeId}`,
+    String(Date.now()),
+    "EX", 90 * 24 * 3600,
+    "NX",
+  ).catch(() => null);
+  alreadyProcessed = acquired !== "OK";
+}
+
+if (!alreadyProcessed) {
+  await setPremium(userId, true, 30, {...});
+} else {
+  L.warn("payment", "Duplicate successful_payment redelivered — premium NOT re-granted", {...});
+  redis.incr("tel:payment:duplicate_redelivery").catch(() => {});
+}
+
+// رسالة النجاح بتترسل في الحالتين
+await bot.sendMessage(chatId, "🎉 تم تفعيل Premium بنجاح!", ...);
+```
+
+**قرارات تصميمية مهمة:**
+
+- **TTL = 90 يوم** للمفتاح: أطول بكتير من أي retry معقول من Telegram أو من crash recovery، وأقصر من إن نخلّيه دائم (يحفظ ذاكرة Redis). الاحتمال إن يحصل redelivery لـ payment حقيقي بعد 90 يوم تقريباً صفر.
+- **رسالة النجاح بترسل في الحالتين**: لو الـ retry حصل لأن الرد الأصلي ضاع، المستخدم لازم يشوف confirmation تاني — ده تجربة المستخدم الصح. الـ idempotency بس على الـ DB write (الـ premium grant)، مش على رسالة الـ UI.
+- **`SET ... NX` atomic**: مفيش race بين فحص الـ existence والـ write — Redis بيضمن atomicity.
+- **Telemetry counter `tel:payment:duplicate_redelivery`**: نقدر نشوف من الـ dashboard لو ده بيحصل فعلاً في الـ production، ونفهم تكراره.
+- **Defensive: لو `chargeId` فارغ** (ما يحصلش لـ Stars بس defensive)، بنـ skip الـ dedup ونـ fall back للسلوك الأصلي (no regression).
+
+**تأثير:** يمنع double-grant على كل payment من اليوم اللي بيتنشر فيه. الـ payments السابقة اللي حصل لها double-grant بالفعل (لو حصل) ما هتتعدلش — بس ما هيحصلش تاني.
+
+**تأكيد سلامة سلوك non-Stars (مفيش حالياً):** الـ check `payload.startsWith("premium:")` يمنع منح Premium لأي invoice بـ payload مختلف. مفيش تغيير في ده.
+
+**اختبار:** `test-payment-idempotency.mjs` (13 probes) بتـ verify:
+- الـ chargeId بيتقرأ صح من الـ event
+- الـ dedup key namespace صحيح (`payment:processed:`)
+- SET NX بيتستخدم بشكل atomic
+- `setPremium` مرة واحدة بس (no double-grant path)
+- رسالة النجاح بترسل في الحالتين
+- Logging و metrics للـ duplicate path
+- TTL ≥ 30 يوم (90 يوم في النسخة الحالية)
+- Empty chargeId بيـ skip الـ dedup بشكل صحيح (no regression)
+
+15/15 test files pass، tsc نظيف، build 457.3 kb.
+
+---
+
 ## [31.3.17] — 2026-05-05
 
 ### 🧹 تنظيف — حذف 3 نداءات `invalidateRecentSearchesCache()` ميتة في `bookRequest.ts`
