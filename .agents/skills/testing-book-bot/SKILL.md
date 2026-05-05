@@ -13,6 +13,7 @@ Use this skill when testing the Telegram book-bot production deployment for sear
 
 - `FIRECRAWL_API_KEY` — needed for local/dev Firecrawl-backed searches if running the bot outside production.
 - `AWS_UBUNTU_SSH_PRIVATE_KEY` or an equivalent SSH key provisioned at `$HOME/.ssh/devin_aws_ubuntu_key` — needed to access the production Ubuntu server.
+- For the AI summary engine: `GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SAMBANOVA_API_KEY`, `OPENROUTER_API_KEY`, `GITHUB_MODELS_TOKEN`, `MISTRAL_API_KEY`, `CLOUDFLARE_AI_ACCOUNT_ID`, `CLOUDFLARE_AI_API_TOKEN`, `YOU_COM_API_KEY`. All optional except Gemini — the registry degrades gracefully.
 
 Do not print production `.env` values. Production runtime secrets live in `/home/ubuntu/book-bot/.env` on the server.
 
@@ -105,74 +106,38 @@ npm run build
 
 Expected for smart cached-PDF query matching: Arabic spelling variants and generic request wrappers such as `تحميل كتاب ... pdf` should resolve to the same canonical cache key. If storage cache behavior changes, also verify reads remain backward-compatible with legacy `book_query_normalized` rows.
 
-### Synthetic-row insertion for cache fixes
+## Testing the AI summary engine offline (no Telegram needed)
 
-For testing cache-hit re-validation (BUG-3) or `/purge_cache` (BUG-9), insert deterministic synthetic rows directly via the bot container's pg client. Two gotchas:
+The summary feature (PR #19) ships a 9-provider AI failover stack. Before deploying engine-level changes (new providers, prompt edits, cache TTL changes, quota tweaks), run an adversarial harness against a local Redis with the real provider HTTP APIs. This validates the engine without sending a single Telegram message.
 
-- The script must run **from `/app`** (where `node_modules/pg` lives) — running from `/tmp` fails with `Cannot find module 'pg'`.
-- The container's loader uses CommonJS for arbitrary node scripts, so use `.cjs` (or use `require` syntax in a `.js` file) rather than ESM.
-
-```bash
-ssh -i $HOME/.ssh/devin_aws_ubuntu_key ubuntu@<production-host>
-cat > /tmp/synth.cjs <<'EOF'
-const { Client } = require("pg");
-const c = new Client({ connectionString: process.env.DATABASE_URL });
-(async () => {
-  await c.connect();
-  await c.query(
-    `INSERT INTO cached_books
-       (book_query, book_query_normalized, book_name, source_url, telegram_file_id, times_served)
-     VALUES ($1,$2,$3,$4,$5,0)`,
-    [
-      "devin_test_synthetic",
-      "devin_test_synthetic",                  // canonicalizeForCache(book_query)
-      "كتاب لا علاقة له بالاستعلام",            // unrelated cached name → re-validation rejects
-      "https://example.org/files/00001.pdf",  // example.org never serves real PDFs
-      "BAQACAgIAaaaaaaaaaaaaaaaa",            // fake file_id (never used — re-validation aborts first)
-    ],
-  );
-  await c.end();
-})().catch((e) => { console.error(e.message); process.exit(1); });
-EOF
-docker cp /tmp/synth.cjs book-bot-bot-1:/app/synth.cjs
-docker exec book-bot-bot-1 sh -c 'cd /app && node synth.cjs && rm /app/synth.cjs'
-```
-
-Then ask Ahmed to send the matching query as a Telegram message; tail logs with `--since=<UTC TS>` to capture the response. Expected log markers for the cache-hit re-validation path:
-
-- `[WARN] [cache] cache hit looked suspicious — falling through to full search`
-- Redis counter `tel:cache:hit_revalidated_skip` increments by 1.
-
-Always `DELETE FROM cached_books WHERE book_query LIKE 'devin_test_%'` at the end of the test run.
-
-### `tsx` probe gotchas
-
-When the probe needs `await` or relative `./server/bot/...` imports, the inline `npx tsx -e '...'` form trips on two issues. Use a small `.mjs` file inside the repo instead:
-
-- **Module resolution** — `tsx` resolves relative imports against the script's directory. Running `npx tsx /tmp/probe.mjs` with `import "./server/bot/x.ts"` looks up `/tmp/server/bot/x.ts` and fails. Place the script inside `/home/ubuntu/book-bot/` and run from there.
-- **Top-level `await`** — `npx tsx -e '...'` runs in cjs eval mode, which rejects top-level `await` (`Top-level await is currently not supported with the "cjs" output format`). Top-level `await` works fine inside a `.mjs` file.
+### Setup
 
 ```bash
-cd /home/ubuntu/book-bot
-cat > parser-probe.mjs <<'EOF'
-import { parseBookName } from "./server/bot/bookNameParser.ts";
-const cases = [
-  { in: "لخصلي كتاب حوار مع صديقي الملحد", expect: "حوار مع صديقي الملحد" },
-  { in: "تحميل كتاب الأغاني pdf",          expect: "الأغاني" },
-];
-let fail = 0;
-for (const c of cases) {
-  const got = await parseBookName(c.in);
-  const ok  = got === c.expect;
-  if (!ok) fail++;
-  console.log((ok ? "PASS" : "FAIL") + "  " + JSON.stringify(c.in) + " -> " + JSON.stringify(got));
-}
-process.exit(fail === 0 ? 0 : 1);
-EOF
-npx tsx parser-probe.mjs; CODE=$?
-rm -f parser-probe.mjs
-exit $CODE
+# Start a throwaway Redis (port 6379).
+docker run -d --name test-redis-summary -p 6379:6379 redis:7-alpine
+
+# Register only the AI keys you have (the registry skips unconfigured providers).
+export REDIS_URL=redis://127.0.0.1:6379
+# GEMINI_API_KEY, GROQ_API_KEY, etc. should already be in your env from the secrets store.
 ```
+
+### Pattern: tsx harness importing the engine directly
+
+Write a small `_test_summary.ts` at the repo root that imports `getBookSummary`, `checkAndConsumeUsage`, `kbAfterSuccess`, `normalizeForCache`, and `SUMMARY_DAILY_LIMIT_FREE`. Run with `npx tsx _test_summary.ts`. Cover at least these six cases — each is designed so a broken implementation produces visibly different output:
+
+1. **PDF tier success** — send a known Hindawi PDF URL (e.g. `https://downloads.hindawi.org/books/61851406.pdf` for كليلة ودمنة). Assert `source==='pdf'`, `providerName.startsWith('gemini-')`, summary 600–3500 chars, ≥100 Arabic chars (`/[\u0600-\u06FF]/g`), `bookType !== 'unknown'`, latency < 60s, and that the Redis cache key `summary:v1:<normalizeForCache(book)>` exists after the call.
+2. **Novel spoiler-protection** — request `آنا كارنينا` with no PDF (forces text-tier through Wikipedia context). Assert `bookType==='novel'`, `spoilerLevel ∈ {critical, moderate}`, summary does NOT contain `/تنتحر|انتحار|قطار|ألقت\s*بنفسها/`, `source ∈ {context, wikipedia_only}`. Verify the keyboard would render `📖 *ملخص الرواية* — _بدون أي حرق_` for `spoilerLevel='critical'` or `📖 *ملخص الرواية*` for moderate.
+3. **Cache hit** — call `getBookSummary` twice for the same book. L2 must be < 200ms (typically 0–1ms), L2/L1 < 0.05, summaries deeply equal, providerName equal, Redis TTL between 2.5M–2.592M seconds (~30 days).
+4. **Failover** — set `ai:breaker:gemini-2.5-flash`, `ai:breaker:gemini-2.0-flash`, and `ai:breaker:gemini-flash-lite-latest` to `1` with TTL 600 in Redis, then call. Assert providerName is NOT a `gemini-*` and is one of the text-tier set (groq, cerebras, sambanova, openrouter, github-models, mistral, cloudflare, wikipedia-fallback). Always clean up the breaker keys afterward.
+5. **Keyboard wiring** — call `kbAfterSuccess(book, sessionId)` and assert `inline_keyboard[0].length === 1`, text matches exactly `📘  ملخص الكتاب` (note the double-space — deliberate), callback_data matches `/^sum:[0-9a-f]{12}$/`, and `Buffer.byteLength(callback_data, 'utf8') <= 64`.
+6. **Quota cap** — with a fresh user id, call `checkAndConsumeUsage(uid, false)` `limit + 1` times. The first `limit` must return `blocked=false` with the counter incrementing 1..limit. The `limit + 1`th must return `blocked=true` with the Redis counter rolled back to `limit` (NOT `limit + 1`). One more call with `premium=true` must return `blocked=false` without changing the counter.
+
+### Gemini-API gotchas (May 2026)
+
+- **`gemini-2.5-flash` requires `thinkingConfig: { thinkingBudget: 0 }`.** With the default thinking budget, Gemini 2.5 Flash spends ~95% of `maxOutputTokens` on internal reasoning (`thoughtsTokenCount` in `usageMetadata`), leaving only a few tokens for the actual response. The JSON arrives truncated mid-string and the response parser falls back to `bookType: 'unknown'` — which silently breaks novel spoiler-protection. Always set `thinkingBudget: 0` for non-reasoning tasks like JSON extraction. Also set `maxOutputTokens >= 2048` for safety margin.
+- **`gemini-1.5-flash` was retired from `v1beta`** and now returns `HTTP 404`. Use `gemini-flash-lite-latest` (alias for the latest stable lite Flash) as the deepest Gemini fallback.
+- **`gemini-2.0-flash` may return `RESOURCE_EXHAUSTED` with `limit: 0`** on some accounts — this is a Google billing-tier signal, not a code bug. Don't waste time debugging.
+- **List available models** with `curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"` to verify model names before assuming.
 
 ## Safe runtime test checklist
 
