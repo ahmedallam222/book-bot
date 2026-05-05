@@ -97,6 +97,45 @@ function scheduleIdleClose(): void {
 }
 
 // ══════════════════════════════════════════════
+// non-book URL detection
+// noor-book بيخدّم paths مالهاش .download-btn (tag, category, user, search):
+//   /tag/<topic>            ← قائمة كتب تحت تاج
+//   /category/<cat>         ← قائمة فئة
+//   /user/<id>              ← profile مؤلف
+//   /search?q=...           ← نتائج بحث
+//   /البحث?q=...            ← نتائج بحث (Arabic)
+//   /أحدث-الكتب             ← أحدث كتب (index)
+// لو الـ URL واحد منهم، الـ resolver كان بيفتح Chromium ويستنّى 30s
+// لـ .download-btn اللي مش هيظهر أبداً → fail بعد wasted budget.
+// لما الـ Firecrawl بيرجع waste url زي ده، بنرفض فوراً ونوفّر 30s.
+//
+// ملاحظة implementation: بنفك URL-encoding قبل الـ test عشان pattern
+// واحد يطابق الصيغتين (encoded + plain Unicode).
+const NON_BOOK_NOOR_PATTERNS: RegExp[] = [
+  /^\/tag\//i,
+  /^\/category\//i,
+  /^\/user\//i,
+  /^\/author\//i,
+  /^\/search(?:\?|\/|$)/i,
+  /^\/البحث/,
+  /^\/بحث(?:\?|\/|$)/,
+  /^\/أحدث-/,
+  /^\/الفئة\//,
+  /^\/المستخدم\//,
+];
+
+function isNonBookNoorUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname;
+    let decoded = path;
+    try { decoded = decodeURIComponent(path); } catch { /* malformed → use raw */ }
+    return NON_BOOK_NOOR_PATTERNS.some((re) => re.test(decoded));
+  } catch {
+    return false;
+  }
+}
+
+// ══════════════════════════════════════════════
 // MAIN ENTRY
 // landingUrl: مثلاً https://www.noor-book.com/كتاب-آنا-كارنينا-pdf
 // outputPath: المسار اللي هيتكتب عليه الـ PDF
@@ -107,6 +146,16 @@ export async function downloadNoorBookPdf(
   outputPath: string,
 ): Promise<{ ok: boolean; sizeBytes?: number; error?: string; resolvedUrl?: string }> {
   const t0 = Date.now();
+
+  // Early fail-fast: tag/category/user/search URLs ليسوا book pages —
+  // الـ .download-btn مش هيظهر أبداً، فبنرفض فوراً بدون فتح متصفح.
+  if (isNonBookNoorUrl(landingUrl)) {
+    L.warn("noorbook", "non-book noor URL — skipping resolver", {
+      url: landingUrl.slice(0, 100),
+    });
+    return { ok: false, error: "noor-book: URL is not a book page (tag/category/search)" };
+  }
+
   let context: BrowserContext | null = null;
 
   try {
