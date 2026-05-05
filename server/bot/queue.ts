@@ -26,7 +26,8 @@ export async function enqueue(
   token:    string,
   priority: "high" | "normal",
   userName?: string | null,
-  userMessageId?: number
+  userMessageId?: number,
+  wantsSummary?: boolean,
 ): Promise<EnqueueResult> {
   try {
     // فحص عدد الطلبات المعلقة لهذا المستخدم
@@ -46,6 +47,7 @@ export async function enqueue(
       retries:   0,
       createdAt: Date.now(),
       userMessageId,
+      wantsSummary: wantsSummary === true ? true : undefined,
     };
 
     const queue = priority === "high" ? Q_HIGH : Q_NORMAL;

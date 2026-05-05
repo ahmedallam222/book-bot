@@ -41,7 +41,8 @@ export async function handleBookRequest(
   bookName: string,
   token: string,
   userName?: string | null,
-  userMessageId?: number
+  userMessageId?: number,
+  wantsSummary?: boolean,
 ): Promise<void> {
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
   // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
@@ -149,7 +150,7 @@ export async function handleBookRequest(
 
   // ── Enqueue ───────────────────────────────────
   const priority = isAdmin(userId) ? "high" : isPrem ? "high" : "normal";
-  const result   = await enqueue(userId, chatId, bookName, token, priority, userName, userMessageId);
+  const result   = await enqueue(userId, chatId, bookName, token, priority, userName, userMessageId, wantsSummary);
 
   if (!result.ok) {
     if (result.reason === "user_limit") {
@@ -253,10 +254,21 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
         sendSuccess:   true,
       });
       await sendAnnouncement(bot, chatId, userId);
+      // PR G — auto-summary trigger after cache hit. The
+      // sourceUrl is whatever the cached entry held (may be empty
+      // for legacy file_id-only cache); runSummaryFlow falls back
+      // to text-only providers when no PDF URL is available.
+      if (job.wantsSummary) {
+        const cachedEntry = await storage.getCachedBook(bookName).catch(() => null);
+        await maybeAutoSummary(bot, chatId, userId, bookName, cachedEntry?.sourceUrl ?? undefined, true);
+      }
       return;
     }
-    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
+    const fullSearchResult = await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
     await sendAnnouncement(bot, chatId, userId);
+    if (job.wantsSummary && fullSearchResult?.sent) {
+      await maybeAutoSummary(bot, chatId, userId, bookName, fullSearchResult.sourceUrl, true);
+    }
   } catch (e) {
     L.error("worker", `processBookRequest error`, { userId, book: bookName.slice(0, 50), err: String(e).slice(0, 200) });
     await deleteMsg(token, chatId, msgId);
@@ -437,7 +449,7 @@ async function performFullSearch(
   trace: RequestTrace,
   jobId: string,
   userMessageId?: number
-): Promise<void> {
+): Promise<{ sent: boolean; sourceUrl?: string }> {
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
 
   const { results: rawResults, usedFuzzy } = await searchWithFuzzyFallback(bookName);
@@ -478,7 +490,7 @@ async function performFullSearch(
     await bot.sendMessage(chatId, await buildNoResultMessage(bookName), {
       parse_mode: "Markdown", reply_markup: kbNoResults(bookName),
     });
-    return;
+    return { sent: false };
   }
 
   if (usedFuzzy)
@@ -926,6 +938,7 @@ async function performFullSearch(
       reply_markup: kbNoResults(bookName),
     });
   }
+  return { sent, sourceUrl: sent ? sentSourceUrl : undefined };
 }
 
 // ── Helpers ───────────────────────────────────
@@ -940,6 +953,56 @@ async function sendSuccessMessage(
     chatId, msg,
     { parse_mode: "Markdown", reply_markup: kbAfterSuccess(bookName, sourceUrl) }
   );
+}
+
+/**
+ * PR G — auto-summary trigger.
+ *
+ * Called after a successful download when the user's original
+ * request had summary intent (e.g. "لخصلي أرض زيكولا"). Acquires
+ * a per-(userId, book) inflight lock so a manual button click
+ * during the same window is silently dropped, then runs the summary
+ * orchestrator inline (fire-and-forget — failures are logged inside
+ * runSummaryFlow, never propagated to the caller).
+ *
+ * The lock key intentionally diverges from the button-click lock
+ * (which keys on sessionKey) by using the canonical book name
+ * instead, so the auto-trigger and a fresh button-click for the
+ * *same* book dedupe each other.
+ */
+async function maybeAutoSummary(
+  bot:        TelegramBot,
+  chatId:     number,
+  userId:     string,
+  bookName:   string,
+  sourceUrl:  string | undefined,
+  wantsSummary: boolean,
+): Promise<void> {
+  if (!wantsSummary) return;
+  try {
+    const lockKey = `summary:auto:${userId}:${canonicalizeForCache(bookName)}`;
+    const locked  = await redis.set(lockKey, "1", "EX", 90, "NX").catch(() => null);
+    if (!locked) {
+      L.info("bookRequest", "auto-summary already in flight — skipping", {
+        userId, book: bookName.slice(0, 50),
+      });
+      return;
+    }
+    redis.incr("tel:summary:auto_triggered").catch(() => {});
+    L.info("bookRequest", "auto-summary triggered", {
+      userId, book: bookName.slice(0, 50),
+    });
+    // Lazy import to avoid circular dependency (summaryHandler →
+    // session → … → bookRequest).
+    const { runSummaryFlow } = await import("./summaryHandler.js");
+    await runSummaryFlow(bot, chatId, userId, bookName, sourceUrl, {
+      lockKey,
+    });
+  } catch (e) {
+    L.warn("bookRequest", "auto-summary trigger failed", {
+      userId, book: bookName.slice(0, 50), err: String(e).slice(0, 120),
+    });
+  }
 }
 
 async function sendAnnouncement(bot: TelegramBot, chatId: number, userId: string): Promise<void> {
