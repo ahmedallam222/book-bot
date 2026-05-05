@@ -334,6 +334,63 @@ function extractMetaTitle(buf: Buffer): string {
 }
 
 // ══════════════════════════════════════════════
+//  STEP 1.5: looksLikeUselessTitle — garbage /Title detection
+// ══════════════════════════════════════════════
+
+/**
+ * يكتشف الـ /Title اللي مش بيوصف الكتاب فعلاً وبيبقى placeholder من
+ * الأداة اللي ولّدت الـ PDF (Hindawi لـ scans قديمة، Microsoft Word،
+ * scanners، PowerPoint، إلخ). الـ titles دي بتسبب false rejections لأن
+ * wordOverlapScore بيرجع 0 ضد كلمات الكتاب الحقيقية وMistral بياخد
+ * prompt مضلِّل.
+ *
+ * الـ patterns المشمولة:
+ *  - "1 Image", "Image 1", "image001"          (Hindawi scans, scanners)
+ *  - "Untitled", "Untitled-1", "بدون عنوان"    (default templates)
+ *  - "Document1", "Document"                    (Word default)
+ *  - "Microsoft Word - <anything>"              (Word draft path)
+ *  - "Slide 1", "Slide001"                      (PowerPoint exports)
+ *  - أرقام بحتة أو رموز فقط                     (timestamps, IDs)
+ *  - أحرف لاتينية ≤3 (placeholder قصير)          ("a", "Doc", "PDF")
+ *
+ * **متعمداً NOT garbage:** أي string فيه ≥ 4 letter-chars مع كلمات
+ * متعددة أو محتوى عربي. الفلتر محافظ — false negative (نعتبر garbage
+ * كأنه ليس garbage) أرخص من false positive (نمسح metaTitle شرعي).
+ */
+function looksLikeUselessTitle(title: string): boolean {
+  if (!title) return false;
+  const t = title.trim();
+  if (t.length === 0) return true;
+
+  // أرقام/رموز بحتة (no letters at all)
+  if (!/[a-zA-Z\u0600-\u06FF]/.test(t)) return true;
+
+  // أنماط محددة شائعة
+  const garbagePatterns: RegExp[] = [
+    /^\s*\d+\s*image\s*\d*\s*$/i,           // "1 Image", "Image 1", "1image", "12 Image 03"
+    /^\s*image\s*\d+\s*$/i,                  // "Image001", "image 12"
+    /^\s*untitled\s*[-_]?\s*\d*\s*$/i,       // "Untitled", "Untitled-1"
+    /^\s*بدون\s*عنوان\s*$/,                  // Arabic "Untitled"
+    /^\s*document\s*\d*\s*$/i,               // "Document", "Document1"
+    /^\s*microsoft\s*word\s*[-–]/i,          // "Microsoft Word - draft.docx"
+    /^\s*slide\s*\d+\s*$/i,                  // "Slide 1"
+    /^\s*page\s*\d+\s*$/i,                   // "Page 1"
+    /^\s*new\s*document\s*\d*\s*$/i,         // "New Document"
+    /^\s*pdf\s*\d*\s*$/i,                    // "PDF", "PDF1"
+    /^\s*book\s*\d*\s*$/i,                   // "Book", "Book1"
+    /^\s*كتاب\s*\d*\s*$/,                    // Arabic "كتاب"
+    /^\s*ملف\s*\d*\s*$/,                     // Arabic "ملف"
+  ];
+  if (garbagePatterns.some((re) => re.test(t))) return true;
+
+  // أحرف ≤3 (لاتيني/عربي معاً) → placeholder قصير ("a", "Doc", "ABC")
+  const lettersOnly = t.replace(/[^a-zA-Z\u0600-\u06FF]/g, "");
+  if (lettersOnly.length <= 3) return true;
+
+  return false;
+}
+
+// ══════════════════════════════════════════════
 //  STEP 2: wordOverlapScore
 // ══════════════════════════════════════════════
 
@@ -795,7 +852,22 @@ export async function validatePdfContent(
     return { accepted: false, score: 0, event: "not_pdf_magic", mistralUsed: false, metaTitle: "" };
   }
 
-  const metaTitle = extractMetaTitle(buf);
+  const rawMetaTitle = extractMetaTitle(buf);
+
+  // ── garbage metaTitle filter ─────────────────────
+  // بعض الـ PDF (Hindawi قديم، scanners، Microsoft Word templates) بيكتبوا
+  // /Title بقيم placeholder مالهاش علاقة بالكتاب — مثلاً "1 Image",
+  // "Untitled", "Document1", "Microsoft Word - file.docx", "Slide 1".
+  // بدون هذا الفلتر:
+  //   • wordOverlapScore = 0 (الكلمات لا تتطابق)
+  //   • الكتاب ينزل في "rejected_title_mismatch" branch مباشرة (sameLang+isClearTitle)
+  //   • أو يدخل Mistral مع prompt "PDF metadata title: '1 Image'" → Mistral يرفض
+  //     لأن "1 Image" ≠ "الكتاب اللي اليوزر طلبه"
+  // النتيجة: ملف صحيح يُرفض → اليوزر بياخد "غير متوفر" ظلماً.
+  // الحل: نتعامل مع الـ garbage titles كأنها metaTitle فاضي → الـ searchTitle
+  // promotion يعمل its job ويعطي للـ Mistral عنوان حقيقي من الـ search engine.
+  const metaTitle = looksLikeUselessTitle(rawMetaTitle) ? "" : rawMetaTitle;
+  const garbageMetaDetected = !!rawMetaTitle && !metaTitle;
 
   // اسم الملف من الـ URL — إشارة إضافية للـ Mistral
   let urlFilename = "";
@@ -836,6 +908,13 @@ export async function validatePdfContent(
     cdFilename:     cdFilename.slice(0, 30) || "(empty)",
     ms:             Date.now() - t0,
   });
+
+  if (garbageMetaDetected) {
+    L.info("pdfValidator", "PDF metaTitle is garbage placeholder — ignoring", {
+      book:        bookName.slice(0, 50),
+      rawMetaTitle: rawMetaTitle.slice(0, 80),
+    });
+  }
 
   // searchTitle promotion: when the PDF metadata title is missing but the
   // search-result <title> is available and looks like a real book title
