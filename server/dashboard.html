@@ -16,17 +16,45 @@ html,body{height:100%;background:#07090f;color:#e6edf3;font-family:'Noto Kufi Ar
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 @keyframes glow{0%,100%{box-shadow:0 0 4px #d4a84344}50%{box-shadow:0 0 18px #d4a84388}}
 @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideRight{from{transform:translateX(100%)}to{transform:translateX(0)}}
 @keyframes shimmer{0%{background-position:-400px 0}100%{background-position:400px 0}}
 .pulse{animation:pulse 2.5s ease-in-out infinite}
 .glow{animation:glow 2.5s ease-in-out infinite}
 .fade-up{animation:fadeUp .3s ease forwards}
+.fade-in{animation:fadeIn .25s ease forwards}
+.slide-right{animation:slideRight .25s cubic-bezier(.4,0,.2,1) forwards}
 .hcard:hover{background:#191f28!important}
 table{border-collapse:collapse;width:100%}th,td{padding:9px 12px;text-align:right}
-input,select{background:#0d1117;border:1px solid #1e2533;border-radius:8px;color:#e6edf3;padding:8px 12px;font-family:inherit;font-size:13px;outline:none;width:100%}
-input:focus,select:focus{border-color:#d4a84388}
+input,select,textarea{background:#0d1117;border:1px solid #1e2533;border-radius:8px;color:#e6edf3;padding:8px 12px;font-family:inherit;font-size:13px;outline:none;width:100%}
+input:focus,select:focus,textarea:focus{border-color:#d4a84388}
 button{cursor:pointer;font-family:'Noto Kufi Arabic',sans-serif}
 .shimmer{background:linear-gradient(90deg,#2d333b 25%,#1e2533 50%,#2d333b 75%);background-size:400px;animation:shimmer 1.4s infinite}
 #root{display:flex;height:100vh}
+
+/* ── Mobile responsive (<768px) ───────────────── */
+.mobile-only{display:none}
+.desktop-only{display:flex}
+@media (max-width:768px){
+  .mobile-only{display:flex}
+  .desktop-only{display:none}
+  /* Sidebar becomes overlay drawer on mobile */
+  .sidebar{position:fixed!important;right:0;top:0;height:100vh!important;z-index:200;
+    box-shadow:-8px 0 32px rgba(0,0,0,.55);transition:transform .25s cubic-bezier(.4,0,.2,1)!important}
+  .sidebar.closed{transform:translateX(110%)}
+  .sidebar-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:150;animation:fadeIn .2s}
+  /* Smaller paddings + fonts on mobile */
+  .content{padding:14px 10px!important}
+  .topbar{padding:0 12px!important;height:52px!important;gap:6px}
+  .topbar-title{font-size:14px!important}
+  .kpi-grid{gap:8px!important}
+  /* Make tables scrollable */
+  table{font-size:12px}
+  th,td{padding:7px 8px}
+}
+@media (max-width:480px){
+  .topbar-status{display:none}  /* hide "متصل" tag on tiny screens */
+}
 </style>
 </head>
 <body>
@@ -35,7 +63,12 @@ button{cursor:pointer;font-family:'Noto Kufi Arabic',sans-serif}
 // ══════════════════════════════════════════════
 // CONFIG — يُقرأ تلقائياً من نفس السيرفر
 // ══════════════════════════════════════════════
-const ADMIN_ID = "8f499d422f14bba46186b53ca489acbb";
+// SECURITY: لا نحتفظ بأي token في الـ source. التوكن يُدخَل عبر شاشة
+// تسجيل دخول ويُحفَظ في localStorage، فلا يظهر في View Source.
+const TOKEN_KEY = "bookbot_dash_secret";
+function getToken(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } }
+function setToken(t){ try { t ? localStorage.setItem(TOKEN_KEY,t) : localStorage.removeItem(TOKEN_KEY); } catch {} }
+
 const API_BASE = "";   // نفس الـ origin دائماً — لا mixed content
 const REFRESH  = 30000;
 
@@ -82,10 +115,23 @@ const MOCK = {
 // ══════════════════════════════════════════════
 let _mock = false;
 
+// onAuthLost: callback that App.tsx registers — fires on 401/403 to redirect to Login
+let _onAuthLost = ()=>{};
+function setAuthLostHandler(fn){ _onAuthLost = fn || (()=>{}); }
+
 async function apiFetch(path, opts={}) {
   const url = `${API_BASE}/api/admin/${path}`;
+  const token = getToken();
+  if(!token){ _mock = true; _onAuthLost(); return null; }
   try {
-    const r = await fetch(url,{...opts,headers:{Authorization:`Bearer ${ADMIN_ID}`,"Content-Type":"application/json",...(opts.headers||{})}});
+    const r = await fetch(url,{...opts,headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json",...(opts.headers||{})}});
+    if(r.status===401 || r.status===403){
+      // token خاطئ أو فقد صلاحيته — رجّع للـ login
+      setToken("");
+      _onAuthLost();
+      _mock = true;
+      return null;
+    }
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     _mock = false;
@@ -519,14 +565,16 @@ function UsersTab({prem,banned,allUsers,onToast,onRefresh,onUserClick}){
   const [tab,setTab]=useState("manage");
   const [uid,setUid]=useState("");
   const [lim,setLim]=useState("");
+  const [days,setDays]=useState("");   // مدة التميز بالأيام (فارغ = manual بدون انتهاء)
   const [search,setSearch]=useState("");
   const SubBtn=({id,label})=>h("button",{onClick:()=>setTab(id),style:{
     background:tab===id?T.goldDim+"40":"transparent",border:`1px solid ${tab===id?T.gold:T.border}`,
     color:tab===id?T.gold:T.muted,padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:tab===id?600:400}},label);
   const act=async(type,id2=uid)=>{
     if(!id2.trim()){onToast("أدخل User ID أولاً","err");return;}
+    const grantBody = days && +days>0 ? {enable:true,days:+days} : {enable:true};
     const m={
-      grantPrem:()=>apiAct("POST",`users/${id2}/premium`,{enable:true}),
+      grantPrem:()=>apiAct("POST",`users/${id2}/premium`,grantBody),
       revokePrem:()=>apiAct("POST",`users/${id2}/premium`,{enable:false}),
       ban:()=>apiAct("POST",`users/${id2}/ban`),
       unban:()=>apiAct("DELETE",`users/${id2}/ban`),
@@ -534,7 +582,8 @@ function UsersTab({prem,banned,allUsers,onToast,onRefresh,onUserClick}){
       resetLim:()=>apiAct("DELETE",`users/${id2}/limit`),
     };
     await m[type]?.();
-    const msgs={grantPrem:"✅ منح تميز",revokePrem:"✅ إلغاء تميز",ban:"🚫 تم الحظر",unban:"✅ رفع الحظر",setLim:`✅ حد: ${lim}`,resetLim:"✅ إعادة"};
+    const grantMsg = days && +days>0 ? `⭐ تميز ${days} يوم` : "⭐ تميز دائم (manual)";
+    const msgs={grantPrem:grantMsg,revokePrem:"✅ إلغاء تميز",ban:"🚫 تم الحظر",unban:"✅ رفع الحظر",setLim:`✅ حد: ${lim}`,resetLim:"✅ إعادة"};
     onToast(msgs[type]);onRefresh();
   };
   // فلتر بحث المستخدمين
@@ -555,6 +604,23 @@ function UsersTab({prem,banned,allUsers,onToast,onRefresh,onUserClick}){
         h("div",null,
           h("div",{style:{fontSize:11,color:T.muted,marginBottom:6}},"Telegram User ID"),
           h("input",{value:uid,onChange:e=>setUid(e.target.value),placeholder:"مثال: 112233445",style:{direction:"ltr",maxWidth:280}})
+        ),
+        h("div",null,
+          h("div",{style:{fontSize:11,color:T.muted,marginBottom:6}},"مدة التميز (أيام) — اتركه فارغاً للمنحة الإدارية الدائمة"),
+          h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
+            h("input",{value:days,onChange:e=>setDays(e.target.value),type:"number",min:"0",
+              placeholder:"مثلاً 30",style:{direction:"ltr",maxWidth:140}}),
+            [7,30,90,365].map(n=>h("button",{key:n,onClick:()=>setDays(String(n)),style:{
+              background:days===String(n)?T.goldDim+"40":"transparent",
+              border:`1px solid ${days===String(n)?T.gold:T.border}`,
+              color:days===String(n)?T.gold:T.muted,
+              padding:"5px 10px",borderRadius:6,fontSize:11}},`${n}ي`)),
+            h("button",{onClick:()=>setDays(""),style:{
+              background:days===""?T.goldDim+"40":"transparent",
+              border:`1px solid ${days===""?T.gold:T.border}`,
+              color:days===""?T.gold:T.muted,
+              padding:"5px 10px",borderRadius:6,fontSize:11}},"دائم")
+          )
         ),
         h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
           h(Btn,{variant:"gold",onClick:()=>act("grantPrem")},"⭐ منح تميز"),
@@ -638,7 +704,72 @@ function UsersTab({prem,banned,allUsers,onToast,onRefresh,onUserClick}){
   );
 }
 
-function SystemTab({system,maintenance,onToggleMaint,onClearBL}){
+function BroadcastBox({onToast}){
+  const [msg,setMsg]=useState("");
+  const [target,setTarget]=useState("all");   // all | premium | active7
+  const [busy,setBusy]=useState(false);
+  const [stats,setStats]=useState(null);
+  const send=async()=>{
+    const text=msg.trim();
+    if(text.length<3){onToast("الرسالة قصيرة","err");return;}
+    if(text.length>4000){onToast("الرسالة طويلة جداً (4000 حرف)","err");return;}
+    if(!confirm(`إرسال الرسالة إلى ${target==="all"?"كل المستخدمين":target==="premium"?"المميزين فقط":"المستخدمين النشطين 7 أيام"}؟`))return;
+    setBusy(true); setStats(null);
+    try{
+      const r=await fetch(`${API_BASE}/api/admin/broadcast`,{
+        method:"POST",
+        headers:{Authorization:`Bearer ${getToken()}`,"Content-Type":"application/json"},
+        body:JSON.stringify({message:text,target})
+      });
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);
+      const d=j.data??j;
+      setStats(d);
+      onToast(`📢 بدأ الإرسال إلى ${d.total||0} مستخدم`);
+      setMsg("");
+    }catch(e){onToast(`❌ ${e.message||e}`,"err");}
+    finally{setBusy(false);}
+  };
+  const TargetBtn=({id,label})=>h("button",{onClick:()=>setTarget(id),style:{
+    background:target===id?T.goldDim+"40":"transparent",
+    border:`1px solid ${target===id?T.gold:T.border}`,
+    color:target===id?T.gold:T.muted,
+    padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:target===id?600:400}},label);
+  return h(Card,null,
+    h(SH,{icon:"📢",title:"إعلان عام للمستخدمين"}),
+    h("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+      h("div",null,
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:6}},"الفئة المستهدفة"),
+        h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+          h(TargetBtn,{id:"all",label:"👥 الكل"}),
+          h(TargetBtn,{id:"premium",label:"⭐ المميزون"}),
+          h(TargetBtn,{id:"active7",label:"🕐 النشطون (7ي)"})
+        )
+      ),
+      h("textarea",{value:msg,onChange:e=>setMsg(e.target.value),
+        placeholder:"اكتب الإعلان هنا… (يدعم HTML بسيط: <b>عريض</b> <i>مائل</i> <a href=\"...\">رابط</a>)",
+        rows:5,maxLength:4000,
+        style:{direction:"rtl",resize:"vertical",minHeight:120,fontSize:13,lineHeight:1.6}}),
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:T.muted}},
+        h("span",null,`${msg.length}/4000 حرف`),
+        h("span",null,"⚠️ الإرسال يحترم الـ rate-limit وقد يستغرق دقائق")
+      ),
+      h("div",{style:{display:"flex",gap:8}},
+        h(Btn,{variant:"gold",onClick:send,disabled:busy},busy?"… جاري الإرسال":"📤 إرسال الآن"),
+        h(Btn,{variant:"ghost",onClick:()=>{setMsg("");setStats(null);}},"🔄 إعادة")
+      ),
+      stats&&h("div",{style:{marginTop:8,padding:"10px 14px",background:T.greenDim+"30",
+        border:`1px solid ${T.green}`,borderRadius:8,fontSize:12,color:T.green,lineHeight:1.7}},
+        `✅ تم وضع الإعلان في طابور الإرسال`,
+        h("br"),
+        `الفئة: ${stats.target==="all"?"الكل":stats.target==="premium"?"المميزون":"النشطون"} — إجمالي مقدّر: ${stats.total||0} مستخدم`,
+        h("br"),
+        h("span",{style:{fontSize:11,color:T.muted}},"تابع تقدّم الإرسال من الـ logs على السيرفر"))
+    )
+  );
+}
+
+function SystemTab({system,maintenance,onToggleMaint,onClearBL,onToast}){
   if(!system) return h(Card,null,h(Sk,{h:300}));
   return h("div",{className:"fade-up",style:{display:"flex",flexDirection:"column",gap:16}},
     maintenance&&h("div",{style:{background:T.redDim,border:`1px solid ${T.red}55`,
@@ -647,7 +778,8 @@ function SystemTab({system,maintenance,onToggleMaint,onClearBL}){
       h(Btn,{variant:maintenance?"success":"danger",onClick:onToggleMaint},maintenance?"✅ إيقاف الصيانة":"🔧 تفعيل الصيانة"),
       h(Btn,{variant:"ghost",onClick:onClearBL},"🧹 مسح Blacklist")
     ),
-    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}},
+    h(BroadcastBox,{onToast}),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}},
       [["Node.js",system.nodeVersion,T.green],["PID",system.pid,T.muted],
        ["Heap Used",`${system.memory.heapUsed} MB`,T.blue],["Heap Total",`${system.memory.heapTotal} MB`,T.muted],
        ["RSS",`${system.memory.rss} MB`,T.muted],["Workers",system.workers,T.gold],
@@ -1142,8 +1274,17 @@ function UserModal({userId,onClose,onAction}){
   );
 }
 
-function App(){
+function App({onLogout}){
   const [tab,setTab]=useState("overview");
+  // mobile detection — react to viewport changes
+  const [isMobile,setIsMobile]=useState(()=>typeof window!=="undefined"&&window.matchMedia?.("(max-width:768px)").matches);
+  useEffect(()=>{
+    if(typeof window==="undefined") return;
+    const mq=window.matchMedia("(max-width:768px)");
+    const fn=e=>setIsMobile(e.matches);
+    mq.addEventListener?.("change",fn) || mq.addListener?.(fn);
+    return()=>{ mq.removeEventListener?.("change",fn) || mq.removeListener?.(fn); };
+  },[]);
   const [ov,setOv]=useState(null);
   const [books,setBooks]=useState([]);
   const [sources,setSources]=useState([]);
@@ -1158,7 +1299,7 @@ function App(){
   const [drillId,setDrillId]=useState(null);
   const [ts,setTs]=useState(Date.now());
   const [toast,setToast]=useState(null);
-  const [sidebar,setSidebar]=useState(true);
+  const [sidebar,setSidebar]=useState(()=>typeof window!=="undefined" ? !window.matchMedia?.("(max-width:768px)").matches : true);
   const [funnel,setFunnel]=useState(null);
   const [traces,setTraces]=useState([]);
   const [isMock,setIsMock]=useState(false);
@@ -1266,57 +1407,78 @@ function App(){
     showToast("✅ تم مسح Blacklist");loadAll();
   };
 
-  return h("div",{style:{display:"flex",minHeight:"100vh",background:T.bg}},
+  // sidebarOpen: على الموبايل = drawer مفتوح/مقفول. على الديسكتوب = expanded/collapsed.
+  const sidebarOpen = isMobile ? sidebar : true;       // dummy on desktop, always rendered
+  const sidebarWidth = isMobile ? 240 : (sidebar?220:62);
+  const closeSidebar = ()=>setSidebar(false);
+  const toggleSidebar = ()=>setSidebar(p=>!p);
+
+  return h("div",{style:{display:"flex",minHeight:"100vh",background:T.bg,position:"relative"}},
+    // Mobile backdrop
+    isMobile && sidebar && h("div",{className:"sidebar-backdrop",onClick:closeSidebar}),
     // Sidebar
-    h("div",{style:{width:sidebar?220:62,background:T.surface,borderLeft:`1px solid ${T.border}`,
+    h("div",{className:`sidebar ${isMobile&&!sidebar?"closed":""}`,
+      style:{width:sidebarWidth,background:T.surface,borderLeft:`1px solid ${T.border}`,
       display:"flex",flexDirection:"column",transition:"width .25s cubic-bezier(.4,0,.2,1)",
-      overflow:"hidden",flexShrink:0,position:"sticky",top:0,height:"100vh"}},
+      overflow:"hidden",flexShrink:0,position:isMobile?"fixed":"sticky",top:0,height:"100vh"}},
       h("div",{style:{padding:"18px 14px",borderBottom:`1px solid ${T.border}`,
         display:"flex",alignItems:"center",gap:10,overflow:"hidden"}},
         h("div",{className:"glow",style:{width:38,height:38,borderRadius:10,flexShrink:0,
           background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
           display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}},"📚"),
-        sidebar&&h("div",{style:{overflow:"hidden",lineHeight:1.3}},
+        (sidebar||isMobile)&&h("div",{style:{overflow:"hidden",lineHeight:1.3,flex:1}},
           h("div",{style:{color:T.gold,fontWeight:800,fontSize:13,whiteSpace:"nowrap"}},"خلاصة الكتب"),
           h("div",{style:{color:T.muted,fontSize:10,whiteSpace:"nowrap"}},"لوحة الإدارة")
-        )
+        ),
+        // Close button on mobile drawer
+        isMobile && h("button",{onClick:closeSidebar,style:{background:"transparent",border:"none",
+          color:T.muted,fontSize:18,padding:4,cursor:"pointer"}},"✕")
       ),
       h("nav",{style:{flex:1,padding:"10px 8px",display:"flex",flexDirection:"column",gap:2,overflowY:"auto"}},
-        TABS.map(t=>h("button",{key:t.id,onClick:()=>setTab(t.id),style:{
+        TABS.map(t=>h("button",{key:t.id,onClick:()=>{ setTab(t.id); if(isMobile) closeSidebar(); },style:{
           background:tab===t.id?T.goldDim+"30":"transparent",
           border:`1px solid ${tab===t.id?T.gold+"55":"transparent"}`,
           color:tab===t.id?T.gold:T.muted,
           padding:"9px 10px",borderRadius:9,display:"flex",alignItems:"center",
           gap:9,transition:"all .15s",textAlign:"right",width:"100%"}},
           h("span",{style:{fontSize:17,flexShrink:0}},t.icon),
-          sidebar&&h("span",{style:{fontSize:13,fontWeight:tab===t.id?600:400,whiteSpace:"nowrap"}},t.label)
+          (sidebar||isMobile)&&h("span",{style:{fontSize:13,fontWeight:tab===t.id?600:400,whiteSpace:"nowrap"}},t.label)
         ))
       ),
-      h("button",{onClick:()=>setSidebar(p=>!p),style:{background:"transparent",border:"none",color:T.muted,padding:14,borderTop:`1px solid ${T.border}`,fontSize:14}},sidebar?"◀":"▶")
+      // Footer: logout + collapse toggle
+      h("div",{style:{borderTop:`1px solid ${T.border}`,padding:"8px",display:"flex",flexDirection:"column",gap:4}},
+        (sidebar||isMobile)&&h("button",{onClick:onLogout,style:{background:"transparent",border:`1px solid ${T.border}`,
+          color:T.red,padding:"8px 10px",borderRadius:8,fontSize:12,display:"flex",alignItems:"center",
+          gap:8,width:"100%",textAlign:"right"}},"🚪 تسجيل خروج"),
+        !isMobile && h("button",{onClick:toggleSidebar,style:{background:"transparent",border:"none",color:T.muted,padding:8,fontSize:14}},sidebar?"◀ طيّ":"▶")
+      )
     ),
     // Main
-    h("div",{style:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}},
+    h("div",{style:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}},
       // Topbar
-      h("div",{style:{background:T.surface,borderBottom:`1px solid ${T.border}`,
+      h("div",{className:"topbar",style:{background:T.surface,borderBottom:`1px solid ${T.border}`,
         padding:"0 20px",height:56,display:"flex",alignItems:"center",
         justifyContent:"space-between",flexShrink:0,position:"sticky",top:0,zIndex:100}},
-        h("div",{style:{display:"flex",alignItems:"center",gap:10}},
-          h("span",{style:{fontSize:17,fontWeight:800}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:10,minWidth:0,flex:1}},
+          // Hamburger button (mobile only)
+          isMobile && h("button",{onClick:toggleSidebar,"aria-label":"menu",style:{background:"transparent",
+            border:"none",color:T.text,fontSize:22,padding:"4px 8px",cursor:"pointer"}},"☰"),
+          h("span",{className:"topbar-title",style:{fontSize:17,fontWeight:800,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},
             TABS.find(t=>t.id===tab)?.icon," ",TABS.find(t=>t.id===tab)?.label),
           maintenance&&h(Tag,{color:T.red},"🔴 صيانة"),
           isMock&&h(Tag,{color:T.orange},"🟡 بيانات تجريبية")
         ),
-        h("div",{style:{display:"flex",alignItems:"center",gap:10}},
-          !isMock&&h(Tag,{color:T.green,size:11},"🟢 متصل"),
-          h("div",{style:{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.muted}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:10,flexShrink:0}},
+          !isMock&&h("span",{className:"topbar-status"},h(Tag,{color:T.green,size:11},"🟢 متصل")),
+          h("div",{className:"topbar-status",style:{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.muted}},
             h(Dot)," ",ago),
           h(Btn,{variant:"gold",size:"sm",onClick:loadAll},"🔄"),
-          h("div",{style:{background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,
+          !isMobile && h("div",{style:{background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,
             color:T.gold,padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:600}},"🛡️ أدمن")
         )
       ),
       // Content
-      h("div",{style:{flex:1,overflowY:"auto",padding:"22px 18px"}},
+      h("div",{className:"content",style:{flex:1,overflowY:"auto",padding:"22px 18px"}},
         tab==="overview"  &&h(OverviewTab,{ov}),
         tab==="analytics" &&h(AnalyticsTab,{weekly:ov?.weekly||[],heatmap}),
         tab==="books"     &&h(BooksTab,{books}),
@@ -1326,7 +1488,7 @@ function App(){
         tab==="sources"   &&h(SourcesTab,{sources}),
         tab==="queue"     &&h(QueueTab,{queue:ov?.queue,dlq,onToast:showToast,onRefresh:loadAll}),
         tab==="users"     &&h(UsersTab,{prem,banned,allUsers,onToast:showToast,onRefresh:loadAll,onUserClick:setDrillId}),
-        tab==="system"    &&h(SystemTab,{system:ov?.system,maintenance,onToggleMaint:handleToggleMaint,onClearBL:handleClearBL}),
+        tab==="system"    &&h(SystemTab,{system:ov?.system,maintenance,onToggleMaint:handleToggleMaint,onClearBL:handleClearBL,onToast:showToast}),
         tab==="telemetry" &&h(TelemetryTab,{funnel,traces})
       )
     ),
@@ -1347,7 +1509,83 @@ function App(){
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+// ══════════════════════════════════════════════
+// LOGIN SCREEN — يطلب DASHBOARD_SECRET ويحفظه في localStorage
+// ══════════════════════════════════════════════
+function Login({onLogin}){
+  const [val,setVal]=useState("");
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+  const submit=async(e)=>{
+    e?.preventDefault?.();
+    const t=val.trim();
+    if(!t){ setErr("ادخل الـ Dashboard Secret"); return; }
+    setBusy(true); setErr("");
+    try{
+      const r=await fetch(`${API_BASE}/api/admin/overview`,{headers:{Authorization:`Bearer ${t}`}});
+      if(r.status===200){ setToken(t); onLogin(); }
+      else if(r.status===401||r.status===403){ setErr("Secret غير صحيح"); }
+      else if(r.status===503){ setErr("DASHBOARD_SECRET غير مضبوط على السيرفر"); }
+      else{ setErr(`خطأ غير متوقع (HTTP ${r.status})`); }
+    }catch{ setErr("تعذّر الاتصال بالسيرفر"); }
+    finally{ setBusy(false); }
+  };
+  return h("div",{className:"fade-in",style:{
+    display:"flex",alignItems:"center",justifyContent:"center",
+    width:"100%",minHeight:"100vh",background:T.bg,padding:"20px"
+  }},
+    h("form",{onSubmit:submit,style:{
+      width:"100%",maxWidth:380,background:T.card,
+      border:`1px solid ${T.border}`,borderRadius:16,
+      padding:"32px 28px",display:"flex",flexDirection:"column",gap:16
+    }},
+      h("div",{style:{display:"flex",alignItems:"center",gap:12,marginBottom:8}},
+        h("div",{className:"glow",style:{width:46,height:46,borderRadius:12,
+          background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
+          display:"flex",alignItems:"center",justifyContent:"center",fontSize:24}},"📚"),
+        h("div",null,
+          h("div",{style:{color:T.gold,fontWeight:800,fontSize:16}},"خلاصة الكتب"),
+          h("div",{style:{color:T.muted,fontSize:11}},"لوحة الإدارة")
+        )
+      ),
+      h("div",{style:{fontSize:12,color:T.muted,lineHeight:1.6}},
+        "أدخل الـ ",h("span",{className:"mono",style:{color:T.gold}},"DASHBOARD_SECRET")," من ملف ",
+        h("span",{className:"mono",style:{color:T.gold}},".env"),
+        " على السيرفر. يُحفظ في الجهاز فقط — لن يُرسل لأي طرف ثالث."
+      ),
+      h("input",{type:"password",value:val,
+        onChange:e=>setVal(e.target.value),
+        placeholder:"••••••••••••••",
+        autoFocus:true,autoComplete:"off",
+        style:{direction:"ltr",fontFamily:"'IBM Plex Mono',monospace",fontSize:14}}),
+      err&&h("div",{style:{fontSize:12,color:T.red,
+        background:T.redDim+"30",border:`1px solid ${T.redDim}`,
+        padding:"8px 12px",borderRadius:8}},"❌ ",err),
+      h("button",{type:"submit",disabled:busy,style:{
+        background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
+        border:"none",color:"#1a1208",
+        padding:"11px 18px",borderRadius:10,
+        fontSize:14,fontWeight:700,opacity:busy?.6:1,
+        transition:"all .15s"
+      }},busy?"… جاري التحقق":"🔓 دخول")
+    )
+  );
+}
+
+// ══════════════════════════════════════════════
+// ROOT — يبدّل بين Login و App بناءً على وجود token
+// ══════════════════════════════════════════════
+function Root(){
+  const [authed,setAuthed]=useState(()=>!!getToken());
+  useEffect(()=>{
+    setAuthLostHandler(()=>setAuthed(false));
+    return ()=>setAuthLostHandler(null);
+  },[]);
+  if(!authed) return h(Login,{onLogin:()=>setAuthed(true)});
+  return h(App,{onLogout:()=>{ setToken(""); setAuthed(false); }});
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(Root));
 </script>
 </body>
 </html>

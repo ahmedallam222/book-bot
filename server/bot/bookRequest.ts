@@ -4,19 +4,28 @@ import { L } from "./logger.js";
 import { enqueue } from "./queue.js";
 import { isBanned, isAdmin, setLastBook } from "./guards.js";
 import { isRateLimited, isSearchRateLimited, RATE_LIMIT_MAX, SEARCH_RATE_MAX } from "./rateLimit.js";
-import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, buildResetTime } from "./text.js";
+import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, canonicalizeForCache, buildResetTime } from "./text.js";
 import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown, invalidateRecentSearchesCache } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
-import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification } from "./ui.js";
-import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued, buildFailMessage } from "./keyboards.js";
-import { getUserDailyLimit, getUserNote, isPremium } from "./userSettings.js";
+import { hasUninformativeFilename } from "./pdfValidator.js";
+import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
+import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued } from "./keyboards.js";
+import { getUserNote, isPremium, computeDailyLimit } from "./userSettings.js";
 import { redis } from "./redis.js";
-import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS, MISTRAL_NO_STREAK_LIMIT } from "./config.js";
-import { trackSearch, trackDownload, getSourceStats, trackFunnel, trackSourceAttempt, trackSourceMistralReject } from "./analytics.js";
+import {
+  MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY,
+  DAILY_LIMIT, PREMIUM_LIMIT, BANNED_USERS, UNRELIABLE_DOMAINS,
+  MISTRAL_NO_STREAK_LIMIT,
+  MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
+  MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
+  LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
+} from "./config.js";
+import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
+import { react } from "./reactions.js";
 import type { QueueJob } from "./types.js";
 
 // buildResetTime مستوردة من text.ts
@@ -31,12 +40,18 @@ export async function handleBookRequest(
   userId: string,
   bookName: string,
   token: string,
-  userName?: string | null
+  userName?: string | null,
+  userMessageId?: number
 ): Promise<void> {
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
-  let bannedResult: [Error|null, unknown]|undefined;
-  let maintenanceResult: [Error|null, unknown]|undefined;
-  let premiumResult: [Error|null, unknown]|undefined;
+  // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
+  // ندعم انتهاء الاشتراك الصحيح + lazy cleanup. كلهم في نفس الـ pipeline
+  // عشان نحافظ على round-trip واحد. شاهد server/bot/userSettings.ts للتوثيق.
+  let bannedResult:        [Error|null, unknown]|undefined;
+  let maintenanceResult:   [Error|null, unknown]|undefined;
+  let premiumSetResult:    [Error|null, unknown]|undefined;
+  let premiumExpResult:    [Error|null, unknown]|undefined;
+  let premiumManualResult: [Error|null, unknown]|undefined;
   let limitOverrideResult: [Error|null, unknown]|undefined;
   let pipelineOk = false;
 
@@ -45,10 +60,13 @@ export async function handleBookRequest(
       .sismember("bans", userId)
       .get(MAINTENANCE_KEY)
       .sismember(PREMIUM_SET_KEY, userId)
+      .exists(`premium:exp:${userId}`)
+      .exists(`premium:manual:${userId}`)
       .get(`ulimit:${userId}`)
       .exec();
     if (pipelineRes) {
-      [bannedResult, maintenanceResult, premiumResult, limitOverrideResult] =
+      [bannedResult, maintenanceResult, premiumSetResult, premiumExpResult,
+       premiumManualResult, limitOverrideResult] =
         pipelineRes as [Error|null, unknown][];
       pipelineOk = true;
     }
@@ -94,8 +112,20 @@ export async function handleBookRequest(
   }
 
   // ── Daily limit ───────────────────────────────
-  const isPrem     = (premiumResult?.[1] as number) === 1;
-  const limitVal   = limitOverrideResult?.[1] as string | null;
+  // Premium = في الـ Set AND (اشتراك مدفوع ساري OR منحة Admin يدوية)
+  // لو في الـ Set بدون exp ولا manual → اشتراك انتهى → lazy cleanup
+  const inPremiumSet = (premiumSetResult?.[1]    as number) === 1;
+  const hasExp       = (premiumExpResult?.[1]    as number) === 1;
+  const hasManual    = (premiumManualResult?.[1] as number) === 1;
+  const isPrem       = inPremiumSet && (hasExp || hasManual);
+  if (inPremiumSet && !hasExp && !hasManual) {
+    // Stale — اشتراك مدفوع انتهى TTL بتاعه. fire-and-forget cleanup
+    redis.srem(PREMIUM_SET_KEY, userId).catch(() => {});
+    L.info("premium", "Lazy cleanup: removed expired user from set", { userId });
+  }
+  // الـ ULIMIT override جاي من الـ pipeline الأصلي → نحسب الحد بدون أي Redis call إضافي.
+  // قبل الإصلاح: getUserDailyLimit(userId) كانت تعيد استدعاء isPremium + redis.get(ulimit) من تاني.
+  const limitVal     = limitOverrideResult?.[1] as string | null;
   // IMP-1 FIX: parseInt قد يُعيد NaN إذا كانت قيمة Redis تالفة
   // NaN > 0 = false → يُعامَل كـ unlimited → المستخدم لا يُحجب أبداً
   // الحل: إضافة isNaN check مع fallback للقيمة الصحيحة
@@ -119,7 +149,7 @@ export async function handleBookRequest(
 
   // ── Enqueue ───────────────────────────────────
   const priority = isAdmin(userId) ? "high" : isPrem ? "high" : "normal";
-  const result   = await enqueue(userId, chatId, bookName, token, priority, userName);
+  const result   = await enqueue(userId, chatId, bookName, token, priority, userName, userMessageId);
 
   if (!result.ok) {
     if (result.reason === "user_limit") {
@@ -169,13 +199,16 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
   const trace = new RequestTrace(job.id, userId, bookName, job.retries);
   trace.phase("request_started", { book: bookName.slice(0, 50), priority: job.priority });
 
-  // دمج getUserDailyLimit + getDailyDownloadCount في Promise.all — توفير serial round-trip
-  const [dailyLimit, dlCountRaw, isPrem] = await Promise.all([
-    getUserDailyLimit(userId),
-    storage.getDailyDownloadCount(userId).catch(() => 0),
+  // BUG-FIX: قبل ده كان فيه 3 isPremium calls على نفس الـ userId في requesti واحد:
+  //   (1) handleBookRequest pipeline (parent caller)  (2) Promise.all هنا  (3) getUserDailyLimit
+  // الآن نقرا isPrem + ulimit من Redis مرة واحدة هنا، ونحسب dailyLimit بشكل synchronous.
+  const [isPrem, ulimitOverride, dlCountRaw] = await Promise.all([
     isPremium(userId).catch(() => false),
+    redis.get(`ulimit:${userId}`).catch(() => null),
+    storage.getDailyDownloadCount(userId).catch(() => 0),
   ]);
-  const dlCount = dlCountRaw;
+  const dailyLimit = computeDailyLimit(isPrem, ulimitOverride);
+  const dlCount    = dlCountRaw;
 
   if (dailyLimit > 0 && dlCount >= dailyLimit && !isAdmin(userId)) {
     await bot.sendMessage(
@@ -210,6 +243,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
       await deleteMsg(token, chatId, msgId);
+      if (job.userMessageId) react(bot, chatId, job.userMessageId, "🎉").catch(() => {});
       await trace.finish("sent_from_cache");
       trackFunnelOnce(job.id, {
         searchFound:   true,
@@ -221,7 +255,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
       await sendAnnouncement(bot, chatId, userId);
       return;
     }
-    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id);
+    await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
     await sendAnnouncement(bot, chatId, userId);
   } catch (e) {
     L.error("worker", `processBookRequest error`, { userId, book: bookName.slice(0, 50), err: String(e).slice(0, 200) });
@@ -238,12 +272,50 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
 
     await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: kbAfterFail(bookName, []) }).catch(() => {});
 
+    if (job.userMessageId) react(bot, chatId, job.userMessageId, "😱").catch(() => {});
     trace.finish("error").catch(() => {});
     // FIX BUG-7: كان يُعيد throw بعد إرسال رسالة الخطأ للمستخدم
     // هذا يسبب: Worker يُعيد المحاولة → إما يصل الكتاب بدون سياق، أو رسالة خطأ ثانية
     // الحل: لا نُعيد throw — المستخدم أُخبر بالخطأ، الـ job يُكمَل بشكل طبيعي
     // الـ Worker سيستدعي completeJob ويُنقص الـ pending counter
   }
+}
+
+// ── Cache Hit Re-Validation (FIX-WRONG-FILE BUG-3) ──────────────
+//
+// Treat a cache hit as suspect if either:
+//   (a) the cached.bookName tokens overlap < 40% with the requested
+//       bookName tokens (after canonicalization), OR
+//   (b) the cached.sourceUrl filename is opaque AND its filename
+//       relevance to the requested bookName is < 0.10 — i.e. nothing
+//       in the URL signals it's the right book either.
+//
+// We deliberately keep both checks lenient: legitimate cache hits
+// (perfect query match → 100% overlap, score 1.0) always pass.
+function cacheHitMatchesQuery(
+  requestedBook: string,
+  cachedBookName: string,
+  sourceUrl: string,
+): boolean {
+  const reqTokens = canonicalizeForCache(requestedBook)
+    .split(/\s+/).filter((w) => w.length >= 3);
+  const cachedTokens = new Set(
+    canonicalizeForCache(cachedBookName)
+      .split(/\s+/).filter((w) => w.length >= 3),
+  );
+  if (reqTokens.length === 0 || cachedTokens.size === 0) {
+    // not enough signal — let the validator on re-download decide
+    return true;
+  }
+  const matched = reqTokens.filter((w) => cachedTokens.has(w)).length;
+  const overlap = matched / reqTokens.length;
+  if (overlap >= 0.40) return true;
+
+  // Low overlap — only allow if URL filename gives independent signal
+  const filenameScore = sourceUrl ? urlFilenameRelevance(requestedBook, sourceUrl) : 0;
+  if (filenameScore >= 0.40) return true;
+
+  return false;
 }
 
 // ── Cache Serve ───────────────────────────────
@@ -268,6 +340,34 @@ async function serveFromCache(
   }
   if (!cached) return false;
 
+  // FIX-WRONG-FILE (BUG-3): re-validate cache hit before serving.
+  //
+  // Cache writes have anti-poison guards (filename score, opaque URL),
+  // but cache READS were blind: any poisoned entry that slipped through
+  // (or pre-dates a guard) would keep delivering the wrong file to
+  // every subsequent matching query until TTL/manual purge.
+  //
+  // Sanity checks (any failure → treat as miss, fall through to full
+  // search; we keep the entry so a later valid sourceUrl can still
+  // refresh it via the re-cache path below):
+  //   1. cached.bookName (the title we actually delivered last time)
+  //      shares ≥ 40% of tokens with the current bookName, normalized.
+  //   2. cached.sourceUrl filename relevance is acceptable
+  //      (≥ 0.10) OR the URL is non-opaque (so the validator/Mistral
+  //      will catch a mismatch on re-download).
+  //
+  // Both checks are cheap (string ops only). They only run on cache
+  // hit — the common case is no-op (perfect match → score = 1.0).
+  if (!cacheHitMatchesQuery(bookName, cached.bookName, cached.sourceUrl ?? "")) {
+    L.warn("cache", "cache hit looked suspicious — falling through to full search", {
+      query:      bookName.slice(0, 50),
+      cachedName: cached.bookName.slice(0, 50),
+      sourceUrl:  (cached.sourceUrl ?? "").slice(0, 80),
+    });
+    redis.incr("tel:cache:hit_revalidated_skip").catch(() => {});
+    return false;
+  }
+
   if (cached.telegramFileId) {
     try {
       await bot.sendDocument(chatId, cached.telegramFileId, {
@@ -282,7 +382,7 @@ async function serveFromCache(
       ]).catch(() => {});
       logSearch(userId, userName, bookName, true, true, 1);
       invalidateRecentSearchesCache();
-      setLastBook(userId, bookName);
+      setLastBook(userId, bookName).catch(() => {});
       warmRelatedCache(bookName).catch(() => {});
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
       await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
@@ -312,7 +412,7 @@ async function serveFromCache(
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, 1);
         invalidateRecentSearchesCache();
-        setLastBook(userId, bookName);
+        setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
         await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
@@ -337,7 +437,8 @@ async function performFullSearch(
   token: string, userName: string | null | undefined,
   msgId: number, dlCount: number, dailyLimit: number, isPrem: boolean, t0: number,
   trace: RequestTrace,
-  jobId: string
+  jobId: string,
+  userMessageId?: number
 ): Promise<void> {
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
 
@@ -371,6 +472,7 @@ async function performFullSearch(
 
   if (results.length === 0) {
     await deleteMsg(token, chatId, msgId);
+    if (userMessageId) react(bot, chatId, userMessageId, "😢").catch(() => {});
     logSearch(userId, userName, bookName, false, false, 0);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     trackFunnelOnce(jobId, { searchFound: false, verifyChecked: 0, verifyValid: 0, sendMode: null, sendSuccess: false });
@@ -394,21 +496,45 @@ async function performFullSearch(
   const seenPdfUrls   = new Set<string>();
   const seenPageUrls  = new Set<string>();
   const seenDownloadPages = new Set<string>();
+  // url → search-result HTML <title> from Firecrawl. Threaded to
+  // downloadAndSend → validatePdfContent so the validator can title-gate
+  // even on trusted domains and recover the title when PDF /Title is
+  // unreadable. Strip URL-only fallbacks (engine.ts uses url as title
+  // when the page has no <title> tag).
+  const urlSearchTitle = new Map<string, string>();
+  // Count results flagged as paid/protected by classifyAccess() in
+  // engine.ts. When all download attempts fail AND the search returned
+  // ANY paid signals, we tell the user the book is paid rather than
+  // sending the generic "no PDF" message that misleads them.
+  let paidSignalCount = 0;
   for (const r of results) {
+    const cleanTitle = (r.title && !r.title.startsWith("http")) ? r.title : "";
+    if (r.access === "protected_page") paidSignalCount++;
     if (r.directPdfUrl) {
       if (!seenPdfUrls.has(r.directPdfUrl)) {
         seenPdfUrls.add(r.directPdfUrl);
         allPdfUrls.push(r.directPdfUrl);
+      }
+      // Don't overwrite a title from an earlier result for the same URL
+      // — first match wins (typically the highest-scored search hit).
+      if (cleanTitle && !urlSearchTitle.has(r.directPdfUrl)) {
+        urlSearchTitle.set(r.directPdfUrl, cleanTitle);
       }
     } else if (r.url && r.access === "download_page") {
       if (!seenDownloadPages.has(r.url)) {
         seenDownloadPages.add(r.url);
         downloadablePageFallbacks.push(r.url);
       }
+      if (cleanTitle && !urlSearchTitle.has(r.url)) {
+        urlSearchTitle.set(r.url, cleanTitle);
+      }
     } else if (r.url) {
       if (!seenPageUrls.has(r.url)) {
         seenPageUrls.add(r.url);
         pageUrlFallbacks.push(r.url);
+      }
+      if (cleanTitle && !urlSearchTitle.has(r.url)) {
+        urlSearchTitle.set(r.url, cleanTitle);
       }
     }
   }
@@ -452,23 +578,51 @@ async function performFullSearch(
   // الحل: دمج 3 معايير:
   //   (1) صلة اسم الملف بالكتاب المطلوب (الأهم — يمنع إرسال ملف خاطئ)
   //   (2) أداء المصدر التاريخي من analytics
-  //   (3) عقوبة المواقع غير الموثوقة (مثل noor-book.com)
+  //   (3) عقوبة الموثوقية: hard لـ UNRELIABLE_DOMAINS، soft للمصادر
+  //       اللي success rate < LOW_SUCCESS_RATE_PENALTY_THRESHOLD (مثل
+  //       Hindawi 16% أو foulabook 25%) عشان يطلعوا بعد المصادر الأقوى.
   if (validUrls.length > 1) {
+    // Kept inside the multi-URL guard so single-/zero-candidate
+    // requests don't pay for `redis.keys("stats:source:*")` +
+    // N×HGETALL (Devin Review #32 caught this when the init was
+    // briefly hoisted).
+    // نستخدم trustRate (ok / (ok+fail+mistralRejected)) بدل successRate
+    // البسيط (ok / (ok+fail)). الفرق: لو مصدر بيرجع PDFs بنجاح بس Mistral
+    // بيرفضها كلها (يعني search-ranker بياخد wrong-book URLs)، ده fail
+    // فعلي من منظور المستخدم. مثال: Hindawi عنده successRate=27% لكن
+    // trustRate=17% — والـ trustRate هو الإشارة الصحيحة للـ ranker.
     let srcRateMap = new Map<string, number>();
     try {
-      const srcStats = await getSourceStats();
-      srcRateMap = new Map(srcStats.map((s) => [s.domain, s.ok / Math.max(s.ok + s.fail, 1)]));
+      // النسخة الـ cached (30s TTL) عشان كل full-search متعدد المصادر
+      // ما يدفعش تكلفة SCAN + N×HGETALL على Redis. الـ trustRate كميّة
+      // تراكمية فالـ staleness بسيطة لا تؤثر على ترتيب URLs.
+      const srcStats = await getSourceStatsCached();
+      srcRateMap = new Map(srcStats.map((s) => [s.domain, s.trustRate]));
     } catch {}
 
     validUrls.sort((a, b) => {
       const scoreUrl = (url: string): number => {
-        const domain = url.split("/")[2] || "";
+        const domain = sanitizeDomainKey(url.split("/")[2] || "");
         // (1) صلة اسم الملف — 0 لـ 1، وزن 50%
         const filenameScore = urlFilenameRelevance(bookName, url);
         // (2) أداء المصدر التاريخي — 0 لـ 1، وزن 30%
         const sourceRate = srcRateMap.get(domain) ?? 0.5;
-        // (3) عقوبة المواقع غير الموثوقة — وزن 20%
-        const reliablePenalty = UNRELIABLE_DOMAINS.some(d => domain.includes(d)) ? -1 : 1;
+        // (3) عقوبة الموثوقية — وزن 20%
+        //   * UNRELIABLE_DOMAINS (block-list ثابت): -1 (عقوبة قوية ثابتة)
+        //   * Low actual rate (لدينا ≥1 attempt + < threshold): -0.5 (soft)
+        //   * Otherwise: +1 (محايد/إيجابي)
+        let reliablePenalty: number;
+        if (UNRELIABLE_DOMAINS.some(d => domain.includes(d))) {
+          reliablePenalty = -1;
+        } else if (
+          LOW_SUCCESS_RATE_PENALTY_THRESHOLD > 0 &&
+          srcRateMap.has(domain) &&
+          sourceRate < LOW_SUCCESS_RATE_PENALTY_THRESHOLD
+        ) {
+          reliablePenalty = -0.5;
+        } else {
+          reliablePenalty = 1;
+        }
         return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
       };
       return scoreUrl(b) - scoreUrl(a);
@@ -500,33 +654,105 @@ async function performFullSearch(
   // قبل: يُحسَب مرتين (داخل الحلقة + بعدها) — نتيجتان قد تختلفان لو تغيّر المنطق
   let sentFilenameScore = 0.5; // neutral حتى يُضبط بعد التحميل الناجح
 
-  // Mistral early-stop: count consecutive NO verdicts on this query and
-  // skip Mistral for remaining candidates once the streak crosses
-  // MISTRAL_NO_STREAK_LIMIT. Resets on any success. The pdfValidator
-  // will then reject ambiguous candidates without paying for Mistral.
-  let mistralNoStreak = 0;
+  // Mistral early-stop: count consecutive NO verdicts and skip Mistral
+  // for remaining candidates once the streak crosses
+  // MISTRAL_NO_STREAK_LIMIT.
+  //
+  // FIX-WRONG-FILE (NIT-2): the streak is now tracked PER DOMAIN, not
+  // global. Previously, 3 NOs on Hindawi would short-circuit Mistral
+  // for a subsequent (potentially correct) candidate from foulabook,
+  // causing it to be rejected by the local-only fallback. Per-domain
+  // ensures only the same source's repeated bad rankings disable
+  // Mistral, while a different source still gets a fresh evaluation.
+  // The global streak is kept for telemetry only.
+  let globalMistralNoStreak = 0;
+  const mistralNoStreakByDomain = new Map<string, number>();
+
+  // Download attempt accounting (find-to-send loss mitigation).
+  // - `attemptedDownloads` counts URLs we've actually tried (including
+  //   internal retry-after-back-off, which we treat as one attempt).
+  // - `attemptsByDomain` enforces the per-host cap so a low-success
+  //   source can't crowd the loop with all of its URLs while higher-
+  //   ranked alternatives go untried.
+  // See config.ts MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST and
+  // MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN. 0 disables the corresponding cap.
+  let attemptedDownloads = 0;
+  const attemptsByDomain = new Map<string, number>();
+  let globalCapReached = false;
+  let domainCapHits = 0;
 
   try {
     for (const pdfUrl of validUrls) {
-      const dlDomain   = pdfUrl.split("/")[2] || "";
-      const skipMistral = MISTRAL_NO_STREAK_LIMIT > 0 &&
-                          mistralNoStreak >= MISTRAL_NO_STREAK_LIMIT;
-      if (skipMistral) {
-        L.info("bot", "Mistral early-stop active for this request", {
+      const dlDomain   = sanitizeDomainKey(pdfUrl.split("/")[2] || "");
+
+      // Global cap: stop trying entirely. Future URLs are abandoned;
+      // the request falls through to the "links_only" / paid-book
+      // path so the user gets a useful response instead of a timeout.
+      if (
+        MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST > 0 &&
+        attemptedDownloads >= MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST
+      ) {
+        globalCapReached = true;
+        L.info("bot", "global download cap reached — abandoning remaining candidates", {
           book: bookName.slice(0, 50),
-          streak: mistralNoStreak,
+          attempted: attemptedDownloads,
+          remaining: validUrls.length - attemptedDownloads,
+          cap: MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
+        });
+        redis.incr("tel:dl:global_cap_reached").catch(() => {});
+        trace.phase("download_global_cap_reached", {
+          attempted: attemptedDownloads,
+          remaining: validUrls.length - attemptedDownloads,
+        });
+        break;
+      }
+
+      // Per-domain cap: skip this URL but keep iterating so we reach
+      // URLs from other domains. Common case is 5 Hindawi URLs in a
+      // row — historically all 5 got tried; now we stop after 2.
+      const domainAttempts = attemptsByDomain.get(dlDomain) ?? 0;
+      if (
+        MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN > 0 &&
+        dlDomain &&
+        domainAttempts >= MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN
+      ) {
+        domainCapHits++;
+        L.info("bot", "per-domain download cap reached — skipping URL", {
+          book: bookName.slice(0, 50),
+          domain: dlDomain,
+          attempted: domainAttempts,
+          cap: MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
+          url: pdfUrl.slice(0, 80),
+        });
+        redis.incr("tel:dl:per_domain_capped").catch(() => {});
+        continue;
+      }
+
+      attemptsByDomain.set(dlDomain, domainAttempts + 1);
+      attemptedDownloads++;
+
+      const domainStreak = mistralNoStreakByDomain.get(dlDomain) ?? 0;
+      const skipMistral = MISTRAL_NO_STREAK_LIMIT > 0 &&
+                          domainStreak >= MISTRAL_NO_STREAK_LIMIT;
+      if (skipMistral) {
+        L.info("bot", "Mistral early-stop active for this domain", {
+          book: bookName.slice(0, 50),
+          domain: dlDomain,
+          domainStreak,
+          globalStreak: globalMistralNoStreak,
           url: pdfUrl.slice(0, 80),
         });
       }
       trace.phase("download_started", { url: pdfUrl.slice(0, 80), domain: dlDomain });
-      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
+      const srcTitle = urlSearchTitle.get(pdfUrl) ?? "";
+      let result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral, srcTitle);
       // BUG FIX: كان يُعيد المحاولة حتى عند rejectedContent=true
       // عندما يُرفض الـ PDF بسبب عدم تطابق المحتوى، إعادة التحميل ستُعطي نفس الـ bytes
       // → نفس النتيجة → هدر 90 ثانية + استهلاك bandwidth بلا فائدة
       // الحل: تجاوز الـ retry إذا كان الرفض بسبب المحتوى أو إذا كان permanent
       if (!result.ok && !result.permanent && !result.rejectedContent) {
         await sleep(500); // M4 FIX: 500ms كافٍ للـ back-off — 2000ms كانت تعطّل الـ worker
-        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral);
+        result = await downloadAndSend(bot, chatId, pdfUrl, bookName, token, false, skipMistral, srcTitle);
       }
       if (!result.ok) {
         // BUG FIX: Mistral content-mismatch ≠ source failure.
@@ -547,16 +773,18 @@ async function performFullSearch(
       // heuristic-only rejects don't count toward the streak (they're not
       // signals about Mistral disagreeing with the search ranker).
       if (result.mistralRejected) {
-        mistralNoStreak++;
+        globalMistralNoStreak++;
+        mistralNoStreakByDomain.set(dlDomain, domainStreak + 1);
       } else if (result.ok) {
-        mistralNoStreak = 0;
+        globalMistralNoStreak = 0;
+        mistralNoStreakByDomain.clear();
       }
       if (result.ok) {
         sent          = true;
         sentFileId    = result.fileId;
         sentSizeMB    = result.sizeMB;
         sentSourceUrl = pdfUrl;
-        sentDomain    = pdfUrl.split("/")[2] || "";
+        sentDomain    = dlDomain; // already sanitized for stat key consistency
         sentSendMode = result.sendMode ?? "local";
 
         // FIX-WRONG-FILE: تحقق من صلة الملف المُرسَل بالكتاب المطلوب
@@ -577,12 +805,25 @@ async function performFullSearch(
           ms:       Date.now() - t0,
           filenameScore: sentFilenameScore,
         });
-        // لا نُضيف للكاش إذا كان الملف مشبوهاً
-        if (sentFileId && !isSuspectFile) {
+        // لا نُضيف للكاش إذا كان الملف مشبوهاً.
+        // PR #33: نرفض كذلك الـ cache write للروابط بأسماء ملفات معتمة
+        // (digit-only — مثل Hindawi /books/<id>.pdf). لو الـ validator
+        // قبلهم بسبب bypass، نضمن أن الـ entry ما تتخزن لأن الـ cache
+        // hit بيرسل الـ telegramFileId مباشرة بدون أيّ re-validation —
+        // فلو كان غلط، يتسبب في "wrong-file delivered to many users"
+        // (10 entries مسممة شُوهدت في production 2026-05-03).
+        const opaqueUrl = hasUninformativeFilename(pdfUrl);
+        if (sentFileId && !isSuspectFile && !opaqueUrl) {
           storage.cacheBook({
             bookQuery: bookName, bookQueryNormalized: normalizeForCache(bookName),
             telegramFileId: sentFileId, fileName: `${bookName}.pdf`, bookName, sourceUrl: pdfUrl,
           }).catch(() => {});
+        } else if (sentFileId && opaqueUrl) {
+          redis.incr("tel:cache:opaque_url_skipped").catch(() => {});
+          L.info("cache", "Skipping cache write — opaque source URL (digit-only filename)", {
+            book: bookName.slice(0, 50),
+            url:  pdfUrl.slice(0, 80),
+          });
         }
         Promise.all([
           storage.incrementDailyDownload(userId),
@@ -590,7 +831,7 @@ async function performFullSearch(
         ]).catch(() => {});
         logSearch(userId, userName, bookName, true, true, results.length);
         invalidateRecentSearchesCache();
-        setLastBook(userId, bookName);
+        setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, false, sentDomain, Date.now() - t0).catch(() => {});
         break;
@@ -611,6 +852,7 @@ async function performFullSearch(
     const isSuspectFile = sentFilenameScore < 0.05;
 
     await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
+    if (userMessageId) react(bot, chatId, userMessageId, "🎉").catch(() => {});
     // Telemetry + Funnel
     const dlOutcome: import("./telemetry.js").RequestOutcome =
       sentSendMode === "direct" ? "sent_direct" : "sent_local";
@@ -623,6 +865,7 @@ async function performFullSearch(
       sendSuccess:   true,
     });
   } else {
+    if (userMessageId) react(bot, chatId, userMessageId, results.length > 0 ? "🤔" : "😢").catch(() => {});
     logSearch(userId, userName, bookName, results.length > 0, false, results.length);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     await trace.finish(results.length > 0 ? "links_only" : "no_results").catch(() => {});
@@ -633,9 +876,43 @@ async function performFullSearch(
       sendMode:      null,
       sendSuccess:   false,
     });
-    await bot.sendMessage(chatId, buildFailMessage(bookName, results, 0), {
+    // Telemetry: "found something but couldn't deliver". This is the
+    // metric the 2026-05-03 audit flagged at 44%; tracking it lets
+    // operators measure the impact of the download-cap mitigations.
+    if (results.length > 0) {
+      redis.incr("tel:dl:found_no_send").catch(() => {});
+      L.warn("bot", "found_no_send — search returned results but no PDF was delivered", {
+        book: bookName.slice(0, 50),
+        results: results.length,
+        candidates: validUrls.length,
+        attempted: attemptedDownloads,
+        domainCapHits,
+        globalCapReached,
+      });
+    }
+    // FIX-PAID-BOOK-MSG: لما ما يتسلّمش PDF فعلاً (zero successful deliveries)
+    // نبعت رسالة قاطعة "غير متوفر مجاناً" بدل قائمة معاينة من كتب خطأ.
+    // قائمة المعاينة القديمة كانت بتعرض روابط Hindawi/archive.org لكتب خطأ
+    // (نفس النطاق، عنوان مختلف) — كانت بتربك المستخدم بدل ما تساعده.
+    // النص الموحَّد (`buildPaidBookMessage`) يغطي 3 احتمالات: مدفوع / قراءة فقط
+    // على موقع الناشر / غير منشور رقمياً بعد، فهو مناسب للحالتين.
+    // نحتفظ بفصل العدّاد ليعرف الـ admin هل البحث وجد إشارات paid صريحة أم لا.
+    if (paidSignalCount > 0) {
+      redis.incr("tel:dl:fail_paid_signal").catch(() => {});
+      L.info("bot", "Sending fail message — paid signals present", {
+        book: bookName.slice(0, 50),
+        paidSignalCount,
+      });
+    } else {
+      redis.incr("tel:dl:fail_no_signal").catch(() => {});
+      L.info("bot", "Sending fail message — no paid signals, all candidates failed", {
+        book: bookName.slice(0, 50),
+        results: results.length,
+      });
+    }
+    await bot.sendMessage(chatId, buildPaidBookMessage(bookName), {
       parse_mode: "Markdown", disable_web_page_preview: true,
-      reply_markup: kbAfterFail(bookName, results, 0),
+      reply_markup: kbNoResults(bookName),
     });
   }
 }
