@@ -1198,6 +1198,44 @@ export async function validatePdfContent(
     };
   }
 
+  // ── Filename-trusted bypass — restored from PR #14 (5ada9e3) ─────────
+  // Curated content libraries (archive.org, bookleaks.com, book-shadow.com)
+  // serve real PDFs but also serve unrelated books, so we only short-circuit
+  // Mistral when the filename has high overlap with the requested book name.
+  // Falls through to Mistral otherwise, so wrong-book candidates from these
+  // sources still get vetted.
+  //
+  // History: PR #14 (5ada9e3, "feat(pdfValidator): bypass Mistral on
+  // filename-trusted domains when filename score is high") added this
+  // bypass alongside `isFilenameTrustedDomain`/`MISTRAL_BYPASS_FILENAME_THRESHOLD`.
+  // The bypass *call site* was lost during the merge resolution that
+  // brought in the parallel "Mistral early-stop" PR; the helper function
+  // and config constants survived but were unused (dead code) from then
+  // until this commit. Restoring closes the unintended regression — saves
+  // the paid Mistral round-trip on PDFs the URL itself already identifies
+  // (most common case: archive.org slug-named files for Arabic queries
+  // where wordOverlapScore is 0 due to language mismatch).
+  if (pdfUrl && isFilenameTrustedDomain(pdfUrl)) {
+    const fnScore = urlFilenameRelevance(bookName, pdfUrl);
+    if (fnScore >= MISTRAL_BYPASS_FILENAME_THRESHOLD) {
+      redis.incr(TEL_ACCEPTED).catch(() => {});
+      redis.incr("tel:pdf:filename_trusted_bypass").catch(() => {});
+      L.info("pdfValidator", "filename_trusted_bypass — accepted without Mistral", {
+        book: bookName.slice(0, 50),
+        url: pdfUrl.slice(0, 80),
+        filenameScore: fnScore.toFixed(2),
+        metaTitle: effectiveMetaTitle.slice(0, 60),
+      });
+      return {
+        accepted: true,
+        score: Math.max(score, fnScore),
+        event: "candidate_accepted_title_match",
+        mistralUsed: false,
+        metaTitle: effectiveMetaTitle,
+      };
+    }
+  }
+
   // ── منطقة غامضة → Mistral ───────────────────────────
   redis.incr(TEL_MISTRAL).catch(() => {});
   L.info("pdfValidator", "Ambiguous score — delegating to Mistral", {

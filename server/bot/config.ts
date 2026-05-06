@@ -266,11 +266,21 @@ export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
 ];
 
 // Above this filename-relevance score, a FILENAME_TRUSTED domain
-// short-circuits the Mistral call. 0.5 means "≥ half of the book's
-// content words appear in the filename" — strong evidence the source
-// indexed the right title.
+// short-circuits the Mistral call. Default 0.6 means "> half of the
+// book's content words appear in the filename" — strong evidence the
+// source indexed the right title.
+//
+// Why not 0.5: short Arabic queries (2 content words) where one is a
+// generic common prefix often produce 0.5 against a *different* book
+// that shares that prefix. Example: "العقيدة الواسطية" (Ibn Taymiyyah's
+// creed treatise) scoring 0.5 against `archive.org/.../العقيدة-السفارينية.pdf`
+// (al-Saffarini's creed treatise) — both share "العقيدة" but the books
+// are unrelated. Bumping to 0.6 forces ≥ 2/3 word match for 3-word
+// queries and full match for 2-word queries; bypass still triggers for
+// ALL the canonical strong-match cases (English "atomic-habits", Arabic
+// exact slug "كافكا-على-الشاطئ", etc.) since they hit ≥ 0.67 or 1.0.
 export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
-  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.5",
+  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.6",
 );
 
 // Minimum filename-relevance for the TRUSTED_PDF_DOMAINS bypass branch
