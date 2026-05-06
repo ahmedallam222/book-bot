@@ -48,3 +48,19 @@ export async function clearReaction(
     await (bot as any).setMessageReaction(chatId, msgId, { reaction: [] });
   } catch { /* swallow */ }
 }
+
+/**
+ * يختار emoji عشوائي من pool ويطبّقه. fire-and-forget. يُستخدَم
+ * لتنويع تفاعلات البوت (بدل تكرار 🎉 لكل نجاح، نختار من pool
+ * متنوّع: 🎉 🔥 🤩 🥳 ❤️ ⚡ ...). pool فارغ → no-op آمن.
+ */
+export async function reactRandom(
+  bot:    TelegramBot,
+  chatId: number | string,
+  msgId:  number,
+  pool:   readonly string[],
+): Promise<void> {
+  if (!msgId || pool.length === 0) return;
+  const emoji = pool[Math.floor(Math.random() * pool.length)];
+  return react(bot, chatId, msgId, emoji);
+}

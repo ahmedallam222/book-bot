@@ -2,7 +2,8 @@ import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
 import { isAdmin, getLastBook, banUser, unbanUser } from "./guards.js";
 import { handleBookRequest } from "./bookRequest.js";
-import { react } from "./reactions.js";
+import { react, reactRandom } from "./reactions.js";
+import { REACTION_RECEIVED } from "./uiVariants.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
@@ -111,7 +112,7 @@ export function registerCommands(
         return;
       }
     }
-    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    reactRandom(bot, chatId, msg.message_id, REACTION_RECEIVED).catch(() => {});
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
     const wantsSummary = detectSummaryIntent(bookName);
     const parsedName = await parseBookName(bookName);
@@ -251,7 +252,7 @@ export function registerCommands(
     await bot.sendMessage(chatId,
       `🔄 *إعادة تحميل:*\n_"${escMd(lastBook.slice(0,50))}"_`,
       { parse_mode: "Markdown" }).catch(() => {});
-    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    reactRandom(bot, chatId, msg.message_id, REACTION_RECEIVED).catch(() => {});
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
     await handleBookRequest(bot, chatId, userId, lastBook, token, username, msg.message_id);
   });
@@ -669,7 +670,7 @@ export function registerMessageHandler(
     }
 
     // 👀 reaction فوري على رسالة المستخدم — يحس أن البوت "شاف" الطلب
-    react(bot, chatId, msg.message_id, "👀").catch(() => {});
+    reactRandom(bot, chatId, msg.message_id, REACTION_RECEIVED).catch(() => {});
 
     // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
