@@ -446,6 +446,45 @@ export async function getSourceStatsCached(): Promise<SourceStat[]> {
   return stats;
 }
 
+// Re-orders the provided sources by recent trustRate (ok / total_with_rejects)
+// over the rolling stats window. Sources whose rolling sample size is below
+// `minSamples` keep their static priority — protects new or quiet sources
+// from being promoted/demoted by a 1-2-attempt sample. The returned array is
+// a new Array<T>; the input is not mutated.
+//
+// Tie-breaking: equal trustRate (or both unranked) → static `priority` order.
+//
+// Generic over T extends { domain: string; priority: number } so callers can
+// pass `SourceConfig` directly without re-mapping.
+export function rankSourcesByTrust<T extends { domain: string; priority: number }>(
+  sources:    readonly T[],
+  stats:      readonly SourceStat[],
+  minSamples: number,
+): T[] {
+  // domain → { trust, samples }. Domains absent from stats stay unranked.
+  const trustMap = new Map<string, { trust: number; samples: number }>();
+  for (const s of stats) {
+    trustMap.set(s.domain, { trust: s.trustRate, samples: s.totalWithRejects });
+  }
+  const ranked = (s: T): number | null => {
+    const entry = trustMap.get(s.domain);
+    if (!entry) return null;
+    if (minSamples > 0 && entry.samples < minSamples) return null;
+    return entry.trust;
+  };
+  return [...sources].sort((a, b) => {
+    const ra = ranked(a);
+    const rb = ranked(b);
+    if (ra !== null && rb !== null) {
+      if (ra !== rb) return rb - ra;       // higher trustRate first
+      return a.priority - b.priority;       // tiebreak: static priority
+    }
+    if (ra !== null) return -1;             // ranked sources before unranked
+    if (rb !== null) return 1;
+    return a.priority - b.priority;         // both unranked: static priority
+  });
+}
+
 // Combines auto-disable (both tiers) + manual override. This is the
 // single source of truth for `searchAllSources` filtering.
 export async function getAutoDisabledSourceDomains(): Promise<Set<string>> {
