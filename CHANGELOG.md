@@ -7,6 +7,50 @@
 
 ---
 
+## [31.10.0] — 2026-05-05
+
+### ♻️Restored: filename-trusted Mistral bypass (PR #14 regression)
+
+**Bug** — `isFilenameTrustedDomain()` و`MISTRAL_BYPASS_FILENAME_THRESHOLD` كانا
+معرَّفَين في `pdfValidator.ts` و`config.ts` لكن **لا يُستدعَيا من أي مكان**.
+المنطق الأصلي من PR #14 (5ada9e3, "feat(pdfValidator): bypass Mistral on
+filename-trusted domains when filename score is high") اللي كان بيتخطى Mistral
+على مكتبات curated مثل archive.org / bookleaks.com / book-shadow.com لما اسم
+الملف يطابق طلب المستخدم بدقة عالية، **سقط أثناء حل تعارض merge** عند دمج
+PR موازٍ ("Mistral early-stop"). الدالة الـ helper والـ config بقوا dead code
+من حينها.
+
+#### الأثر قبل الإصلاح
+كل candidate من archive.org بـ slug name مطابق (e.g.
+`archive.org/download/atomic-habits-ar/atomic-habits-ar.pdf` لطلب
+"atomic habits") كان يدفع رحلة Mistral كاملة (~3-5 ثانية + تكلفة API)
+رغم إن الـ URL وحده يثبت إن الكتاب صحيح. الـ side-effect كمان: بعض
+حالات false-negative من Mistral على slugs واضحة كانت ترفض كتب صحيحة.
+
+#### الإصلاح
+1. **استعادة الـ call site** في `pdfValidator.ts` قبل الـ Mistral call:
+   لما `isFilenameTrustedDomain(pdfUrl)` و `urlFilenameRelevance(...) >=
+   MISTRAL_BYPASS_FILENAME_THRESHOLD`، يقبل مباشرة بدون Mistral.
+2. **رفع threshold الافتراضي 0.5 → 0.6** كحماية من false-positives على
+   استعلامات عربية قصيرة بكلمة مشتركة شائعة:
+   - "العقيدة الواسطية" (لابن تيمية) كان يطابق بـ score 0.5 ضد
+     `archive.org/.../العقيدة-السفارينية.pdf` (للسفاريني — كتاب مختلف
+     تماماً) → كان bypass يطلق ويسلم الكتاب الخطأ. مع 0.6 لازم يكون
+     2/3 على الأقل من كلمات الاستعلام موجودة في اسم الملف.
+   - الحالات الكلاسيكية لما PR #14 صُمم لها ("atomic-habits", arabic-book-name
+     ، "كافكا-على-الشاطئ") تنتج score ≥ 0.67 أو 1.0 → لسه bypass يطلق.
+
+#### counter جديد
+- `tel:pdf:filename_trusted_bypass` — يَعُدّ الحالات اللي bypass فيها وفّر
+  Mistral call. للمراقبة وتعديل الـ threshold لو لزم.
+
+#### اختبار
+- 14 deterministic probes (`test-filename-trusted-bypass.mjs`) تشمل:
+  bundle markers، الـ trigger cases الإيجابية، الـ wrong-book guards،
+  وعزل النطاق (untrusted domains لا تتخطى أبداً).
+
+---
+
 ## [31.9.1] — 2026-05-05
 
 ### 🔒 Security — pre_checkout_query validation
