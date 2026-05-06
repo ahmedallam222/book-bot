@@ -25,7 +25,7 @@ import {
   SUMMARY_DAILY_LIMIT_FREE,
   SUMMARY_DAILY_LIMIT_GLOBAL,
 } from "./config.js";
-import { normalizeForCache, cairoDateString } from "./text.js";
+import { normalizeForCache, canonicalizeForCache, cairoDateString } from "./text.js";
 import { runFailover } from "./aiProviders/registry.js";
 import { fetchWikipediaContext } from "./wikipedia.js";
 import { PROVIDER_MAX_PDF_BYTES } from "./aiProviders/types.js";
@@ -52,8 +52,17 @@ export class GlobalSummaryLimitError extends Error {
   }
 }
 
+// Audit 2026-05-04 (Bug B): swapped from `normalizeForCache` to
+// `canonicalizeForCache` for parity with the rest of the bot.
+// `normalizeForCache` only Arabic-letter-folds; it does NOT strip noise
+// words ("تحميل", "pdf", "مجاني") or normalize whitespace, so phrasings
+// of the same book ("أرض زيكولا" vs "تحميل أرض زيكولا" vs "ارض زيكولا
+// pdf") fragmented into separate Redis keys → 3+ paid Gemini calls per
+// popular book instead of 1 cache hit. The inflight summary lock and
+// the DB cache key both already use `canonicalizeForCache`; this gets
+// the response cache aligned with them.
 function cacheKey(bookName: string): string {
-  return CACHE_PREFIX + (normalizeForCache(bookName) || bookName).slice(0, 200);
+  return CACHE_PREFIX + (canonicalizeForCache(bookName) || bookName).slice(0, 200);
 }
 
 function todayKey(): string {

@@ -9,6 +9,7 @@ import {
   TIMEOUT_DOWNLOAD, TIMEOUT_TELEGRAM, TIMEOUT_UPLOAD,
 } from "./config.js";
 import { L } from "./logger.js";
+import { redis } from "./redis.js";
 import { isBlacklisted, recordUrlFailure, recordUrlSuccess } from "./blacklist.js";
 import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
 import { escMd, urlFilenameRelevance } from "./text.js";
@@ -495,6 +496,11 @@ export async function downloadAndSend(
       url: pdfUrl.slice(0, 80),
       book: bookName.slice(0, 50),
     });
+    // Audit 2026-05-04 (Bug E): added telemetry counter — observability
+    // gap parity with `tel:cache:opaque_url_skipped` and
+    // `tel:cache:hit_revalidated_skip`. Lets ops grep how often the
+    // direct-send safety gate kicks in without trawling logs.
+    redis.incr("tel:dl:direct_send_skipped").catch(() => {});
   }
   if (!shouldSkipDirect(pdfUrl) && !directUnsafe) {
     const preValid = await preValidatePdfUrl(pdfUrl);
