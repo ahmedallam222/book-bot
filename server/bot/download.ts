@@ -416,7 +416,14 @@ async function expandMktbtypdfUrl(url: string): Promise<string | null> {
     if (!r.ok) return null;
 
     const html = (await r.text().catch(() => "")).slice(0, 200_000);
-    const m = html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i);
+    // FIX: regex قديم كان بيتطلب `external=1` صريحاً، لكن بعض الكتب الـ landing
+    // page بترجع `/download?id=190` بدون أي query إضافي (مثلاً "شيفرة دافنشي").
+    // الـ resolver لازم يستخرج الـ id من أي `/download?id=N` link، وبعدها نضيف
+    // إحنا `external=1` للـ direct URL — السيرفر بيتعامل معاه سواء كان موجود
+    // في الـ landing HTML أو لأ.
+    const m =
+      html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i) ??
+      html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)/i);
     if (!m) return null;
 
     // Trailing slash يتجنّب الـ 301 hop الأول من /download إلى /download/.
