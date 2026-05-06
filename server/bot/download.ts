@@ -416,21 +416,28 @@ async function expandMktbtypdfUrl(url: string): Promise<string | null> {
     if (!r.ok) return null;
 
     const html = (await r.text().catch(() => "")).slice(0, 200_000);
-    // FIX: regex قديم كان بيتطلب `external=1` صريحاً، لكن بعض الكتب الـ landing
-    // page بترجع `/download?id=190` بدون أي query إضافي (مثلاً "شيفرة دافنشي").
-    // الـ resolver لازم يستخرج الـ id من أي `/download?id=N` link، وبعدها نضيف
-    // إحنا `external=1` للـ direct URL — السيرفر بيتعامل معاه سواء كان موجود
-    // في الـ landing HTML أو لأ.
-    const m =
-      html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i) ??
-      html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)/i);
-    if (!m) return null;
+    // FIX: mktbtypdf بيخدّم الـ PDFs من backend-ين مختلفين:
+    //   1. `?id=N&external=1`  → redirect لـ Google Drive (مثلاً "أرض زيكولا" id=662)
+    //   2. `?id=N` (بدون external) → ملف محلي على نفس الـ host (مثلاً "شيفرة
+    //      دافنشي" id=190)
+    // كل كتاب بيظهر في الـ landing بـ form واحد بس. لو طلبنا `external=1` على
+    // كتاب محلي بنرجع "Book file not found"، والعكس صحيح.
+    // الحل: خذ الرابط من الـ HTML كما هو (نفضّل external لو موجود لأن CDN
+    // بيكون أسرع، نفـ fallback للـ bare لو مش موجود).
+    const extM =
+      html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i);
+    const bareM =
+      extM ?? html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)/i);
+    if (!bareM) return null;
 
     // Trailing slash يتجنّب الـ 301 hop الأول من /download إلى /download/.
-    const directUrl = `https://mktbtypdf.com/download/?id=${m[1]}&external=1`;
+    const directUrl = extM
+      ? `https://mktbtypdf.com/download/?id=${bareM[1]}&external=1`
+      : `https://mktbtypdf.com/download/?id=${bareM[1]}`;
     L.info("download", "Resolved mktbtypdf landing → direct PDF", {
       landing: url.slice(0, 80),
-      id:      m[1],
+      id:      bareM[1],
+      external: !!extM,
     });
     return directUrl;
   } catch (e) {
