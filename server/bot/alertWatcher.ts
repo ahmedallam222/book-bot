@@ -3,6 +3,7 @@ import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import { getQueueStats } from "./queue.js";
 import { getDailyStats } from "./analytics.js";
+import { runDailyDigest } from "./dailyDigest.js";
 import {
   FC_QUOTA_EXCEEDED_KEY,
   FC_RATE_LIMITED_KEY,
@@ -16,6 +17,7 @@ import {
 //   • DLQ ≥ DLQ_ALERT_THRESHOLD        → تنبيه
 //   • نسبة النجاح < SUCCESS_THRESHOLD  → تنبيه
 //   • Firecrawl quota exceeded          → تنبيه (مرة واحدة/يوم)
+//   • Daily digest at DAILY_DIGEST_HOUR_CAIRO → ملخص يومي للأدمن
 // ══════════════════════════════════════════════
 
 const DLQ_ALERT_THRESHOLD     = 20;
@@ -114,7 +116,14 @@ async function runCheck(bot: TelegramBot): Promise<void> {
     }
   }
 
-  // ── 4. فحص Firecrawl rate limit ───────────────
+  // ── 4. Daily digest (gated on Cairo hour + 23h SET-NX lock) ──
+  // Runs at most once per day; cheap no-op outside the configured hour.
+  // Errors are logged but don't break the rest of runCheck.
+  await runDailyDigest(bot).catch((e) =>
+    L.error("alerts", "Daily digest error", { err: String(e).slice(0, 100) }),
+  );
+
+  // ── 5. فحص Firecrawl rate limit ───────────────
   if (fcRate) {
     // cooldown أقصر لأن rate limit مؤقت (120 ثانية) — تنبيه كل 10 دقائق كافٍ
     // IMP-6 FIX: TTL=700 > cooldown(600s) → منع تنبيهات مكررة عند انتهاء الـ key قبل الـ cooldown
