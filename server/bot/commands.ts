@@ -7,6 +7,7 @@ import { REACTION_RECEIVED } from "./uiVariants.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
+import { runRetryPass, listPendingFailures } from "./failureRetry.js";
 import { cancelUserJobs, getQueueStats } from "./queue.js";
 import { kbMain } from "./keyboards.js";
 import { buildWelcome } from "./admin.js";
@@ -342,6 +343,46 @@ export function registerCommands(
       return;
     }
     await sendAdminPanel(bot, chatId);
+  });
+
+  // ── /retry_failures ───────────────────────────
+  // إدمن trigger يدوي لعامل auto-retry. يعرض عدد الفشل
+  // المخزّن ثم يشغل pass جديد ويبعث counters للإدمن.
+  bot.onText(/^\/retry_failures$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) {
+      await bot.sendMessage(chatId, "🚫 للمشرفين فقط.").catch(() => {});
+      return;
+    }
+    try {
+      const pending = await listPendingFailures(100);
+      const ack = await bot.sendMessage(
+        chatId,
+        `🔄 *إعادة محاولة الفشل...*\n\n` +
+        `داخل الطابور: ${pending.length} فشل مخزّن\n` +
+        `جارٍ تشغيل pass — ستعرف النتيجة خلال دقيقة أو اثنتين.`,
+        { parse_mode: "Markdown" },
+      );
+      L.adminAction(userId, "trigger /retry_failures");
+      const result = await runRetryPass(bot, token, { triggeredBy: "admin", limit: 50 });
+      await bot.editMessageText(
+        `🔄 *نتيجة إعادة المحاولة*\n\n` +
+        `📊 المفحوص: *${result.scanned}*\n` +
+        `✅ التسليم الناجح: *${result.delivered}*\n` +
+        `🔁 المحاولة: *${result.attempted}*\n` +
+        `⏳ في cooldown: *${result.cooldown}*\n` +
+        `🗑 منتهٍ/محظور: *${result.expired}*\n` +
+        `⚠️ أخطاء: *${result.errors}*`,
+        {
+          chat_id:    chatId,
+          message_id: ack.message_id,
+          parse_mode: "Markdown",
+        },
+      );
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ خطأ: \`${escMd(String(e).slice(0, 200))}\``, { parse_mode: "Markdown" }).catch(() => {});
+    }
   });
 
   // ══════════════════════════════════════════════
