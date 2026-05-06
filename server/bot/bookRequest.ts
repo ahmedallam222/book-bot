@@ -291,7 +291,14 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     else if (err.includes("too large") || err.includes("file_size"))
       msg = "📦 *الملف كبير جداً* (أكثر من 50 MB).";
 
-    await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: kbAfterFail(bookName, []) }).catch(() => {});
+    await bot.sendMessage(chatId, msg, {
+      parse_mode:   "Markdown",
+      reply_markup: kbAfterFail(bookName, []),
+      // Reply-quote so the user knows which request errored (groups).
+      ...(job.userMessageId
+        ? { reply_to_message_id: job.userMessageId, allow_sending_without_reply: true }
+        : {}),
+    }).catch(() => {});
 
     if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_ERROR).catch(() => {});
     trace.finish("error").catch(() => {});
@@ -499,9 +506,22 @@ async function performFullSearch(
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     trackFunnelOnce(jobId, { searchFound: false, verifyChecked: 0, verifyValid: 0, sendMode: null, sendSuccess: false });
     await trace.finish("no_results");
-    await bot.sendMessage(chatId, await buildNoResultMessage(bookName), {
-      parse_mode: "Markdown", reply_markup: kbNoResults(bookName),
-    });
+    await bot.sendMessage(
+      chatId,
+      await buildNoResultMessage(bookName, /* apologetic */ true),
+      {
+        parse_mode:   "Markdown",
+        reply_markup: kbNoResults(bookName),
+        // Reply-quote the user's original message so the failure is
+        // attributed to them. In groups this surfaces as a quoted reply
+        // (effective @mention); in private chats it's a polite anchor.
+        // allow_sending_without_reply guards against the user having
+        // deleted their original message.
+        ...(userMessageId
+          ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
+          : {}),
+      },
+    );
     return { sent: false };
   }
 
@@ -664,6 +684,68 @@ async function performFullSearch(
         bestUrl: validUrls[0].slice(0, 80),
         score: bestFilenameScore.toFixed(2),
       });
+    }
+  }
+
+  // ── RESCUE-LOW-RELEVANCE: augment with download_page fallbacks ──
+  // BUG (real prod failure for "في قلبي أنثى عبرية" / Khawla Hamdi):
+  // Firecrawl returned 20 results. Only 1 had a directly extractable
+  // PDF link — a junk scholar.archive.org wayback URL pointing to an
+  // English academic paper *about* the novel, not the novel itself.
+  // The other 19 included multiple high-relevance ketabpedia /
+  // foulabook / noor-book download pages that were all dropped
+  // because validUrls.length > 0 (the existing fallback chain only
+  // uses downloadablePageFallbacks when validUrls AND uniquePdfs are
+  // both empty). The user got a generic "لا أملك نتيجة موثوقة"
+  // for a bestseller available on every Arabic book site.
+  //
+  // Fix: when the top PDF candidate has weak filename relevance to
+  // the book name (URL- or title-based), append up to 3 download_page
+  // fallbacks whose title strongly matches the book. download.ts
+  // already knows how to extract a PDF from a download_page (it does
+  // exactly that in the no-PDF fallback path above); we just give it
+  // more shots before declaring failure.
+  const RESCUE_BEST_PDF_THRESHOLD = 0.30;
+  const RESCUE_FALLBACK_THRESHOLD = 0.50;
+  const RESCUE_MAX_FALLBACKS      = 3;
+  if (
+    validUrls.length > 0 &&
+    downloadablePageFallbacks.length > 0
+  ) {
+    // URL-based score is fragile for trailing-slash URLs (path's
+    // last segment is empty); fall back to title-based scoring using
+    // the search-result <title> we already captured. Same trick as
+    // engine.ts's scoreResult: synthesize a fake URL from the title
+    // so we can reuse urlFilenameRelevance for word-overlap math.
+    const scoreWithTitleFallback = (u: string): number => {
+      const urlScore = urlFilenameRelevance(bookName, u);
+      const t = urlSearchTitle.get(u);
+      if (!t) return urlScore;
+      const titleAsUrl = `https://x/${encodeURIComponent(t)}.pdf`;
+      return Math.max(urlScore, urlFilenameRelevance(bookName, titleAsUrl));
+    };
+
+    const bestPdfScore = scoreWithTitleFallback(validUrls[0]);
+    if (bestPdfScore < RESCUE_BEST_PDF_THRESHOLD) {
+      const augmented = [...new Set(downloadablePageFallbacks)]
+        .filter((u) => !validUrls.includes(u))
+        .map((u) => ({ url: u, score: scoreWithTitleFallback(u) }))
+        .filter(({ score }) => score >= RESCUE_FALLBACK_THRESHOLD)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, RESCUE_MAX_FALLBACKS);
+      if (augmented.length > 0) {
+        L.info(
+          "bot",
+          `rescue_low_relevance — augmenting ${validUrls.length} PDF candidate(s) with ${augmented.length} download_page fallback(s)`,
+          {
+            book:           bookName.slice(0, 50),
+            bestPdfScore:   bestPdfScore.toFixed(2),
+            fallbackScores: augmented.map((a) => a.score.toFixed(2)),
+          },
+        );
+        validUrls.push(...augmented.map((a) => a.url));
+        redis.incr("tel:dl:rescue_augmented").catch(() => {});
+      }
     }
   }
 
@@ -950,12 +1032,17 @@ async function performFullSearch(
     }
 
     const failMsg = showPaidBookMessage
-      ? buildPaidBookMessage(bookName)
-      : buildNoResults(bookName, false);
+      ? buildPaidBookMessage(bookName, /* apologetic */ true)
+      : buildNoResults(bookName, false, /* apologetic */ true);
 
     await bot.sendMessage(chatId, failMsg, {
-      parse_mode: "Markdown", disable_web_page_preview: true,
-      reply_markup: kbNoResults(bookName),
+      parse_mode:               "Markdown",
+      disable_web_page_preview: true,
+      reply_markup:             kbNoResults(bookName),
+      // See no_results path above for rationale.
+      ...(userMessageId
+        ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
+        : {}),
     });
   }
   return { sent, sourceUrl: sent ? sentSourceUrl : undefined };
@@ -1060,13 +1147,19 @@ async function sendAnnouncement(bot: TelegramBot, chatId: number, userId: string
   } catch {}
 }
 
-async function buildNoResultMessage(bookName: string): Promise<string> {
+async function buildNoResultMessage(
+  bookName: string,
+  apologetic = false,
+): Promise<string> {
   // لو Firecrawl quota منتهية → رسالة صادقة بدل "لم أجد"
   const fcDown = await isFirecrawlDown().catch(() => false);
   if (fcDown) {
-    return `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
+    const apology = apologetic
+      ? `🙏 _عذراً، لم أتمكّن من البحث الآن._\n\n`
+      : "";
+    return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
   }
-  return buildNoResults(bookName, false);
+  return buildNoResults(bookName, false, apologetic);
 }
 
 
