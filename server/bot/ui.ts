@@ -157,8 +157,20 @@ export function buildSuccessMsg(
 
 // ── رسالة لا نتائج ───────────────────────────
 
-export function buildNoResults(bookName: string, _usedFuzzy: boolean): string {
+// `apologetic` — when true, prepends a brief apology line. Used on
+// failure paths where we want to be visibly contrite (e.g. group chats
+// where the bot replies to the asker by quoting their message — see
+// performFullSearch's reply_to_message_id wiring). No-op otherwise.
+export function buildNoResults(
+  bookName: string,
+  _usedFuzzy: boolean,
+  apologetic = false,
+): string {
+  const apology = apologetic
+    ? `🙏 _عذراً، حاولت من المصادر المتاحة._\n\n`
+    : "";
   return (
+    apology +
     `${pickRandom(NO_RESULTS_HEADLINES)}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
@@ -177,8 +189,15 @@ export function buildNoResults(bookName: string, _usedFuzzy: boolean): string {
 // This replaces the misleading silent "no PDF" outcome — and prevents
 // the bot from sending the wrong author's book just because the PDF
 // host was on the trusted list.
-export function buildPaidBookMessage(bookName: string): string {
+export function buildPaidBookMessage(
+  bookName: string,
+  apologetic = false,
+): string {
+  const apology = apologetic
+    ? `🙏 _عذراً، فحصت المصادر ولم أجد نسخة مجانية._\n\n`
+    : "";
   return (
+    apology +
     `${pickRandom(PAID_BOOK_HEADLINES)}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
