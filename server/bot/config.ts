@@ -283,6 +283,22 @@ export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
   process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.6",
 );
 
+// Minimum filename-relevance for the TRUSTED_PDF_DOMAINS bypass branch
+// (validator shortcut when no Firecrawl <title> was available).
+//
+// Audit 2026-05-04 found this branch hard-coded to 0.15 — same wrong-
+// book pattern as the FILENAME_TRUSTED bypass below 0.6: "العقيدة
+// الواسطية" (Ibn Taymiyyah) vs `dl.waqfeya.net/.../العقيدة-السفارينية.pdf`
+// (al-Saffarini) shares 1-of-2 tokens → score 0.5 → bypass → wrong book.
+//
+// 0.55 forces ≥ 2/3 token overlap for 3-word queries and BOTH words
+// for 2-word queries while still letting strong matches (English exact
+// slug, Arabic exact slug) through. Override with the env var if you
+// need to revert during incident investigation.
+export const TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD = parseFloat(
+  process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD || "0.55",
+);
+
 // ── Download attempt caps (find-to-send loss mitigation) ──
 // Production audit (2026-05-03) showed 44% of "found" searches never
 // deliver a PDF. Root cause: the download loop in bookRequest.ts had
