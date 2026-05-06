@@ -12,6 +12,11 @@ import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
+import {
+  REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
+  REACTION_NO_RESULT, REACTION_ERROR,
+} from "./uiVariants.js";
+import { armProgressWatchdog, clearProgressWatchdog } from "./progressWatchdog.js";
 import { kbAfterSuccess, kbAfterFail, kbMain, kbNoResults, kbQueued } from "./keyboards.js";
 import { getUserNote, isPremium, computeDailyLimit } from "./userSettings.js";
 import { redis } from "./redis.js";
@@ -25,7 +30,7 @@ import {
 } from "./config.js";
 import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
-import { react } from "./reactions.js";
+import { react, reactRandom } from "./reactions.js";
 import type { QueueJob } from "./types.js";
 
 // buildResetTime مستوردة من text.ts
@@ -233,9 +238,13 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
 
   // FIX: msgId=0 آمن — editMsg وdeleteMsg كلاهما يتحققان من msgId قبل العمل
   let msgId = 0;
+  // Typing indicator while we send the initial progress message —
+  // makes the bot feel responsive even before the first edit fires.
+  bot.sendChatAction(chatId, "typing").catch(() => {});
   try {
     const qm = await bot.sendMessage(chatId, buildProgress(0, bookName), { parse_mode: "Markdown" });
     msgId = qm.message_id;
+    armProgressWatchdog(token, chatId, msgId, 0, bookName);
   } catch {}
 
   storage.getOrCreateUser(userId).catch(() => {});
@@ -244,7 +253,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
       await deleteMsg(token, chatId, msgId);
-      if (job.userMessageId) react(bot, chatId, job.userMessageId, "🎉").catch(() => {});
+      if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_CACHE_HIT).catch(() => {});
       await trace.finish("sent_from_cache");
       trackFunnelOnce(job.id, {
         searchFound:   true,
@@ -284,7 +293,7 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
 
     await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: kbAfterFail(bookName, []) }).catch(() => {});
 
-    if (job.userMessageId) react(bot, chatId, job.userMessageId, "😱").catch(() => {});
+    if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_ERROR).catch(() => {});
     trace.finish("error").catch(() => {});
     // FIX BUG-7: كان يُعيد throw بعد إرسال رسالة الخطأ للمستخدم
     // هذا يسبب: Worker يُعيد المحاولة → إما يصل الكتاب بدون سياق، أو رسالة خطأ ثانية
@@ -451,6 +460,7 @@ async function performFullSearch(
   userMessageId?: number
 ): Promise<{ sent: boolean; sourceUrl?: string }> {
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
+  armProgressWatchdog(token, chatId, msgId, 1, bookName);
 
   const { results: rawResults, usedFuzzy } = await searchWithFuzzyFallback(bookName);
 
@@ -471,6 +481,7 @@ async function performFullSearch(
           results: retryResults.length,
         });
         await editMsg(token, chatId, msgId, buildProgress(2, q, `💡 جربت: _"${escMd(q)}"_`));
+        armProgressWatchdog(token, chatId, msgId, 2, q);
       }
     }
   }
@@ -482,7 +493,8 @@ async function performFullSearch(
 
   if (results.length === 0) {
     await deleteMsg(token, chatId, msgId);
-    if (userMessageId) react(bot, chatId, userMessageId, "😢").catch(() => {});
+    clearProgressWatchdog(msgId);
+    if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_NO_RESULT).catch(() => {});
     logSearch(userId, userName, bookName, false, false, 0);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     trackFunnelOnce(jobId, { searchFound: false, verifyChecked: 0, verifyValid: 0, sendMode: null, sendSuccess: false });
@@ -493,10 +505,13 @@ async function performFullSearch(
     return { sent: false };
   }
 
-  if (usedFuzzy)
+  if (usedFuzzy) {
     await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب نتيجة"));
+    armProgressWatchdog(token, chatId, msgId, 2, bookName);
+  }
 
   await editMsg(token, chatId, msgId, buildProgress(3, bookName, `📄 وجدت *${results.length}* نتيجة\n\n${tip(isPrem)}`));
+  armProgressWatchdog(token, chatId, msgId, 3, bookName);
 
   const allPdfUrls: string[] = [];
   const pageUrlFallbacks: string[] = [];
@@ -552,6 +567,7 @@ async function performFullSearch(
   const uniquePdfs = [...allPdfUrls]; // already deduped via seenPdfUrls
 
   await editMsg(token, chatId, msgId, buildProgress(4, bookName, tip(isPrem)));
+  armProgressWatchdog(token, chatId, msgId, 4, bookName);
 
   const verifyBatch = await findValidPdfUrls(uniquePdfs);
   let validUrls = verifyBatch.urls;
@@ -652,6 +668,7 @@ async function performFullSearch(
   }
 
   await editMsg(token, chatId, msgId, buildProgress(5, bookName, tip(isPrem)));
+  armProgressWatchdog(token, chatId, msgId, 5, bookName);
 
   const chatActionInterval = setInterval(() => {
     bot.sendChatAction(chatId, "upload_document").catch(() => {});
@@ -852,6 +869,7 @@ async function performFullSearch(
 
   if (sent) {
     await editMsg(token, chatId, msgId, buildProgress(6, bookName));
+    armProgressWatchdog(token, chatId, msgId, 6, bookName);
     await sleep(600);
   }
   await deleteMsg(token, chatId, msgId);
@@ -861,7 +879,8 @@ async function performFullSearch(
     const isSuspectFile = sentFilenameScore < 0.05;
 
     await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
-    if (userMessageId) react(bot, chatId, userMessageId, "🎉").catch(() => {});
+    clearProgressWatchdog(msgId);
+    if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_SUCCESS).catch(() => {});
     // Telemetry + Funnel
     const dlOutcome: import("./telemetry.js").RequestOutcome =
       sentSendMode === "direct" ? "sent_direct" : "sent_local";
@@ -874,7 +893,8 @@ async function performFullSearch(
       sendSuccess:   true,
     });
   } else {
-    if (userMessageId) react(bot, chatId, userMessageId, results.length > 0 ? "🤔" : "😢").catch(() => {});
+    clearProgressWatchdog(msgId);
+    if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_NO_RESULT).catch(() => {});
     logSearch(userId, userName, bookName, results.length > 0, false, results.length);
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     await trace.finish(results.length > 0 ? "links_only" : "no_results").catch(() => {});
