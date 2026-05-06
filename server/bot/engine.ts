@@ -1,7 +1,11 @@
 import { redis } from "./redis.js";
 import { SOURCES, ARABIC_SOURCES } from "./sources.js";
 import { isBlacklisted } from "./blacklist.js";
-import { getAutoDisabledSourceDomains } from "./analytics.js";
+import {
+  getAutoDisabledSourceDomains,
+  getSourceStatsCached,
+  rankSourcesByTrust,
+} from "./analytics.js";
 import { normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
@@ -10,6 +14,7 @@ import {
   SEARCH_CACHE_TTL_HIT, SEARCH_CACHE_TTL_MISS,
   FC_QUOTA_EXCEEDED_KEY, FC_RATE_LIMITED_KEY, FC_RATE_LIMITED_TTL_SEC,
   FC_QUOTA_TTL_SEC, TRUSTED_PDF_DOMAINS, MIN_QUERY_LENGTH,
+  SOURCE_RANK_MIN_SAMPLES,
 } from "./config.js";
 
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || "";
@@ -109,9 +114,25 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     }
   } catch {}
 
-  const arabicDomains = ARABIC_SOURCES
-    .filter((s) => !disabledDomains.has(s.domain))
-    .map((s) => s.domain);
+  // Dynamic source ranking — re-order live sources by recent trustRate
+  // (ok / total_with_rejects) so Firecrawl's `(site:a OR site:b OR …)`
+  // budget concentrates on historically reliable sources first. Sources
+  // with fewer than SOURCE_RANK_MIN_SAMPLES rolling samples keep their
+  // hand-picked priority (defends against a brand-new source's first
+  // lucky hit promoting it to #1 on a single attempt). Falls back to
+  // the static priority order on any analytics failure.
+  let arabicSources: SourceConfig[] = ARABIC_SOURCES.filter(
+    (s) => !disabledDomains.has(s.domain),
+  );
+  try {
+    const stats = await getSourceStatsCached();
+    arabicSources = rankSourcesByTrust(arabicSources, stats, SOURCE_RANK_MIN_SAMPLES);
+  } catch (e) {
+    L.warn("engine", `rankSourcesByTrust failed — using static priority`, {
+      err: String(e).slice(0, 80),
+    });
+  }
+  const arabicDomains = arabicSources.map((s) => s.domain);
 
   const results = await unifiedSearch(arabicDomains, query, true);
   const enriched = (await enrichWithMarkdown(results, query))
