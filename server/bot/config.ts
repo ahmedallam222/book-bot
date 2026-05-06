@@ -156,12 +156,23 @@ export const SUMMARY_CACHE_TTL_SECONDS = parseInt(
 
 // ── Unreliable domains ────────────────────────
 // FIX-RUNTIME: أضفنا دعم UNRELIABLE_DOMAINS_EXTRA في .env
+//
+// أُضيفت بناءً على تدقيق الإنتاج (2026-05-06):
+// - scholar.archive.org: نسبة نجاح تاريخية 9% (1 ok / 10 fail). يستخدم
+//   wayback ranges ضخمة على EKB Egyptian journals وهي عادةً لا تصمد للتحميل.
+// - dn790009.ca.archive.org: 0 نجاح، 7 رفض من Mistral — IA mirror يرجع ملفات
+//   لا تطابق العنوان المطلوب. (التقاط الـ subdomain العام archive.org/ia800
+//   لا يكفي لأن CA mirror خارج النطاق المطابق.)
+// - arabic-book.net: 0/2 — عيّنة صغيرة لكن صفر نجاح؛ نخفّض ترتيبه احتياطاً.
 export const UNRELIABLE_DOMAINS: string[] = [
   "archive.org",
   "ia800",
   "noor-book.com",
   "makalatt.com",
   "islamhouse.com",
+  "scholar.archive.org",
+  "dn790009.ca.archive.org",
+  "arabic-book.net",
   ...(process.env.UNRELIABLE_DOMAINS_EXTRA || "")
     .split(",")
     .map(d => d.trim())
