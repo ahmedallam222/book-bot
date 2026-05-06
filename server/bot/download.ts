@@ -648,71 +648,108 @@ export async function downloadAndSend(
       });
     }
 
-    // ── HTML response → ابحث عن رابط PDF داخله ─
-    if (ct.includes("html")) {
-      if (!_noFollow) {
-        try {
-          const htmlPeek = (await r.text().catch(() => "")).slice(0, 6000);
-          const pdfInPage =
-            htmlPeek.match(/href=["']([^"']+\.pdf(?:[?#][^"']*)?)/i)?.[1] ??
-            htmlPeek.match(/(https?:\/\/[^\s"'<>]+\.pdf(?:[?#][^\s"'<>]*)?)/i)?.[1];
-
-          if (pdfInPage) {
-            let fullPdfUrl = pdfInPage;
-            if (!fullPdfUrl.startsWith("http")) {
-              try { fullPdfUrl = new URL(fullPdfUrl, pdfUrl).href; } catch {}
-            }
-            if (fullPdfUrl.startsWith("http") && fullPdfUrl !== pdfUrl) {
-              L.info("download", "Extracted PDF URL from HTML — following", {
-                original: pdfUrl.slice(0, 60),
-                found:    fullPdfUrl.slice(0, 80),
-              });
-              safeDeleteTemp(tempPath);
-              clearTimeout(timer);
-              // Forward skipMistral + searchResultTitle so the recursive
-              // call honors both the Mistral early-stop streak and the
-              // new title-gate / metaTitle fallback. Without these the
-              // L1/L4 fixes are bypassed for any HTML-redirect PDF.
-              return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true, skipMistral, searchResultTitle);
-            }
-          }
-        } catch { /* HTML غير قابل للقراءة → نكمل للفشل الطبيعي */ }
-      }
-
-      L.dlFail(pdfUrl, "response is HTML not PDF");
-      await recordUrlFailure(pdfUrl);
-      return { ok: false };
-    }
-
-    // ── Stream pipeline مع size limiter ──────────
     let totalBytes = 0;
-    const sizeLimiter = new Transform({
-      transform(chunk: Buffer, _enc, done) {
-        totalBytes += chunk.length;
-        if (totalBytes > MAX_PDF_SIZE) {
-          done(new Error("FILE_TOO_LARGE"));
-        } else {
-          done(null, chunk);
-        }
-      },
-    });
 
-    const writeStream = fs.createWriteStream(tempPath);
-    try {
-      await pipeline(Readable.fromWeb(r.body as any), sizeLimiter, writeStream);
-    } catch (pipeErr: any) {
-      safeDeleteTemp(tempPath);
-      if (pipeErr?.message === "FILE_TOO_LARGE") {
-        L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
+    // ── HTML response → افحص magic bytes قبل ما نـ scrape ─
+    // FIX-MISLABELED-CT: بعض الـ servers (مثلاً mktbtypdf.com/download/?id=190
+    // لكتاب "شيفرة دافنشي") بيخدّموا PDF binary بـ `Content-Type: text/html`
+    // غلطاناً. لو دخلنا الـ HTML-scrape branch بدون ما نتحقق من الـ magic bytes،
+    // الـ %PDF binary بيتقري كـ "HTML غير قابل للقراءة" والـ download بيفشل.
+    // الحل: read body مرة واحدة، فحص magic bytes، ولو %PDF نكمل عادي؛ ولو HTML
+    // فعلاً نـ scrape زي ما كنا.
+    if (ct.includes("html")) {
+      const bodyBuf = Buffer.from(
+        await r.arrayBuffer().catch(() => new ArrayBuffer(0)),
+      );
+      const isPdfMagic =
+        bodyBuf.length >= 5 &&
+        bodyBuf.subarray(0, 5).toString("ascii") === "%PDF-";
+
+      if (isPdfMagic) {
+        L.info(
+          "download",
+          "Server sent PDF with text/html Content-Type — proceeding as PDF",
+          { url: pdfUrl.slice(0, 80), bytes: bodyBuf.length },
+        );
+        if (bodyBuf.length > MAX_PDF_SIZE) {
+          L.dlTooLarge(pdfUrl, bodyBuf.length / 1024 / 1024);
+          return { ok: false };
+        }
+        try {
+          await fsPromises.writeFile(tempPath, bodyBuf);
+          totalBytes = bodyBuf.length;
+        } catch (e) {
+          L.dlFail(pdfUrl, `writeFile failed: ${String(e).slice(0, 80)}`);
+          safeDeleteTemp(tempPath);
+          await recordUrlFailure(pdfUrl);
+          return { ok: false };
+        }
+        // fall through to magic-byte verification + validatePdfContent
+      } else {
+        // ── HTML فعلي → ابحث عن رابط PDF داخله ─
+        if (!_noFollow) {
+          try {
+            const htmlPeek = bodyBuf.toString("utf8").slice(0, 6000);
+            const pdfInPage =
+              htmlPeek.match(/href=["']([^"']+\.pdf(?:[?#][^"']*)?)/i)?.[1] ??
+              htmlPeek.match(/(https?:\/\/[^\s"'<>]+\.pdf(?:[?#][^\s"'<>]*)?)/i)?.[1];
+
+            if (pdfInPage) {
+              let fullPdfUrl = pdfInPage;
+              if (!fullPdfUrl.startsWith("http")) {
+                try { fullPdfUrl = new URL(fullPdfUrl, pdfUrl).href; } catch {}
+              }
+              if (fullPdfUrl.startsWith("http") && fullPdfUrl !== pdfUrl) {
+                L.info("download", "Extracted PDF URL from HTML — following", {
+                  original: pdfUrl.slice(0, 60),
+                  found:    fullPdfUrl.slice(0, 80),
+                });
+                safeDeleteTemp(tempPath);
+                clearTimeout(timer);
+                // Forward skipMistral + searchResultTitle so the recursive
+                // call honors both the Mistral early-stop streak and the
+                // new title-gate / metaTitle fallback. Without these the
+                // L1/L4 fixes are bypassed for any HTML-redirect PDF.
+                return downloadAndSend(bot, chatId, fullPdfUrl, bookName, token, true, skipMistral, searchResultTitle);
+              }
+            }
+          } catch { /* HTML غير قابل للقراءة → نكمل للفشل الطبيعي */ }
+        }
+
+        L.dlFail(pdfUrl, "response is HTML not PDF");
+        await recordUrlFailure(pdfUrl);
         return { ok: false };
       }
-      if (String(pipeErr).includes("abort") || String(pipeErr).includes("timeout")) {
-        L.dlTimeout(pdfUrl, Date.now() - t0);
-      } else {
-        L.dlFail(pdfUrl, String(pipeErr));
+    } else {
+      // ── Stream pipeline مع size limiter ──────────
+      const sizeLimiter = new Transform({
+        transform(chunk: Buffer, _enc, done) {
+          totalBytes += chunk.length;
+          if (totalBytes > MAX_PDF_SIZE) {
+            done(new Error("FILE_TOO_LARGE"));
+          } else {
+            done(null, chunk);
+          }
+        },
+      });
+
+      const writeStream = fs.createWriteStream(tempPath);
+      try {
+        await pipeline(Readable.fromWeb(r.body as any), sizeLimiter, writeStream);
+      } catch (pipeErr: any) {
+        safeDeleteTemp(tempPath);
+        if (pipeErr?.message === "FILE_TOO_LARGE") {
+          L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
+          return { ok: false };
+        }
+        if (String(pipeErr).includes("abort") || String(pipeErr).includes("timeout")) {
+          L.dlTimeout(pdfUrl, Date.now() - t0);
+        } else {
+          L.dlFail(pdfUrl, String(pipeErr));
+        }
+        await recordUrlFailure(pdfUrl);
+        return { ok: false };
       }
-      await recordUrlFailure(pdfUrl);
-      return { ok: false };
     }
 
     // ── تحقق من الملف ────────────────────────────
