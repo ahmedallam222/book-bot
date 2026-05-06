@@ -423,6 +423,24 @@ export const TEMP_FILE_MAX_AGE  = 3_600_000;  // 1 hour
 export const ANALYTICS_PREFIX = "analytics";
 export const ANALYTICS_TTL    = 8 * 86_400;   // 8 days
 
+// ── Daily digest ──────────────────────────────
+// Hour-of-day (Cairo TZ, 0-23) at which alertWatcher fires the daily
+// admin digest. The watcher's 5-minute polling loop checks `cairoHour
+// === DAILY_DIGEST_HOUR_CAIRO` and uses a 23-hour SET-NX lock so the
+// digest is sent at most once per day even if the bot restarts mid-
+// hour. Default 9 = 09:00 Cairo (a quiet morning hour, after midnight
+// Cairo so yesterday's stats are final).
+export const DAILY_DIGEST_HOUR_CAIRO = parseInt(
+  process.env.DAILY_DIGEST_HOUR_CAIRO || "9",
+  10,
+);
+
+// Disable the daily digest entirely without removing ADMIN_IDS or
+// touching code paths. Set to "1" / "true" to opt out.
+export const DAILY_DIGEST_DISABLED =
+  process.env.DAILY_DIGEST_DISABLED === "1" ||
+  process.env.DAILY_DIGEST_DISABLED === "true";
+
 // ── Payments ───────────────────────────────────
 export const PREMIUM_STARS_PRICE = 100;  // Telegram Stars لـ Premium شهري
 
