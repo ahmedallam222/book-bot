@@ -7,6 +7,7 @@ import { dequeue, completeJob, failJob, recoverStuckJobs } from "./queue.js";
 import { processBookRequest }         from "./bookRequest.js";
 import { cleanOldTempFiles }          from "./tempFiles.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
+import { startFailureRetryWorker }    from "./failureRetry.js";
 import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import { listPremiumUsers }           from "./userSettings.js";
@@ -152,6 +153,10 @@ export async function startBot(): Promise<void> {
 
   // تشغيل مراقب التنبيهات
   startAlertWatcher(_bot);
+
+  // تشغيل عامل إعادة المحاولة — يفحص الفشل المخزّن ويعيد تجربته
+  // بعد إصلاحات البحث/التحميل
+  startFailureRetryWorker(_bot, BOT_TOKEN);
 }
 
 // ── Worker loop ───────────────────────────────
