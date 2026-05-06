@@ -498,12 +498,55 @@ export function registerCommands(
   });
 
   // ── pre_checkout_query — يجب الرد خلال 10 ثوانٍ ─
+  // Validate payload + currency + amount before approving. Without this
+  // gate, a stale invoice from an older price tier (or a forged one with
+  // a different `total_amount`) would be approved and downstream
+  // `successful_payment` would still grant 30 days of Premium because the
+  // grant code only checks `payload.startsWith("premium:")`. Reject upfront
+  // so Telegram surfaces a clear error to the buyer instead.
   bot.on("pre_checkout_query", async (query) => {
+    const userId  = String(query.from?.id || "");
+    const payload = query.invoice_payload || "";
+    const amount  = query.total_amount;
+    const currency = query.currency;
+
+    let approved = false;
+    let reason   = "";
+
+    if (!payload.startsWith("premium:")) {
+      reason = `bad_payload=${payload.slice(0, 30)}`;
+    } else if (currency !== "XTR") {
+      reason = `bad_currency=${currency}`;
+    } else if (amount !== PREMIUM_STARS_PRICE) {
+      // expected exact match — Stars are integers, no fractional concerns
+      reason = `bad_amount=${amount}|expected=${PREMIUM_STARS_PRICE}`;
+    } else {
+      approved = true;
+    }
+
     try {
-      await (bot as any).answerPreCheckoutQuery(query.id, true);
-      L.info("payment", "pre_checkout approved", { userId: String(query.from.id) });
+      await (bot as any).answerPreCheckoutQuery(query.id, approved, !approved ? {
+        error_message: "هذه الفاتورة غير صالحة، أعد المحاولة من /premium",
+      } : undefined);
+      if (approved) {
+        L.info("payment", "pre_checkout approved", {
+          userId,
+          amount,
+          currency,
+          payload: payload.slice(0, 40),
+        });
+      } else {
+        L.warn("payment", "pre_checkout rejected", {
+          userId,
+          amount,
+          currency,
+          payload: payload.slice(0, 40),
+          reason,
+        });
+        redis.incr("tel:payment:precheckout_rejected").catch(() => {});
+      }
     } catch (e) {
-      L.error("payment", "pre_checkout error", { err: String(e).slice(0, 100) });
+      L.error("payment", "pre_checkout error", { err: String(e).slice(0, 100), userId });
     }
   });
 

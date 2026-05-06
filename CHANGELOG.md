@@ -7,6 +7,50 @@
 
 ---
 
+## [31.9.1] — 2026-05-05
+
+### 🔒 Security — pre_checkout_query validation
+
+**Bug #24 (HIGH)** — كان `pre_checkout_query` يـ approve أي invoice بدون فحص:
+
+```ts
+// قبل
+await answerPreCheckoutQuery(query.id, true);
+```
+
+النتيجة: invoice قديم بسعر مختلف (لو غيّرنا الـ price tier)، أو invoice مُلفَّق
+بـ `total_amount` غير الـ canonical 100 stars، أو payload مش `premium:`،
+كان يتقبَّل ويعدِّي على `successful_payment` اللي بيدِّي 30 يوم Premium لمجرد إن
+الـ payload يبدأ بـ `premium:`. الـ dedup بـ `payment:processed:{chargeId}`
+يحمي من duplicate redelivery لكن مش من invoice مزيف.
+
+#### الإصلاح
+نتحقق قبل الـ approve من 3 شروط:
+1. `payload.startsWith("premium:")`
+2. `currency === "XTR"`
+3. `total_amount === PREMIUM_STARS_PRICE` (100)
+
+لو فشل أي شرط: نرفض بـ `answerPreCheckoutQuery(false, error_message=...)` —
+Telegram يعرض رسالة خطأ واضحة للمستخدم وتنقطع العملية قبل ما توصل لـ
+`successful_payment`. كل rejection يـ log + يـ `INCR tel:payment:precheckout_rejected`.
+
+### 📊 Observability — pre_checkout structured logging
+
+**Bug #28 (LOW)** — الـ log القديم كان `{userId}` فقط. لو حد جرَّب replay attack
+أو أرسل invoice بسعر شاذ، الـ logs ما تكشفش. دلوقتي:
+- approval log: `{ userId, amount, currency, payload }`
+- rejection log: `{ userId, amount, currency, payload, reason }`
+
+### 🧪 Tests
+- `test-payment-precheckout-validation.mjs` — 18 probes:
+  - source-level guards (payload prefix / currency / amount)
+  - rejection path: error_message للمستخدم + log + counter
+  - approval log includes amount/currency/payload
+  - bundle markers (escaped Arabic + counter + check)
+  - regression: hardcoded `true` removed
+
+---
+
 ## [31.9.0] — 2026-05-05
 
 ### 🐛 Fix — Cairo timezone everywhere
