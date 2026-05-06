@@ -11,6 +11,7 @@ import { warmRelatedCache } from "./suggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
+import { recordFailure } from "./failureRetry.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
@@ -301,6 +302,22 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     }).catch(() => {});
 
     if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_ERROR).catch(() => {});
+
+    // Record so the auto-retry worker can re-attempt later — once the
+    // network/Firecrawl recovers, the user gets the book without
+    // having to ask again. Cheap fire-and-forget; failures here are
+    // logged but never propagate.
+    if (job.userMessageId) {
+      recordFailure({
+        userId:        userId,
+        chatId:        chatId,
+        userMessageId: job.userMessageId,
+        userName:      userName ?? null,
+        bookName:      bookName,
+        reason:        "error",
+      }).catch(() => {});
+    }
+
     trace.finish("error").catch(() => {});
     // FIX BUG-7: كان يُعيد throw بعد إرسال رسالة الخطأ للمستخدم
     // هذا يسبب: Worker يُعيد المحاولة → إما يصل الكتاب بدون سياق، أو رسالة خطأ ثانية
@@ -506,6 +523,21 @@ async function performFullSearch(
     trackDownload(userId, bookName, false, false, undefined, Date.now() - t0).catch(() => {});
     trackFunnelOnce(jobId, { searchFound: false, verifyChecked: 0, verifyValid: 0, sendMode: null, sendSuccess: false });
     await trace.finish("no_results");
+
+    // Track for auto-retry. If a fix lands or a source comes back
+    // online within RETRY_TTL_DAYS, the worker will replay this
+    // search and deliver the PDF as a quoted reply.
+    if (userMessageId) {
+      recordFailure({
+        userId:        userId,
+        chatId:        chatId,
+        userMessageId: userMessageId,
+        userName:      userName ?? null,
+        bookName:      bookName,
+        reason:        "no_results",
+      }).catch(() => {});
+    }
+
     await bot.sendMessage(
       chatId,
       await buildNoResultMessage(bookName, /* apologetic */ true),
@@ -1034,6 +1066,21 @@ async function performFullSearch(
     const failMsg = showPaidBookMessage
       ? buildPaidBookMessage(bookName, /* apologetic */ true)
       : buildNoResults(bookName, false, /* apologetic */ true);
+
+    // Skip auto-retry if we have a *strong* paid-signal — those books
+    // are deliberately not free, so retrying won't change the outcome
+    // and would just spam the user. For the no-signal failure path
+    // (search/download flake), record so the worker can recover later.
+    if (!showPaidBookMessage && userMessageId) {
+      recordFailure({
+        userId:        userId,
+        chatId:        chatId,
+        userMessageId: userMessageId,
+        userName:      userName ?? null,
+        bookName:      bookName,
+        reason:        "all_attempts_failed",
+      }).catch(() => {});
+    }
 
     await bot.sendMessage(chatId, failMsg, {
       parse_mode:               "Markdown",
