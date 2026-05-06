@@ -44,8 +44,17 @@ function check(label, condition, detail = "") {
 const sample = "التعافي من تجارب الطفولة السيئة جلين ر شيرالدي";
 const msg    = buildPaidBookMessage(sample);
 
-check("message contains decisive header (📕 كتاب مدفوع أو غير متوفر مجاناً)",
-  msg.includes("📕") && msg.includes("كتاب مدفوع أو غير متوفر مجاناً"));
+// Headers were randomized in the UX-vibes work — accept any of the
+// PAID_BOOK_HEADLINES variants. Still strict: must start with 📕 and
+// must use formal Arabic wording about a paid/unavailable book.
+const PAID_HEADER_VARIANTS = [
+  "كتاب مدفوع أو غير متوفّر مجّاناً",
+  "لم أعثر على نسخة مجّانيّة من هذا الكتاب",
+  "هذا الكتاب لا يتوفّر له PDF مجّاني",
+  "النسخة الإلكترونيّة المجّانية غير متاحة",
+];
+const headerOk = msg.includes("📕") && PAID_HEADER_VARIANTS.some((v) => msg.includes(v));
+check("message contains decisive 📕 header (any PAID_BOOK_HEADLINES variant)", headerOk);
 
 check("message echoes book name",
   msg.includes(sample.slice(0, 40)));
@@ -77,11 +86,12 @@ check("bundle contains tel:dl:fail_no_signal counter",
 check("bundle does NOT contain old buildFailMessage symbol (tree-shaken)",
   !bundle.includes("buildFailMessage"));
 
-// Belt-and-braces: verify the unique 🔎 magnifier emoji+space prefix
-// from the old fail-message header is gone too. esbuild encodes 🔎 as
-// `\u{1F50E}` in the bundle.
-check("bundle does NOT contain 🔎 emoji escape from old fail-message header",
-  !bundle.includes("\\u{1F50E}"));
+// Belt-and-braces: verify the literal Arabic phrase from the old
+// fail-message header is gone. We can't check 🔎 alone any more
+// because PROGRESS_VARIANTS legitimately uses 🔎 as a search icon
+// (post UX-vibes work). The phrase below was UNIQUE to buildFailMessage.
+check("bundle does NOT contain old 'لا يوجد PDF مباشر' fail-message phrase",
+  !bundle.includes("لا يوجد PDF مباشر"));
 
 // ── 4. Error-catch keyboard kbAfterFail is preserved ─────────────
 // (used in the error catch path in bookRequest.ts:270 for unhandled
