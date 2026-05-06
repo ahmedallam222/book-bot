@@ -7,6 +7,48 @@
 
 ---
 
+## [Unreleased] — UX Vibes Pass
+
+### ✨ تجربة المستخدم — رسائل وتأثيرات متنوّعة
+
+طلب Ahmed: "تأثيرات خرافيّة عند طلب الكتب ورسائل متغيّرة بحيث المستخدم
+ميحسّش إنه بيزهق". تطبيق ست محاور:
+
+1. **Progress variants** — كل خطوة من 7 خطوات البحث عندها 5–6 صياغات
+   (icon + label) بدل صياغة ثابتة. كل تحديث تقدّم يختار عشوائياً.
+2. **Success / cache-hit / paid-book / no-results variants** — كل واحدة
+   لها pool من 3–9 رؤوس مختلفة، اختيار عشوائي عند البناء.
+3. **Long-wait reassurance watchdog** — بعد 15 ثانية بدون تقدّم: رسالة
+   تطمين خفيفة. بعد 30 ثانية: رسالة أعمق. **كلها بالعربية الفصحى الرسميّة**
+   (ليست مصريّة ولا خليجيّة) بناءً على طلب المستخدم الصريح.
+4. **Reaction pools** — بدل تكرار 🎉 لكل نجاح، البوت يختار من pool
+   متنوّع لكل حالة (نجاح، كاش، خطأ، لا نتائج، استلام).
+5. **Typing indicator** عند بدء كل طلب لأظهار الاستجابة فوراً.
+6. **Personality lines (10%)** — أحياناً البوت يُلحق ملاحظة مهذّبة
+   (بالفصحى أيضاً) برسالة النجاح: "ذوقك في الكتب يدلّ على عقل راقٍ".
+
+ملفات جديدة:
+- `server/bot/uiVariants.ts` — كل الـ pools + helpers (`pickRandom`, `chance`).
+- `server/bot/progressWatchdog.ts` — منطق الـ 15s/30s timers.
+
+ملفات معدّلة:
+- `server/bot/ui.ts` — `buildProgress` / `buildSuccessMsg` / `buildPaidBookMessage`
+  / `buildNoResults` يقرأوا من الـ pools الجديدة.
+- `server/bot/reactions.ts` — `reactRandom(pool)` helper.
+- `server/bot/bookRequest.ts` — أرمنا الـ watchdog عند كل تحديث، نضح الـ
+  pools للـ react calls، أضفنا typing action عند البدء.
+- `server/bot/commands.ts` — استلام الرسائل بـ reactions متنوّعة بدل 👀.
+
+اختبارات جديدة:
+- `test-ux-variants.mjs` — 33 probe (pool sizes, picker logic, formal-Arabic
+  audit, reaction whitelist).
+- `test-progress-watchdog.mjs` — 7 probes (arming / clearing / idempotence).
+
+التغيير backward-compatible تماماً — لا تغيير في DB / API / cache. PRs
+السابقة في الـ flow (#40 / #42 / #90 / #91) محفوظة.
+
+---
+
 ## [31.9.1] — 2026-05-05
 
 ### 🔒 Security — pre_checkout_query validation
