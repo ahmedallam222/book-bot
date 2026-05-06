@@ -167,6 +167,25 @@ export function cairoDateString(now: Date = new Date()): string {
   return _cairoDateFormatter.format(now);
 }
 
+const _cairoHourFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: CAIRO_TZ,
+  hour:     "2-digit",
+  hour12:   false,
+});
+
+/**
+ * Returns the current Cairo-local hour as an integer 0-23. DST-aware.
+ * Used by the daily-digest scheduler in alertWatcher to fire once per
+ * day at a configurable Cairo hour.
+ */
+export function cairoHourNumber(now: Date = new Date()): number {
+  // en-GB hour-only formatter returns the 2-digit hour ("00".."23")
+  // even with hour12=false (Intl quirk: "24:35" → "00:35").
+  const hh = _cairoHourFormatter.format(now);
+  const n = parseInt(hh, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
  * Milliseconds remaining until the next Cairo-local midnight.
  * DST-aware (the Cairo day boundary moves forward/back 1h on DST
