@@ -112,6 +112,33 @@ function directSendUnsafe(bookName: string, pdfUrl: string): boolean {
 //   2. RFC 2616: filename="..." أو filename=...        ← fallback (ASCII)
 // لو الاتنين موجودين، RFC 6266 بيقول نفضّل filename* لأنها بتدعم Unicode.
 // ══════════════════════════════════════════════
+
+// FIX-MOJIBAKE: Node's `fetch` يقرأ HTTP headers كـ Latin-1 (طبقاً لـ RFC 7230)،
+// لكن سيرفرات حقيقية (مثلاً Google Drive) بترسل UTF-8 raw في
+// `Content-Disposition: filename=` بدون RFC 5987 percent-encoding. النتيجة:
+// "أرض زيكولا" بيتقرأ كـ "Ø§ÙØ±Ø¶ Ø²ÙÙÙÙØ§" (mojibake). الـ pdfValidator
+// بعدها بيرفض لأن الـ filename مفهوش حروف عربي ولا لاتيني → "meaningless".
+//
+// الـ heuristic: re-encode الـ string كـ Latin-1 bytes → UTF-8 string. لو الناتج
+// فيه حروف عربي صحيحة، نستخدمه؛ لو لأ نسيب الأصل كما هو.
+function fixHeaderMojibake(s: string): string {
+  if (!s) return s;
+  // ASCII فقط → مفيش mojibake محتمل
+  if (!/[\u0080-\u00FF]/.test(s)) return s;
+  // الـ string فيه Unicode حقيقي (عربي، CJK، Cyrillic، ...) → مش mojibake
+  if (/[\u0100-\u05FF\u0700-\uFFFF]/.test(s)) return s;
+  try {
+    const reEncoded = Buffer.from(s, "latin1").toString("utf8");
+    // لو الإعادة طلعت حروف عربي صحيحة، استخدمها
+    if (/[\u0600-\u06FF]/.test(reEncoded)) return reEncoded;
+    // أو لو طلعت حروف Latin extended صحيحة بدون replacement chars
+    if (/[\u00C0-\u017F]/.test(reEncoded) && !/\uFFFD/.test(reEncoded)) {
+      return reEncoded;
+    }
+  } catch { /* ignore */ }
+  return s;
+}
+
 function parseContentDispositionFilename(header: string | null): string {
   if (!header) return "";
 
@@ -126,9 +153,9 @@ function parseContentDispositionFilename(header: string | null): string {
       // نفك ترميز الـ percent-encoding. لو charset غير UTF-8 (نادر جداً)
       // decodeURIComponent ممكن يفشل → نسيب الـ value الخام بدون encoding.
       if (charset === "utf-8" || charset === "utf8") {
-        return decodeURIComponent(raw);
+        return fixHeaderMojibake(decodeURIComponent(raw));
       }
-      return raw;
+      return fixHeaderMojibake(raw);
     } catch { /* fallback to filename= */ }
   }
 
@@ -139,9 +166,9 @@ function parseContentDispositionFilename(header: string | null): string {
     // بعض الـ servers بترسل filename=ASCII-version بصيغة percent-encoded حتى من
     // غير filename*. نحاول decode لو فيه %xx.
     if (/%[0-9A-Fa-f]{2}/.test(value)) {
-      try { return decodeURIComponent(value); } catch { /* return as-is */ }
+      try { return fixHeaderMojibake(decodeURIComponent(value)); } catch { /* fall through */ }
     }
-    return value;
+    return fixHeaderMojibake(value);
   }
 
   return "";
