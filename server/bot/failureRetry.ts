@@ -343,8 +343,8 @@ async function retryOne(
   // than rejecting the whole message.
   const displayName = rec.userName ? `@${rec.userName}` : "🙏";
   const apology =
-    `🙏 *آسف على التأخير* — لقيت كتاب "${rec.bookName.slice(0, 60)}" دلوقتي\n` +
-    `_${displayName} كنت طلبته من قبل ومـ كانش متاح وقتها_`;
+    `🙏 *أعتذر على التأخير* — وجدتُ كتاب "${rec.bookName.slice(0, 60)}" الآن\n` +
+    `_${displayName}، كنتَ قد طلبته من قبل ولم يكن متاحاً حينها_`;
 
   await bot.sendMessage(rec.chatId, apology, {
     parse_mode:                  "Markdown",
