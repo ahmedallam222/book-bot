@@ -350,6 +350,19 @@ export const LOW_SUCCESS_RATE_PENALTY_THRESHOLD = parseFloat(
   process.env.LOW_SUCCESS_RATE_PENALTY_THRESHOLD || "0.30",
 );
 
+// Minimum samples (totalWithRejects = ok + fail + mistralRejected) over
+// the rolling 7-day window before a source's observed trustRate is
+// allowed to override its static priority order in `searchAllSources`.
+// Sources with fewer samples keep their hand-picked priority — so a
+// brand-new source isn't promoted to #1 just because its first lucky
+// hit produced a 100% trustRate, and a momentarily flaky veteran isn't
+// demoted by 1-2 noisy failures. Set to 0 to disable the threshold (and
+// rank by trustRate alone for any source with stats).
+export const SOURCE_RANK_MIN_SAMPLES = parseInt(
+  process.env.SOURCE_RANK_MIN_SAMPLES || "3",
+  10,
+);
+
 // After this many consecutive Mistral NO verdicts on the same book
 // request, stop calling Mistral for the remaining candidates and fall
 // back to heuristics (metadata title score + filename relevance).
