@@ -303,9 +303,9 @@ async function deliverGlobalCapMessage(
   placeholderMsgId?: number,
 ): Promise<void> {
   const text =
-    `🌙 *البوت وصل لحد الملخصات اليومي*\n` +
+    `🌙 *بلغ البوت الحد اليومي للملخصات*\n` +
     `📚 *${escMd(bookName)}*\n\n` +
-    `_عدد كبير من الناس طلبوا ملخصات اليوم. جرّب بعد قليل أو غدًا — الكتب اللي تم تلخيصها قبل كده هتفضل تشتغل عادي._`;
+    `_طلب عدد كبير من المستخدمين ملخصات اليوم. حاول بعد قليل أو غداً — الكتب التي تم تلخيصها سابقاً ستظل متاحة كالمعتاد._`;
   if (placeholderMsgId !== undefined) {
     try {
       await bot.editMessageText(text, {
