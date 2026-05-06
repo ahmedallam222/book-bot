@@ -290,6 +290,14 @@ export async function recoverStuckJobs(): Promise<void> {
           const queue = job.priority === "high" ? Q_HIGH : Q_NORMAL;
           requeuePipe.lpush(queue, JSON.stringify(job));
           requeued++;
+          // Audit 2026-05-04 (Bug C): keep `queuedIds` in sync with the
+          // requeue. Without this, the USER_JOBS orphan-cleanup pass
+          // below would treat just-requeued IDs as orphans (because
+          // `queuedIds` was snapshotted BEFORE the lpush) and `del` the
+          // user's pointer to their own running job. Net effect:
+          // `getUserPendingCount` reports 0 while the job still runs,
+          // and the per-user pending guard under-counts.
+          queuedIds.add(id);
         }
       }
       // Always GC expired DLQ entries while we're here.
