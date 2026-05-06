@@ -12,6 +12,7 @@ import {
   TRUSTED_PDF_DOMAINS,
   FILENAME_TRUSTED_PDF_DOMAINS,
   MISTRAL_BYPASS_FILENAME_THRESHOLD,
+  TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD,
 } from "./config.js";
 
 // domains موثوقة — نتخطى الـ validator ونقبل مباشرة
@@ -235,7 +236,8 @@ export type PdfValidationEvent =
   | "no_metadata_accepted"
   | "empty_file"
   | "file_too_small"
-  | "not_pdf_magic";
+  | "not_pdf_magic"
+  | "stat_failed";
 
 export interface PdfValidationResult {
   accepted:    boolean;
@@ -791,20 +793,33 @@ export async function validatePdfContent(
       // فن التفاوض". Filename was informative (not digit-only) so this
       // branch fired and accepted blindly. Filename relevance check
       // catches this: 0 token overlap → fall through to full validation.
+      //
+      // Audit 2026-05-04 (Bug A): the gate was 0.15 — too low. A 2-word
+      // Arabic query that shared a single common prefix word with a
+      // *different* book on the same trusted host (e.g. "العقيدة
+      // الواسطية" Ibn Taymiyyah vs `.../العقيدة-السفارينية.pdf`
+      // al-Saffarini) scored 0.5 → bypass → wrong-book delivered.
+      // TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD now defaults to 0.55
+      // (≥ 2/3 token overlap for 3-word queries; both tokens for
+      // 2-word queries) — strong matches still bypass, weak partial
+      // overlaps now correctly fall through to full Mistral validation.
       const filenameScore = urlFilenameRelevance(bookName, pdfUrl);
-      if (filenameScore < 0.15) {
+      if (filenameScore < TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD) {
         L.warn("pdfValidator", "trusted_domain_unrelated_filename — falling through to full validation", {
-          url:  pdfUrl.slice(0, 80),
-          book: bookName.slice(0, 50),
+          url:   pdfUrl.slice(0, 80),
+          book:  bookName.slice(0, 50),
           score: filenameScore.toFixed(2),
+          gate:  TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD,
         });
         // (Falls through to the 64KB read + Mistral path below.)
       } else {
         L.info("pdfValidator", "Trusted domain — informative URL with filename match, no search title, skipping validation", {
-          url: pdfUrl.slice(0, 80),
+          url:   pdfUrl.slice(0, 80),
           score: filenameScore.toFixed(2),
+          gate:  TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD,
         });
         redis.incr(TEL_ACCEPTED).catch(() => {});
+        redis.incr("tel:pdf:trusted_domain_filename_bypass").catch(() => {});
         return {
           accepted: true,
           score: 1,
@@ -840,9 +855,17 @@ export async function validatePdfContent(
       await fh.close(); // يُغلَق دائماً — حتى لو read() أو أي كود أعلاه throw
     }
   } catch (e) {
-    L.warn("pdfValidator", `Cannot read file — fail-open: ${String(e).slice(0, 80)}`);
+    // Audit 2026-05-04 (Bug D): used to fail-open. The file was already
+    // size-validated and magic-byte-checked upstream in `download.ts`
+    // immediately before this validator runs, so a stat/read failure
+    // here is essentially a race (file deleted) or filesystem error —
+    // accepting blindly risked sending a corrupt/missing file to
+    // Telegram. Now fail-closed so the loop tries the next candidate
+    // URL instead.
+    L.warn("pdfValidator", `Cannot read file — fail-closed: ${String(e).slice(0, 80)}`);
     redis.incr(TEL_EXTRACT_FAILED).catch(() => {});
-    return { accepted: true, score: 0.5, event: "no_metadata_accepted", mistralUsed: false, metaTitle: "" };
+    redis.incr("tel:pdf:stat_failed").catch(() => {});
+    return { accepted: false, score: 0, event: "stat_failed", mistralUsed: false, metaTitle: "" };
   }
 
   // FIX: تحقق من PDF magic bytes ("%PDF-") — أول 5 bytes

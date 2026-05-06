@@ -1,5 +1,17 @@
 import { escMd } from "./text.js";
 import { DAILY_LIMIT, PREMIUM_LIMIT, PREMIUM_STARS_PRICE } from "./config.js";
+import {
+  PROGRESS_VARIANTS,
+  SUCCESS_TAGLINES,
+  SUCCESS_TAGLINES_PREMIUM,
+  CACHE_HIT_TAGLINES,
+  PAID_BOOK_HEADLINES,
+  NO_RESULTS_HEADLINES,
+  PERSONALITY_LINES,
+  PERSONALITY_LINE_CHANCE,
+  pickRandom,
+  chance,
+} from "./uiVariants.js";
 
 // ══════════════════════════════════════════════
 // UI — خلاصة الكتب | تجربة غامرة
@@ -17,20 +29,15 @@ const PROGRESS_BARS = [
   "▓▓▓▓▓▓▓▓▓▓",
 ];
 
-const PROGRESS_STEPS = [
-  { icon: "🔭", label: "أفتّش في المكتبة الرقمية"       },
-  { icon: "🌐", label: "أجوب المصادر العربية"             },
-  { icon: "🧠", label: "أفكّر بطريقة مختلفة"              },
-  { icon: "📡", label: "وجدت أثراً — أتحقق منه"           },
-  { icon: "🔬", label: "أختبر جودة الروابط"                },
-  { icon: "⚡", label: "أحمّل الكتاب من أقرب مصدر"        },
-  { icon: "🚀", label: "في الطريق إليك الآن"               },
-];
+const PROGRESS_STEPS_COUNT = 7;
 
 export function buildProgress(step: number, bookName: string, extraLine?: string): string {
-  const s   = PROGRESS_STEPS[step] ?? PROGRESS_STEPS[0];
-  const bar = PROGRESS_BARS[step]  ?? PROGRESS_BARS[0];
-  const pct = Math.round((step / (PROGRESS_STEPS.length - 1)) * 100);
+  // Pick a random variant for this step from the pool. Falls back
+  // to the step-0 pool if step is out of range (defensive).
+  const variantPool = PROGRESS_VARIANTS[step] ?? PROGRESS_VARIANTS[0];
+  const s = pickRandom(variantPool);
+  const bar = PROGRESS_BARS[step] ?? PROGRESS_BARS[0];
+  const pct = Math.round((step / (PROGRESS_STEPS_COUNT - 1)) * 100);
 
   let msg =
     `${s.icon} *${s.label}...*\n` +
@@ -116,9 +123,9 @@ export function buildSuccessMsg(
   fromCache  = false,
   isPrem     = false,
 ): string {
-  const sizeStr   = sizeMB   ? ` · *${sizeMB} MB*` : "";
-  const cacheStr  = fromCache ? "\n⚡ _من الأرشيف — وصلك في ثوانٍ_" : "";
-  const premBadge = isPrem   ? " ⭐" : "";
+  const sizeStr   = sizeMB ? ` · *${sizeMB} MB*` : "";
+  const cacheStr  = fromCache ? `\n${pickRandom(CACHE_HIT_TAGLINES)}` : "";
+  const premBadge = isPrem ? " ⭐" : "";
 
   let balanceLine: string;
   if (limit <= 0) {
@@ -132,14 +139,19 @@ export function buildSuccessMsg(
   }
 
   const tagline = isPrem
-    ? "✨ *وصل كتابك — بأولوية Premium!*"
-    : "✨ *وصل كتابك!*";
+    ? pickRandom(SUCCESS_TAGLINES_PREMIUM)
+    : pickRandom(SUCCESS_TAGLINES);
+
+  // Occasionally append a personality line (~10% by default).
+  const personality = chance(PERSONALITY_LINE_CHANCE)
+    ? `\n\n${pickRandom(PERSONALITY_LINES)}`
+    : "";
 
   return (
     `${tagline}${premBadge}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `📗 _"${escMd(bookName.slice(0, 55))}"_${sizeStr}${cacheStr}\n\n` +
-    `${balanceLine}`
+    `${balanceLine}${personality}`
   );
 }
 
@@ -147,7 +159,7 @@ export function buildSuccessMsg(
 
 export function buildNoResults(bookName: string, _usedFuzzy: boolean): string {
   return (
-    `😔 *لم أجد PDF متاحاً*\n` +
+    `${pickRandom(NO_RESULTS_HEADLINES)}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
     `جرّب:\n` +
@@ -167,7 +179,7 @@ export function buildNoResults(bookName: string, _usedFuzzy: boolean): string {
 // host was on the trusted list.
 export function buildPaidBookMessage(bookName: string): string {
   return (
-    `📕 *كتاب مدفوع أو غير متوفر مجاناً*\n` +
+    `${pickRandom(PAID_BOOK_HEADLINES)}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
     `يبدو أن هذا الكتاب لا يتوفر له *PDF مجاني* في المصادر المتاحة.\n\n` +

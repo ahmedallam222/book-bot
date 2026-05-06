@@ -695,8 +695,7 @@ export async function warmRelatedCache(bookName: string): Promise<void> {
 
     // ابحث عن التصنيف المناسب
     let relatedBooks: string[] = [];
-    for (const [keys, books] of Object.entries(GENRE_MAP)) {
-      const keyList = keys.split("|");
+    for (const [, books] of Object.entries(GENRE_MAP)) {
       const match = books.some(b =>
         normalizeArabic(b.toLowerCase()).includes(normalized) ||
         normalized.includes(normalizeArabic(b.toLowerCase()))
