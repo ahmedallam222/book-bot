@@ -1,0 +1,31 @@
+# EditorConfig — https://editorconfig.org
+# Top-most editor config file
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Makefiles must use tabs
+[Makefile]
+indent_style = tab
+
+# Markdown — preserve trailing whitespace (used for line breaks)
+[*.md]
+trim_trailing_whitespace = false
+
+# YAML — strict 2-space indent
+[*.{yml,yaml}]
+indent_size = 2
+
+# Python (in script/ if any) — 4-space indent
+[*.py]
+indent_size = 4
+
+# Shell scripts — 2-space indent
+[*.sh]
+indent_size = 2
