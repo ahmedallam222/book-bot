@@ -27,6 +27,8 @@ import {
   getWishlist, saveWishlist,
   sendWishlist, getWishlistMax,
 } from "./wishlist.js";
+import { trackReferralOnStart, buildInviteMessage } from "./referral.js";
+import { buildProfileMessage } from "./admin.js";
 
 // ── safeCb ────────────────────────────────────
 const CB_MAX_BYTES = 64;
@@ -49,11 +51,25 @@ export function registerCommands(
 ): void {
 
   // ── /start ─────────────────────────────────────
-  bot.onText(/^\/start/, async (msg) => {
+  // يدعم deep-link payload للإحالة: /start ref_<userId>
+  // الـ Telegram client بيمرّر الـ payload في text بعد مسافة (مش query string).
+  bot.onText(/^\/start(?:\s+(\S+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = String(msg.from?.id || "");
     const name   = msg.from?.first_name || "صديقي";
     if (!userId) return;
+
+    // ── Referral tracking — قبل فحص الصيانة ──
+    // ده عشان نسجّل الإحالة حتى لو البوت في صيانة (ما نخسرش الـ attribution).
+    // الـ activation الفعلي بيحصل بس بعد أول تحميل ناجح في bookRequest.ts.
+    const startPayload = match?.[1];
+    if (startPayload) {
+      const refMatch = startPayload.match(/^ref_(\d{5,15})$/);
+      if (refMatch) {
+        await trackReferralOnStart(userId, refMatch[1]).catch(() => {});
+      }
+    }
+
     // FIX v29: /start لم يكن يتحقق من وضع الصيانة — المستخدم يرى رسالة الترحيب
     // بينما البوت في صيانة → يبدأ يبحث عن كتب ويحصل على رسالة خطأ مربكة
     if (!isAdmin(userId)) {
@@ -170,6 +186,55 @@ export function registerCommands(
         { parse_mode: "Markdown", reply_markup: statsKb });
     } catch (e) {
       L.error("cmd", "/stats error", { err: String(e).slice(0, 100) });
+      await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
+    }
+  });
+
+  // ── /profile ───────────────────────────────────
+  // ملف المستخدم: streak + badges + إجمالي تحميلات + Premium status.
+  // مكمّل لـ /stats (اللي بيركّز على الـ daily limit) — مش بديل.
+  bot.onText(/^\/profile$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    const name   = msg.from?.first_name || "صديقي";
+    if (!userId) return;
+    try {
+      const text = await buildProfileMessage(userId, name);
+      await bot.sendMessage(chatId, text, {
+        parse_mode: "Markdown",
+        reply_markup: kbMain(),
+      });
+    } catch (e) {
+      L.error("cmd", "/profile error", { err: String(e).slice(0, 100) });
+      await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
+    }
+  });
+
+  // ── /invite ────────────────────────────────────
+  // رابط الإحالة + تقدّم نحو المكافأة التالية.
+  bot.onText(/^\/invite$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const botUser = getBotUsername() || "";
+      if (!botUser) {
+        await bot.sendMessage(chatId, `⚠️ خطأ مؤقت في النظام، حاول بعد قليل.`).catch(() => {});
+        return;
+      }
+      const { text } = await buildInviteMessage(userId, botUser);
+      await bot.sendMessage(chatId, text, {
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}` }],
+            [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
+          ],
+        },
+      });
+    } catch (e) {
+      L.error("cmd", "/invite error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
     }
   });
@@ -312,9 +377,12 @@ export function registerCommands(
       `◦ \`/random\` — كتاب مفاجأة\n` +
       `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
       `📊 *حسابك:*\n` +
+      `◦ \`/profile\` — ملفك الكامل + شاراتك 👤\n` +
       `◦ \`/stats\` — رصيدك اليومي\n` +
       `◦ \`/history\` — آخر بحث لك\n` +
       `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
+      `🎁 *الإحالات:*\n` +
+      `◦ \`/invite\` — ادعُ صديقاً واحصل على Premium مجاني\n\n` +
       `🔖 *الإدارة:*\n` +
       `◦ \`/wishlist عنوان\` — أضف لقائمتك\n` +
       `◦ \`/wishlist\` — اعرض قائمتك\n` +

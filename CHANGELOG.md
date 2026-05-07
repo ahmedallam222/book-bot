@@ -7,6 +7,97 @@
 
 ---
 
+## [32.0.0] — Engagement Loop (Streak + Badges + Referral) — 2026-05-07
+
+طلب Donna: ROI analysis للـ retention/virality. النتيجة: البوت 2 active
+users/day مع 13 طلب فقط — funnel ضعيف، المشكلة retention. هذا الـ PR
+يبني حلقة كاملة: **streak** للـ retention + **badges** للـ علاقة العاطفية
++ **referral** للـ virality. كله Redis-only، صفر migration، صفر downtime.
+
+### ✨ ميزات جديدة
+
+#### 1. Streak System — سلسلة قراءة يومية
+- Atomic Lua update على Redis (`streak:cur:{uid}` + `streak:last:{uid}` +
+  `streak:max:{uid}`) — يمنع race conditions عند الـ rapid downloads.
+- Cairo TZ aware (نفس المنطق المستخدم في daily limits).
+- Milestones عند `[3, 7, 14, 30, 60, 100]` يوم → رسالة تهنئة فورية.
+- لو سلسلة ≥3 يوم انكسرت → رسالة "💔 خسرت سلسلة X يوم — ابدأ من جديد".
+- Display: سطر `🔥 سلسلة N يوم` في رسالة النجاح لما `N >= 2`.
+- Fail-open: لو Redis مات، الـ streak تُعتبر صفر ولا يُعطّل التحميل.
+
+#### 2. Badges — 10 شارات للإنجاز
+- Atomic SADD ضمان firing الإشعار مرة واحدة لكل user/badge.
+- 5 download tiers: `dl5/dl20/dl50/dl100/dl250` (📚 → 👑).
+- 3 streak tiers: `streak3/streak7/streak30` (🔥 → 🌟).
+- Summary badge (`summary10`): استخدام AI summary 10 مرات.
+- Social badge (`social3`): دعوة 3 أصدقاء (نشط).
+- Endpoint جديد: `/profile` لعرض الشارات + الـ streak + Premium.
+
+#### 3. Referral System — دعوة + مكافأة Premium
+- Deep-link: `https://t.me/<bot>?start=ref_<userId>` يُسجَّل عند `/start`،
+  لكن **الـ activation الحقيقي** يحصل بس عند أول تحميل ناجح للمدعو
+  (يمنع bot abuse).
+- Tiered rewards (TTL extension via existing `setPremium()` — لا يوجد
+  Premium دائم أبداً):
+  - 3 إحالات → +٧ أيام
+  - 5 إحالات → +١٤ يوم
+  - 10 إحالات → +٣٠ يوم
+  - 20 إحالات → +٦٠ يوم
+  - 50 إحالات → +٩٠ يوم
+  - كل +٢٥ إحالة بعدها → +٩٠ يوم إضافية
+- Welcome gift للمدعو: +٣ أيام Premium عند أول تحميل (incentivizes
+  Premium trial).
+- Age check: المدعو يجب أن يكون <ساعة من تاريخ إنشائه عشان يُحتسب
+  (يمنع حسابات قديمة من الانتقال للإحالة).
+- Endpoint جديد: `/invite` لعرض الرابط + التقدّم نحو المكافأة التالية.
+
+### 🛡️ تحسينات فلترة المصادر
+
+- إضافة قائمة `HARD_BLOCKED_DOMAINS` (مختلفة عن `UNRELIABLE_DOMAINS`):
+  - `UNRELIABLE_DOMAINS`: عقوبة ترتيب فقط (-١) — قد يصل للمستخدم لو لا
+    بدائل.
+  - `HARD_BLOCKED_DOMAINS`: استبعاد كامل قبل أي عملية شبكية في `verify.ts`.
+- `scholar.archive.org` مرفوع لـ hard block — كان يظهر كـ wayback URL
+  لـ EKB Egyptian journals بنسبة نجاح 9% (1/10).
+- Override عبر `HARD_BLOCKED_DOMAINS_EXTRA` env var.
+
+### 🔧 ملفات جديدة
+
+- `server/bot/streak.ts` — Lua + helpers (`updateStreakOnDownload`,
+  `getStreakState`, `formatStreakLine`, `buildMilestoneMessage`,
+  `buildBrokenStreakMessage`).
+- `server/bot/badges.ts` — `BADGES` تعريفات + `checkAndAwardBadges`,
+  `trackSummaryAndAward`, `checkSocialBadge`, `getUserBadges`,
+  `buildNewBadgeMessage`.
+- `server/bot/referral.ts` — `trackReferralOnStart`,
+  `activateReferralOnFirstDownload`, `getReferralState`,
+  `buildReferralLink`, `buildInviteMessage`, `sendReferralNotifications`.
+
+### 📝 ملفات معدّلة
+
+- `server/bot/ui.ts` — `buildSuccessMsg` يقبل `streakLine?` اختياري.
+- `server/bot/bookRequest.ts` — `sendSuccessMessage` يُحدّث streak +
+  يُطلق `dispatchEngagementSignals` بعد كل تحميل ناجح (3 مواقع).
+- `server/bot/commands.ts` — `/start` regex يستوعب `ref_<id>` payload،
+  أوامر `/profile` و `/invite` جديدة، تحديث `/help`.
+- `server/bot/keyboards.ts` — أزرار "👤 ملفي" + "🎁 ادعُ صديقاً" في
+  `kbMain`.
+- `server/bot/callbacks.ts` — handlers لـ `my_profile` + `invite_view`،
+  signature يقبل `getBotUsername` اختياري.
+- `server/bot/admin.ts` — `buildProfileMessage` لتجميع البيانات.
+- `server/bot/index.ts` — تمرير `getBotUsername` للـ callback handler.
+- `server/bot/config.ts` — `HARD_BLOCKED_DOMAINS` + env override.
+- `server/bot/verify.ts` — فلتر hard-blocked قبل أي HEAD request.
+
+### 🧪 تأكيدات الإنتاج
+
+- `npm run typecheck` — يمر بدون أي خطأ.
+- `npm run build` — bundle 560 KB (تقريباً نفس الحجم السابق).
+- جميع الـ engagement signals fire-and-forget — أي فشل في Redis لا
+  يُعطّل رسالة النجاح للمستخدم.
+
+---
+
 ## [Unreleased] — UX Vibes Pass
 
 ### ✨ تجربة المستخدم — رسائل وتأثيرات متنوّعة

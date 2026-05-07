@@ -7,8 +7,9 @@ import { blacklistUrlDirect } from "./blacklist.js";
 import { storage } from "../storage.js";
 import {
   buildWelcome, handleAdminCallback, buildHistoryMessage,
-  buildTopBooksMessage,
+  buildTopBooksMessage, buildProfileMessage,
 } from "./admin.js";
+import { buildInviteMessage } from "./referral.js";
 import { kbAfterFail, kbMain, kbNoResults } from "./keyboards.js";
 import { buildPaidBookMessage } from "./ui.js";
 import { handleBookRequest } from "./bookRequest.js";
@@ -38,7 +39,15 @@ const CB_DEDUP_TTL_SEC = 30;
 const cbDedupKey = (userId: string, data: string): string =>
   `cb:dedup:${userId}:${data.slice(0, 100)}`;
 
-export function registerCallbackHandler(bot: TelegramBot, token: string): void {
+export function registerCallbackHandler(
+  bot:             TelegramBot,
+  token:           string,
+  /**
+   * اختياري للـ back-compat: لو ما اتمررت، الـ invite callback هـ يُظهر
+   * رسالة fallback بدل رابط الإحالة. التمرير من index.ts.
+   */
+  getBotUsername?: () => string,
+): void {
   // منع double-tap — نقر مرتين سريعاً. dedup بـ Redis (SET NX EX)
   // بدل in-memory Set — (أ) yields auto-cleanup عبر TTL لو الـ handler crashed
   // أو وسط معالجة، (ب) بيشتغل صح لو تشغيل عدة instances للبوت (لو حدث
@@ -435,6 +444,57 @@ export function registerCallbackHandler(bot: TelegramBot, token: string): void {
 
       case "my_history":   await buildHistoryMessage(bot, chatId, userId); break;
       case "top_books":    await buildTopBooksMessage(bot, chatId);        break;
+
+      case "my_profile": {
+        // ملف المستخدم — Streak / Badges / Premium / Referrals
+        const name = query.from.first_name || "صديقي";
+        try {
+          const text = await buildProfileMessage(userId, name);
+          await bot.sendMessage(chatId, text, {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🎁  ادعُ صديقاً",       callback_data: "invite_view" }],
+                [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu"   }],
+              ],
+            },
+          });
+        } catch (e) {
+          L.error("cb", "my_profile error", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "invite_view": {
+        // رابط الإحالة + تقدّم نحو المكافأة التالية
+        const botUser = getBotUsername?.() || "";
+        if (!botUser) {
+          await bot.sendMessage(chatId, `⚠️ خطأ مؤقت في النظام، حاول بعد قليل.`, {
+            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
+          }).catch(() => {});
+          break;
+        }
+        try {
+          const { text } = await buildInviteMessage(userId, botUser);
+          await bot.sendMessage(chatId, text, {
+            parse_mode: "Markdown",
+            disable_web_page_preview: true,
+            reply_markup: {
+              inline_keyboard: [
+                [{
+                  text: "📤  مشاركة الرابط",
+                  switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}`,
+                }],
+                [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
+              ],
+            },
+          });
+        } catch (e) {
+          L.error("cb", "invite_view error", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
       case "help":
         await bot.sendMessage(chatId,
           `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +

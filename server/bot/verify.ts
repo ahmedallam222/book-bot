@@ -1,6 +1,6 @@
 import { isBlacklisted } from "./blacklist.js";
 import { L }              from "./logger.js";
-import { UA, VIEWER_ONLY_DOMAINS } from "./config.js";
+import { UA, VIEWER_ONLY_DOMAINS, HARD_BLOCKED_DOMAINS } from "./config.js";
 
 // ══════════════════════════════════════════════
 // VERIFY — التحقق من صلاحية روابط PDF
@@ -8,22 +8,36 @@ import { UA, VIEWER_ONLY_DOMAINS } from "./config.js";
 
 export interface VerifyBatch {
   urls:  string[];
-  stats: { blacklisted: number; checked: number; valid: number };
+  stats: { blacklisted: number; checked: number; valid: number; hardBlocked?: number };
 }
 
 /**
  * يُصفّي قائمة URLs:
+ *  0. يُزيل ما يطابق HARD_BLOCKED_DOMAINS (config) — بدون أي فحص
  *  1. يُزيل المحجوبة في الـ blacklist
  *  2. يتحقق بـ HEAD request إن كان Content-Type يشير لـ PDF
  */
 export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatch> {
-  const stats = { blacklisted: 0, checked: 0, valid: 0 };
+  const stats = { blacklisted: 0, checked: 0, valid: 0, hardBlocked: 0 };
 
   if (urls.length === 0) return { urls: [], stats };
 
-  // ── فلتر الـ blacklist ────────────────────────
-  const blChecks = await Promise.allSettled(urls.map((u) => isBlacklisted(u)));
-  const notBlacklisted = urls.filter((_, i) => {
+  // ── (0) Hard block — قبل أي عملية شبكية ──
+  // domains معطوبة بالكامل (مثل scholar.archive.org wayback academic
+  // ranges) يُسقَط فوراً. مختلف عن UNRELIABLE_DOMAINS اللي بس بيخفض
+  // الترتيب. شاهد config.ts للتفاصيل.
+  const notHardBlocked = urls.filter((url) => {
+    const blocked = HARD_BLOCKED_DOMAINS.some((d) => url.includes(d));
+    if (blocked) {
+      stats.hardBlocked++;
+      L.debug("verify", "Hard-blocked domain — skipped", { url: url.slice(0, 80) });
+    }
+    return !blocked;
+  });
+
+  // ── (1) فلتر الـ blacklist ────────────────────
+  const blChecks = await Promise.allSettled(notHardBlocked.map((u) => isBlacklisted(u)));
+  const notBlacklisted = notHardBlocked.filter((_, i) => {
     if (blChecks[i].status === "fulfilled" && (blChecks[i] as PromiseFulfilledResult<boolean>).value) {
       stats.blacklisted++;
       return false;
