@@ -7,6 +7,35 @@
 
 ---
 
+## [32.1.1] — `/invite` Markdown parse error hotfix — 2026-05-07
+
+### 🐞 Bug fix (CRITICAL — feature was broken in production)
+
+#### `/invite` and "🎁 ادعُ صديقاً" callback returned "خطأ مؤقت"
+- **Symptom**: Every invocation of `/invite` or the inline button raised
+  `ETELEGRAM: 400 Bad Request: can't parse entities`.
+- **Root cause** in `referral.ts:buildInviteMessage`:
+  1. Stray `_` after `انضمامه.` opened an italic that was never closed.
+  2. `_${state.nextTier.remaining} … *+${state.nextTier.days} يوم Premium*_`
+     used **nested** italic+bold, which Telegram's old Markdown parser
+     does not support. Combined with #1, every render produced an
+     unclosed entity.
+- **Fix**: Removed the stray `_`, flattened the italic-with-bold-inside to
+  plain bold (`*N* إحالات للوصول إلى *+D يوم Premium*`).
+- **Tests added**: `test-markdown-balance.mjs` — counts `*` and `_`
+  occurrences (excluding code spans / escapes) for three referral states
+  (new user, mid-tier, maxed) and asserts they are paired. Also a
+  static-source regression check rejecting any future adjacent `*_` /
+  `_*` pattern in `referral.ts`.
+
+### Files changed
+- `server/bot/referral.ts` — fix unmatched `_` in `buildInviteMessage`.
+- `test-markdown-balance.mjs` (new) — 9 assertions guarding against
+  unbalanced Telegram Markdown markers.
+- `package.json` / `package-lock.json` — bump 32.1.0 → 32.1.1.
+
+---
+
 ## [32.1.0] — Leaderboard fix (top books canonicalization + real weekly bucketing) — 2026-05-07
 
 ### 🐞 Bug fixes (CRITICAL)
