@@ -33,6 +33,13 @@ import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSou
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
 import { react, reactRandom } from "./reactions.js";
 import type { QueueJob } from "./types.js";
+import {
+  updateStreakOnDownload, formatStreakLine,
+  buildMilestoneMessage, buildBrokenStreakMessage,
+  type StreakUpdate,
+} from "./streak.js";
+import { checkAndAwardBadges, buildNewBadgeMessage } from "./badges.js";
+import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
 // buildResetTime مستوردة من text.ts
 
@@ -429,7 +436,7 @@ async function serveFromCache(
       setLastBook(userId, bookName).catch(() => {});
       warmRelatedCache(bookName).catch(() => {});
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
-      await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
+      await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
       return true;
     } catch {
       L.warn("cache", `file_id expired for "${bookName}", trying sourceUrl`);
@@ -458,7 +465,7 @@ async function serveFromCache(
         setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
-        await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
+        await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
         return true;
       }
     } catch (e) {
@@ -992,7 +999,7 @@ async function performFullSearch(
     // BUG-R4 FIX: sentFilenameScore مُحسَب بالفعل في الحلقة أعلاه — لا نُعيد الحساب
     const isSuspectFile = sentFilenameScore < 0.05;
 
-    await sendSuccessMessage(bot, chatId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
+    await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
     clearProgressWatchdog(msgId);
     if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_SUCCESS).catch(() => {});
     // Telemetry + Funnel
@@ -1098,15 +1105,74 @@ async function performFullSearch(
 // ── Helpers ───────────────────────────────────
 
 async function sendSuccessMessage(
-  bot: TelegramBot, chatId: number, dlCount: number, limit: number,
+  bot: TelegramBot, chatId: number, userId: string, dlCount: number, limit: number,
   bookName: string, sourceUrl: string, sizeMB?: string, fromCache = false,
   _isSuspect = false, isPrem = false
 ): Promise<void> {
-  const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem);
+  // ── Streak update — atomic via Lua (شاهد streak.ts للتفاصيل) ──
+  // نستدعيها قبل buildSuccessMsg عشان نُضيف سطر السلسلة لو ≥ 2 يوم.
+  // فشلها لا يُعطّل الإرسال — fail-open.
+  const streak: StreakUpdate = await updateStreakOnDownload(userId);
+  const streakLine = formatStreakLine(streak) ?? undefined;
+
+  const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
   await bot.sendMessage(
     chatId, msg,
     { parse_mode: "Markdown", reply_markup: kbAfterSuccess(bookName, sourceUrl) }
   );
+
+  // ── Engagement signals — fire-and-forget لتجنب تأخير الـ user-facing flow ──
+  dispatchEngagementSignals(bot, chatId, userId, streak).catch((e) => {
+    L.warn("engagement", "dispatchEngagementSignals failed", { userId, err: String(e).slice(0, 100) });
+  });
+}
+
+/**
+ * يُرسل رسائل الـ milestone، badges الجديدة، الـ referral activation
+ * بعد رسالة النجاح. كل رسالة لها فاصل صغير عشان ما يتم rate-limit.
+ *
+ * الترتيب:
+ *   1. broken streak (لو > 0) — قبل أي تهنئة، عشان نخفف الصدمة
+ *   2. milestone — لو وصل
+ *   3. badges جديدة — لكل واحدة رسالة منفصلة
+ *   4. referral activation — لو ده أول تحميل لمدعو
+ */
+async function dispatchEngagementSignals(
+  bot:    TelegramBot,
+  chatId: number,
+  userId: string,
+  streak: StreakUpdate,
+): Promise<void> {
+  const sendDelayed = async (text: string, delayMs: number) => {
+    if (delayMs > 0) await sleep(delayMs);
+    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+  };
+
+  if (streak.brokenStreak > 0) {
+    await sendDelayed(buildBrokenStreakMessage(streak.brokenStreak), 800);
+  }
+  if (streak.milestoneReached !== null) {
+    await sendDelayed(buildMilestoneMessage(streak.milestoneReached), 1000);
+  }
+
+  // Badge check — يستخدم الـ totalDownloads المُحدَّث + الـ streak الجديد
+  const newBadges = await checkAndAwardBadges(userId, streak.current).catch(() => []);
+  for (const badge of newBadges) {
+    const text = await buildNewBadgeMessage(userId, badge);
+    await sendDelayed(text, 1200);
+  }
+
+  // Referral activation — لو ده أول تحميل لمدعو، نُفعِّل الإحالة
+  // ونُرسل welcome gift للمدعو + إشعار للمحيل (في chat منفصل).
+  try {
+    const activation = await activateReferralOnFirstDownload(userId);
+    if (activation.welcomeGift || activation.notifyReferrer) {
+      await sleep(1500);
+      await sendReferralNotifications(bot, activation, userId, chatId);
+    }
+  } catch (e) {
+    L.warn("engagement", "referral activation failed", { userId, err: String(e).slice(0, 100) });
+  }
 }
 
 /**
