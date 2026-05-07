@@ -122,6 +122,12 @@ export function buildSuccessMsg(
   sizeMB?:   string,
   fromCache  = false,
   isPrem     = false,
+  /**
+   * سطر اختياري يُضاف بعد balanceLine — مثلاً "🔥 سلسلة 4 يوم".
+   * يأتي من updateStreakOnDownload في streak.ts. اختياري بحيث يظل
+   * الـ test runners القديمة شغّالة بدون تعديل.
+   */
+  streakLine?: string,
 ): string {
   const sizeStr   = sizeMB ? ` · *${sizeMB} MB*` : "";
   const cacheStr  = fromCache ? `\n${pickRandom(CACHE_HIT_TAGLINES)}` : "";
@@ -147,11 +153,13 @@ export function buildSuccessMsg(
     ? `\n\n${pickRandom(PERSONALITY_LINES)}`
     : "";
 
+  const streakPart = streakLine ? `\n${streakLine}` : "";
+
   return (
     `${tagline}${premBadge}\n` +
     `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
     `📗 _"${escMd(bookName.slice(0, 55))}"_${sizeStr}${cacheStr}\n\n` +
-    `${balanceLine}${personality}`
+    `${balanceLine}${streakPart}${personality}`
   );
 }
 

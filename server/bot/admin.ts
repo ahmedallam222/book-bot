@@ -13,6 +13,9 @@ import {
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
+import { getStreakState } from "./streak.js";
+import { getUserBadges, BADGES }     from "./badges.js";
+import { getReferralState }          from "./referral.js";
 
 // ══════════════════════════════════════════════
 // ADMIN — لوحة تحكم المشرفين (كاملة)
@@ -59,6 +62,80 @@ export function buildWelcome(
     `${balanceLine}\n` +
     `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
     `_اكتب اسم أي كتاب وسأحضره لك فوراً_ ✨`
+  );
+}
+
+// ── /profile message — صفحة المستخدم ─────────
+//
+// تجمع: streak (active/max)، badges، إجمالي تحميلات، Premium status،
+// تقدّم الإحالات. مكمّلة لـ /stats — مش بديل (stats للحد اليومي،
+// profile للـ engagement).
+export async function buildProfileMessage(userId: string, name: string): Promise<string> {
+  const [streak, badges, refState, prem, premExp, user] = await Promise.all([
+    getStreakState(userId),
+    getUserBadges(userId),
+    getReferralState(userId),
+    isPremium(userId),
+    getPremiumExpiry(userId).catch(() => null),
+    storage.getOrCreateUser(userId).catch(() => null),
+  ]);
+
+  const totalDl = user?.totalDownloads ?? 0;
+
+  // ── Streak block ──
+  let streakBlock: string;
+  if (streak.active >= 2) {
+    const fire =
+      streak.active >= 30 ? "🌟" :
+      streak.active >= 14 ? "🔥🔥🔥" :
+      streak.active >= 7  ? "🔥🔥" :
+      "🔥";
+    streakBlock = `${fire} *السلسلة:* ${streak.active} يوم${streak.max > streak.active ? ` _(أعلى: ${streak.max})_` : ""}`;
+  } else if (streak.max > 0) {
+    streakBlock = `🔥 *السلسلة:* ابدأ اليوم! _(أعلاك: ${streak.max} يوم)_`;
+  } else {
+    streakBlock = `🔥 *السلسلة:* ابدأ اليوم — حمّل كتاباً وافتح أول milestone!`;
+  }
+
+  // ── Premium block ──
+  let premBlock: string;
+  if (prem) {
+    const days = premExp
+      ? Math.max(0, Math.ceil((premExp.getTime() - Date.now()) / (24 * 3600 * 1000)))
+      : 0;
+    premBlock = days > 0
+      ? `⭐ *Premium:* مفعّل _(${days} يوم متبقٍّ)_`
+      : `⭐ *Premium:* مفعّل _(دائم)_`;
+  } else {
+    premBlock = `⭐ *Premium:* غير مفعّل — \`/premium\` للترقية`;
+  }
+
+  // ── Badges block ──
+  let badgesBlock: string;
+  if (badges.length === 0) {
+    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— حمّل كتباً واصنع سلسلة لفتحها_`;
+  } else {
+    const list = badges.map(b => `${b.emoji} ${b.name}`).join(" · ");
+    badgesBlock = `🎓 *الشارات:* ${badges.length} / ${BADGES.length}\n_${list}_`;
+  }
+
+  // ── Referral block ──
+  let refBlock = "";
+  if (refState.count > 0 || refState.nextTier) {
+    const next = refState.nextTier;
+    refBlock = next
+      ? `\n🎁 *الإحالات:* ${refState.count} _— ${next.remaining} لمكافأة +${next.days} يوم Premium_`
+      : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
+  }
+
+  return (
+    `👤 *ملفك — ${escMd(name)}*\n` +
+    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+    `📥 *إجمالي التحميلات:* ${totalDl}\n` +
+    `${streakBlock}\n` +
+    `${premBlock}${refBlock}\n\n` +
+    `${badgesBlock}\n\n` +
+    `_استخدم \`/invite\` لرابط الدعوة، أو \`/stats\` للحد اليومي._`
   );
 }
 

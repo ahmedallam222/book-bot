@@ -28,6 +28,10 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
         { text: "🎲  كتاب مفاجأة",        callback_data: "rg:any"       },
       ],
       [
+        { text: "👤  ملفي",               callback_data: "my_profile"   },
+        { text: "🎁  ادعُ صديقاً",         callback_data: "invite_view"  },
+      ],
+      [
         { text: "📊  إحصائياتي",          callback_data: "my_stats"     },
         { text: "📚  سجل كتبي",           callback_data: "my_history"   },
       ],

@@ -166,10 +166,17 @@ if (bundle) {
   }
   // Arabic strings in templates are unicode-escaped by esbuild; check the
   // u-escape form so we know the apology copy + admin response made it in.
-  check("bundle contains apology Arabic (u-escaped آسف)",
-    bundle.includes("\\u0622\\u0633\\u0641") || bundle.includes("آسف على"));
+  // Updated PR #99 (2026-05-06): "آسف على" → "أعتذر على" (Modern Standard
+  // Arabic). Both u-escaped forms accepted to remain forward-compatible
+  // if the copy is re-tweaked again.
+  // FIX 2026-05-07: esbuild emits hex with mixed case (e.g. \u062A vs
+  // \u062a). Compare on a lowercased copy so case differences don't fail.
+  const bundleLc = bundle.toLowerCase();
+  check("bundle contains apology Arabic (u-escaped أعتذر or آسف)",
+    bundleLc.includes("\\u0623\\u0639\\u062a\\u0630\\u0631") || bundle.includes("أعتذر") ||
+    bundleLc.includes("\\u0622\\u0633\\u0641")               || bundle.includes("آسف على"));
   check("bundle contains admin response Arabic (u-escaped or raw إعادة)",
-    bundle.includes("\\u0625\\u0639\\u0627\\u062f\\u0629") || bundle.includes("إعادة"));
+    bundleLc.includes("\\u0625\\u0639\\u0627\\u062f\\u0629") || bundle.includes("إعادة"));
 }
 
 console.log(`\nTotal: ${pass + fail}  pass=${pass}  fail=${fail}`);
