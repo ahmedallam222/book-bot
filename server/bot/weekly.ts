@@ -1,35 +1,24 @@
 import TelegramBot from "node-telegram-bot-api";
 import { redis }    from "./redis.js";
 import { L }        from "./logger.js";
-import { escMd }    from "./text.js";
+import { escMd, truncateAtWord } from "./text.js";
+import { getWeeklyTopBooks } from "./analytics.js";
 
 // ══════════════════════════════════════════════
 // WEEKLY — أفضل كتب الأسبوع
+//
+// قبل الإصلاح: كان يقرأ من `stats:top_books` (الـ all-time) — نفس
+// المصدر بالظبط لقائمة "🏆 الأكثر تحميلاً". الـ button name كان "أسبوعي"
+// لكن البيانات كلية، فالقائمتين كانت متطابقة 100% للمستخدم.
+//
+// الآن: نقرأ من `stats:top_books:week:{ISO-week}` (TTL 21 يوم) عبر
+// `getWeeklyTopBooks`. الـ keys دي بيكتبها `trackDownload` في
+// analytics.ts بتوقيت القاهرة — فالأسبوع بينتهي في 23:59:59 ليلة الأحد
+// القاهري ويبدأ أسبوع جديد فجر الإثنين القاهري.
 // ══════════════════════════════════════════════
 
 const WEEKLY_CACHE_KEY = "weekly:top:cache";
 const WEEKLY_CACHE_TTL = 3600; // 1h
-
-async function getWeeklyTopBooks(limit = 10): Promise<{ book: string; count: number }[]> {
-  try {
-    // FIX-WEEKLY: استخدام zrangebyscore مع REV بطريقة متوافقة مع ioredis v4+
-    // zrevrange هو الأكثر توافقاً عبر إصدارات Redis المختلفة
-    // نستخدمه مباشرةً بدل الـ triple-fallback المعقّد
-    const raw = await redis.zrevrange(
-      "stats:top_books", 0, limit - 1, "WITHSCORES"
-    );
-
-    if (!Array.isArray(raw) || raw.length === 0) return [];
-
-    const result: { book: string; count: number }[] = [];
-    for (let i = 0; i < raw.length; i += 2) {
-      result.push({ book: raw[i], count: parseInt(raw[i + 1], 10) || 0 });
-    }
-    return result;
-  } catch {
-    return [];
-  }
-}
 
 export async function handleWeeklyCommand(
   bot:     TelegramBot,
@@ -52,7 +41,7 @@ export async function handleWeeklyCommand(
 
     if (books.length === 0) {
       await bot.sendMessage(chatId,
-        `📅 *أفضل الأسبوع*\n\n_لا توجد بيانات كافية بعد — عد لاحقاً!_`,
+        `📅 *أفضل كتب الأسبوع*\n\n_لا توجد بيانات كافية بعد — عد لاحقاً!_`,
         { parse_mode: "Markdown" }
       ).catch(() => {});
       return;
@@ -62,7 +51,8 @@ export async function handleWeeklyCommand(
     const lines  = books.map((b, i) => {
       const medal = medals[i] ?? `${i + 1}.`;
       const count = isAdmin ? ` _(${b.count})_` : "";
-      return `${medal} _${escMd(b.book.slice(0, 55))}_${count}`;
+      // Smart truncate at word boundary (was: hard slice at 55 → "Full boo")
+      return `${medal} _${escMd(truncateAtWord(b.book, 80))}_${count}`;
     });
 
     const msg =

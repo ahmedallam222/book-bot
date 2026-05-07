@@ -1,5 +1,7 @@
 import { redis, scanKeys } from "./redis.js";
-import { cairoDateString } from "./text.js";
+import {
+  cairoDateString, canonicalBookKey, isoWeekKey, isComplaintQuery,
+} from "./text.js";
 import {
   SOURCE_AUTO_DISABLE_MAX_RATE,
   SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
@@ -143,10 +145,34 @@ function recordSourceCounter(
     .catch(() => null);
 }
 
+// ── Top-Books leaderboard keys ────────────────
+//
+// All-time global leaderboard: `stats:top_books` (sorted set, member=canonical key)
+// Weekly bucket:               `stats:top_books:week:{ISO-week}` (TTL 21d)
+// Display name (best pretty form per canonical key): `stats:top_books_display` (hash)
+//
+// لماذا فصلنا الـ display عن الـ key:
+//   - الـ canonical key ضروري لدمج الصيغ (هكذا تتعافي/هكذا تتعافى → 1 entry)
+//     لكنه نص lowercase معرّب يفتقد للقصة الجمالية.
+//   - الـ display hash يحفظ "أحدث صياغة كنسية شفناها" (من cached.bookName
+//     لو موجود، وإلا الـ user query) فالعرض يبقى مقروء.
+//
+// لماذا 21 يوم TTL على الأسبوعي:
+//   - يكفي للأسبوع الحالي + هامش لو فيه DST/timezone edge — لو فيه
+//     مستخدم في توقيت مختلف يكتب الأحد متأخر بنحفظ الـ bucket.
+const WEEKLY_TOP_BOOKS_TTL_SEC = 21 * 24 * 3600;
+const TOP_BOOKS_DISPLAY_HASH = "stats:top_books_display";
+function weeklyTopBooksKey(week?: string): string {
+  return `stats:top_books:week:${week ?? isoWeekKey()}`;
+}
+export const TOP_BOOKS_KEY = "stats:top_books";
+export const TOP_BOOKS_DISPLAY_KEY = TOP_BOOKS_DISPLAY_HASH;
+export { weeklyTopBooksKey };
+
 // ── Download tracking ─────────────────────────
 export async function trackDownload(
   userId: string, bookName: string, found: boolean, fromCache: boolean,
-  domain?: string, ms?: number
+  domain?: string, ms?: number, canonicalTitle?: string,
 ): Promise<void> {
   const day = todayKey();
   const dailyKey = `stats:daily:${day}`;
@@ -157,8 +183,29 @@ export async function trackDownload(
   if (found && !fromCache) {
     pipe.hincrby(dailyKey, "downloads", 1);
     pipe.hincrby("stats:total", "downloads", 1);
-    // أكثر الكتب تحميلاً
-    pipe.zincrby("stats:top_books", 1, bookName.slice(0, 100));
+    // ── أكثر الكتب تحميلاً ─────────────────────
+    //
+    // Source preference: العنوان الكنسي اللي البوت سلّمه (cached.bookName)
+    // لو موجود — لأنه ثابت بغض النظر عن صياغة المستخدم. وإلا نرجع للـ
+    // user query كـ fallback.
+    //
+    // الـ key نخزّنه canonicalBookKey() عشان يدمج صيغ مختلفة
+    // (ى/ي، ة/ه، أ/إ/آ، ترقيم لاصق). الـ display name (الصيغة
+    // الجمالية للعرض) نخزّنه في hash منفصل.
+    const sourceTitle = (canonicalTitle && canonicalTitle.trim())
+      ? canonicalTitle.trim()
+      : bookName.trim();
+    const key = canonicalBookKey(sourceTitle);
+    // skip لو الـ query شكوى أو الـ canonical key اتفرّغ
+    if (key && !isComplaintQuery(bookName) && !isComplaintQuery(sourceTitle)) {
+      const display = sourceTitle.slice(0, 200);
+      const weeklyKey = weeklyTopBooksKey();
+      pipe.zincrby(TOP_BOOKS_KEY, 1, key);
+      pipe.zincrby(weeklyKey, 1, key);
+      pipe.expire(weeklyKey, WEEKLY_TOP_BOOKS_TTL_SEC);
+      // الـ display: نكتب آخر صياغة شفناها (نفضّل canonicalTitle لو موجود)
+      pipe.hset(TOP_BOOKS_DISPLAY_HASH, key, display);
+    }
   }
   touchDailyTtl(pipe, dailyKey);
   await pipe.exec().catch(() => {});
@@ -224,15 +271,46 @@ export async function getTotalStats(): Promise<Record<string, number>> {
   } catch { return {}; }
 }
 
+// Reads the all-time top books leaderboard. Maps canonical keys back
+// to their best display name via `stats:top_books_display`.
+//
+// Backward compat: legacy entries written before the canonical-key
+// migration are still raw user queries — so لو الـ display hash مفيهاش
+// مفتاح، نرجع الـ key نفسه كـ fallback.
 export async function getTopBooks(limit = 15, _date?: string): Promise<{ book: string; count: number }[]> {
   try {
-    const raw = await redis.zrevrange("stats:top_books", 0, limit - 1, "WITHSCORES");
-    const out: { book: string; count: number }[] = [];
-    for (let i = 0; i < raw.length; i += 2) {
-      out.push({ book: raw[i], count: parseInt(raw[i + 1], 10) || 0 });
-    }
-    return out;
+    const raw = await redis.zrevrange(TOP_BOOKS_KEY, 0, limit - 1, "WITHSCORES");
+    return await mapZsetWithDisplay(raw);
   } catch { return []; }
+}
+
+export async function getWeeklyTopBooks(limit = 10): Promise<{ book: string; count: number }[]> {
+  try {
+    const raw = await redis.zrevrange(weeklyTopBooksKey(), 0, limit - 1, "WITHSCORES");
+    return await mapZsetWithDisplay(raw);
+  } catch { return []; }
+}
+
+async function mapZsetWithDisplay(
+  raw: string[],
+): Promise<{ book: string; count: number }[]> {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const keys: string[] = [];
+  const counts: number[] = [];
+  for (let i = 0; i < raw.length; i += 2) {
+    keys.push(raw[i]);
+    counts.push(parseInt(raw[i + 1], 10) || 0);
+  }
+  let displays: (string | null)[] = [];
+  try {
+    if (keys.length > 0) {
+      displays = await redis.hmget(TOP_BOOKS_DISPLAY_HASH, ...keys);
+    }
+  } catch { displays = []; }
+  return keys.map((k, i) => ({
+    book:  (displays[i] && displays[i]!.trim()) ? displays[i]! : k,
+    count: counts[i],
+  }));
 }
 
 // PERF FIX: كان يصدر 7 round-trips متسلسلة (await في loop) → ~50ms latency

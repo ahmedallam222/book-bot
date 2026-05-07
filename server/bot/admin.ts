@@ -2,7 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis }         from "./redis.js";
 import { L }             from "./logger.js";
 import { storage }       from "../storage.js";
-import { escMd, cairoDateString } from "./text.js";
+import { escMd, cairoDateString, truncateAtWord } from "./text.js";
 import { getQueueStats, clearDLQ, getDLQJobs } from "./queue.js";
 import { blacklistStats, clearBlacklist }        from "./blacklist.js";
 import { getPdfValidationStats }                 from "./pdfValidator.js";
@@ -434,7 +434,7 @@ export async function handleAdminCallback(
             `◦ ${day}: طلبات *${s.requests ?? 0}* | نجح *${s.found ?? 0}* | تحميل *${s.downloads ?? 0}*`
           ).join("\n");
         const topLines = topBooks.map((b, i) =>
-          `${i + 1}\\. _${escMd(b.book.slice(0, 45))}_ *(${b.count})*`
+          `${i + 1}\\. _${escMd(truncateAtWord(b.book, 60))}_ *(${b.count})*`
         ).join("\n");
 
         await bot.sendMessage(chatId,
@@ -467,7 +467,7 @@ export async function handleAdminCallback(
         }
         const medals = ["🥇","🥈","🥉"];
         const lines  = top.map((b, i) =>
-          `${medals[i] ?? `${i + 1}\\.`} _${escMd(b.book.slice(0, 50))}_ *(${b.count})*`
+          `${medals[i] ?? `${i + 1}\\.`} _${escMd(truncateAtWord(b.book, 80))}_ *(${b.count})*`
         ).join("\n");
         await bot.sendMessage(chatId,
           `🏆 *أكثر 20 كتاباً تحميلاً*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
@@ -756,7 +756,8 @@ export async function buildTopBooksMessage(
     }
     const medals = ["🥇","🥈","🥉"];
     const lines  = top.map((b, i) =>
-      `${medals[i] ?? `${i + 1}\\.`} _${escMd(b.book.slice(0, 55))}_`
+      // Smart truncate at word boundary (was: hard slice at 55 → "Full boo")
+      `${medals[i] ?? `${i + 1}\\.`} _${escMd(truncateAtWord(b.book, 80))}_`
     ).join("\n");
     await bot.sendMessage(chatId,
       `🏆 *الأكثر تحميلاً*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
