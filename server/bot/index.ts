@@ -102,7 +102,7 @@ export async function startBot(): Promise<void> {
   // تسجيل handlers
   registerCommands(_bot, BOT_TOKEN, () => _botUsername, () => _botId);
   registerMessageHandler(_bot, BOT_TOKEN, () => _botUsername);
-  registerCallbackHandler(_bot, BOT_TOKEN);
+  registerCallbackHandler(_bot, BOT_TOKEN, () => _botUsername);
 
   // استماع لأحداث البث من الـ dashboard
   (process as NodeJS.EventEmitter).on("dashboard:broadcast", async (payload: {

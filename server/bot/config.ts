@@ -179,6 +179,22 @@ export const UNRELIABLE_DOMAINS: string[] = [
     .filter(Boolean),
 ];
 
+// ── Hard-blocked domains ─────────────────────
+// قائمة سوداء "حقيقية" — أي URL يطابقها يُسقط فوراً في verify.ts
+// قبل أي HEAD/GET. مختلفة عن UNRELIABLE_DOMAINS اللي بس بيخفض الترتيب.
+// نستخدمها لـ domains معطوبة بالكامل (wayback academic ranges، إلخ).
+//
+// 2026-05-07 (Donna): scholar.archive.org تم رفعه لـ hard block — رغم
+// كونه في unreliable من قبل، لا تزال تظهر روابط منه في results عند
+// عدم وجود بدائل. الـ hard block يضمن إنه لا يُحاول معه أبداً.
+export const HARD_BLOCKED_DOMAINS: string[] = [
+  "scholar.archive.org",
+  ...(process.env.HARD_BLOCKED_DOMAINS_EXTRA || "")
+    .split(",")
+    .map(d => d.trim())
+    .filter(Boolean),
+];
+
 export const SOURCE_AUTO_DISABLE_MIN_ATTEMPTS = parseInt(
   process.env.SOURCE_AUTO_DISABLE_MIN_ATTEMPTS || "8",
   10,
