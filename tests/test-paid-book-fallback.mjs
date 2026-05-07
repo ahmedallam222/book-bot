@@ -22,7 +22,7 @@
 //   5. الـ bundle فيه `kbNoResults` (الكيبورد الجديد للرسالة القاطعة)
 
 import { readFileSync } from "node:fs";
-import { buildPaidBookMessage } from "./server/bot/ui.ts";
+import { buildPaidBookMessage } from "../server/bot/ui.ts";
 
 const BUNDLE_PATH = "./dist/index.cjs";
 const bundle = readFileSync(BUNDLE_PATH, "utf8");

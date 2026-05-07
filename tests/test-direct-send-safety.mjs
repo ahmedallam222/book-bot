@@ -23,7 +23,7 @@
 // نختبر directSendUnsafe + filename relevance scoring + the new
 // pdfValidator trusted-domain unrelated-filename branch.
 
-import { urlFilenameRelevance } from "./server/bot/text.ts";
+import { urlFilenameRelevance } from "../server/bot/text.ts";
 
 // نسخة مطابقة من directSendUnsafe في download.ts
 function directSendUnsafe(bookName, pdfUrl) {

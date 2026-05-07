@@ -15,7 +15,7 @@
 //
 // تشغيل: `node test-parser-preserves-قراءة.mjs` — يكفي tsx لاستيراد الـ TS.
 
-import { parseBookName } from "./server/bot/bookNameParser.ts";
+import { parseBookName } from "../server/bot/bookNameParser.ts";
 
 const TESTS = [
   // ── حالات حقيقية (الكتاب الذي كشف الـ bug) ──
