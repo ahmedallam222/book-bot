@@ -435,7 +435,9 @@ async function serveFromCache(
       logSearch(userId, userName, bookName, true, true, 1);
       setLastBook(userId, bookName).catch(() => {});
       warmRelatedCache(bookName).catch(() => {});
-      trackDownload(userId, bookName, true, true, undefined, Date.now() - t0).catch(() => {});
+      // Pass cached.bookName as canonical title — أحدث صياغة كنسية للكتاب
+      // ده بيدمج كل المستخدمين اللي طلبوا نفس الكتاب بصيغ مختلفة في leaderboard entry واحد.
+      trackDownload(userId, bookName, true, true, undefined, Date.now() - t0, cached.bookName).catch(() => {});
       await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
       return true;
     } catch {
@@ -464,7 +466,8 @@ async function serveFromCache(
         logSearch(userId, userName, bookName, true, true, 1);
         setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
-        trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0).catch(() => {});
+        // Pass cached.bookName as canonical title — راجع التعليق أعلاه.
+        trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0, cached.bookName).catch(() => {});
         await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
         return true;
       }

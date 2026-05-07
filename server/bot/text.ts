@@ -227,6 +227,120 @@ export function buildResetTime(): string {
     : "دقائق قليلة";
 }
 
+// ══════════════════════════════════════════════
+// LEADERBOARD helpers — تستخدمها analytics.ts و weekly.ts
+// ══════════════════════════════════════════════
+
+/**
+ * مفتاح كنسي لاسم الكتاب في الـ leaderboard (`stats:top_books*`).
+ *
+ * يدمج 4 خطوات على رأس `canonicalizeForCache`:
+ *  1. canonicalizeForCache (تطبيع عربي + تنظيف noise + lowercase)
+ *  2. حذف علامات ترقيم نهائية (',", . إلخ) — كانت تتسرّب من الـ
+ *     copy/paste وتخلي "X" و "X." entries مختلفة
+ *  3. حذف فواصل غير مفيدة في البداية/النهاية ("ـ", "—", "-")
+ *  4. اقتصاص لـ 100 حرف (نفس حد التخزين القديم)
+ *
+ * الفائدة: "هكذا تتعافي" و "هكذا تتعافى" → نفس المفتاح. كذلك
+ * "أرض زيكولا" و "ارض زيكولا" و "ارض زيكولا pdf" — كله مفتاح واحد.
+ *
+ * ملاحظة: ده ما بيدمجش "هكذا تتعافي" مع "هكذا تتعافي عندما تكون
+ * مستعدا تأليف بريانا وايست" (يوزر ضاف اسم المؤلف). الحل لده هو
+ * استخدام `cached.bookName` (العنوان الكنسي اللي البوت سلّمه فعلاً)
+ * بدل الـ user query — شاهد `trackDownload` في analytics.ts.
+ */
+export function canonicalBookKey(text: string): string {
+  if (!text) return "";
+  let key = canonicalizeForCache(text);
+  // علامات ترقيم لاصقة في الآخر/البداية
+  key = key.replace(/^[\s.,;:!?'"`«»—–\-ـ]+|[\s.,;:!?'"`«»—–\-ـ]+$/g, "");
+  // مسافات داخلية مزدوجة (لو cleanSearchQuery خلّف فجوات)
+  key = key.replace(/\s+/g, " ").trim();
+  if (key.length > 100) key = key.slice(0, 100).trim();
+  return key;
+}
+
+/**
+ * عام-أسبوع كـ "YYYY-Www" بتوقيت القاهرة.
+ * بيستخدمه الـ leaderboard للبكتنق الأسبوعي.
+ *
+ * ISO week (Mon-Sun)، مع ضبط أن الأسبوع الذي يحتوي على
+ * 4 يناير ينتمي للسنة الجديدة بحسب ISO 8601.
+ * نحسبه على Cairo midnight: نأخذ الـ Cairo date string ثم نحوّله
+ * لـ Date في UTC (آمن لأن الـ ISO-week حسبة منفصلة).
+ */
+export function isoWeekKey(now: Date = new Date()): string {
+  // نأخذ تاريخ القاهرة YYYY-MM-DD ونعيد بناء Date منه — فعلياً ده
+  // بيخلي الحسبة تتعامل مع "اليوم القاهري" كـ unit وليس مع UTC.
+  const cairoYmd = cairoDateString(now); // YYYY-MM-DD
+  const [yStr, mStr, dStr] = cairoYmd.split("-");
+  const y = parseInt(yStr, 10);
+  const m = parseInt(mStr, 10);
+  const d = parseInt(dStr, 10);
+  // ISO-week algo (يوم الخميس الأنكور)
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dayNum = dt.getUTCDay() || 7;     // Mon=1..Sun=7
+  dt.setUTCDate(dt.getUTCDate() + 4 - dayNum); // الخميس في نفس الأسبوع
+  const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil(
+    (((dt.getTime() - yearStart.getTime()) / 86_400_000) + 1) / 7
+  );
+  const ww = weekNum < 10 ? `0${weekNum}` : `${weekNum}`;
+  return `${dt.getUTCFullYear()}-W${ww}`;
+}
+
+/**
+ * قائمة كلمات شكوى — لو ظهرت في query فمعناه إن المستخدم بيشتكي
+ * إن البوت سلّم له ملف غلط، مش بيدوّر على كتاب بهذا الاسم.
+ * نتجاهلها من الـ leaderboard.
+ *
+ * البوت بيخزّن الـ query لما يلاقي ملف ويسلّمه — فلو المستخدم كتب
+ * "هذا ليس الكتاب المطلوب" والبوت سلّم له حاجة، ده يدخل الـ
+ * leaderboard كأنه كتاب اسمه "هذا ليس الكتاب المطلوب". نمنعه هنا.
+ */
+const COMPLAINT_PATTERNS: RegExp[] = [
+  /ليس\s+الكتاب\s+المطلوب/i,
+  /مش\s+(?:هو|الكتاب|دا|دي|ده|اللي)/i,
+  /غلط\s+الكتاب|كتاب\s+غلط/i,
+  /خطأ|خاطئ/i,
+  /\bwrong\s+book\b/i,
+  /\bnot\s+the\s+book\b/i,
+];
+
+export function isComplaintQuery(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+  for (const re of COMPLAINT_PATTERNS) {
+    if (re.test(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * اقتصاص ذكي للنصوص الطويلة عند حدود الكلمات.
+ *
+ * المشكلة قبل: `text.slice(0, 55)` كان يقطع وسط الكلمة فيظهر مثلاً
+ * "Full boo" بدل "Full book".
+ *
+ * الحل: نقطع عند آخر مسافة ≤ maxLen، ولو ما لقيناش مسافة قريبة
+ * كفاية (≥ 80% من maxLen) نرجع لقص حرفي + "…".
+ */
+export function truncateAtWord(text: string, maxLen = 80): string {
+  if (!text) return "";
+  if (text.length <= maxLen) return text;
+
+  const sliced = text.slice(0, maxLen);
+  // آخر مسافة في النص المقصوص
+  const lastSpace = sliced.lastIndexOf(" ");
+  // لو المسافة قريبة كفاية من النهاية (≥ 80% maxLen) نقص عندها
+  if (lastSpace > 0 && lastSpace >= Math.floor(maxLen * 0.8)) {
+    return `${sliced.slice(0, lastSpace).trim()}…`;
+  }
+  // قص حرفي + ellipsis (نشيل آخر حرف عشان الـ … يدخل)
+  return `${sliced.slice(0, maxLen - 1).trim()}…`;
+}
+
 /**
  * يُستخدم لترتيب URLs قبل التحميل —
  * أسماء الملفات الرقمية تحصل على 0.3 neutral بدل 0
