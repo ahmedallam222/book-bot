@@ -1,0 +1,61 @@
+name: ✨ Feature request
+description: اقتراح ميزة جديدة — Suggest an enhancement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        شكراً لاقتراحك! املأ الحقول التالية لمساعدتنا في فهم الفكرة.
+        Thanks for the suggestion. Help us understand the idea by filling in the details below.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: ما المشكلة التي تحلها هذه الميزة؟ — What problem does this solve?
+      description: اشرح حالة الاستخدام أو الإحباط الحالي.
+      placeholder: حالياً المستخدم لا يستطيع …
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: الاقتراح — Proposed solution
+      description: كيف تتخيل أن تعمل الميزة؟
+      placeholder: أقترح إضافة زر / أمر / صفحة جديدة …
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: بدائل فكرت فيها — Alternatives considered
+      placeholder: هل هناك حلول أخرى ممكنة؟ لماذا اخترت هذا الحل تحديداً؟
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: نطاق التغيير — Scope
+      multiple: false
+      options:
+        - User-facing command or button
+        - Engagement (streak / badges / referral / leaderboards)
+        - Search / source coverage
+        - AI summary / content
+        - Premium / payments
+        - Admin dashboard
+        - Internal infra (queue / cache / telemetry)
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: تأكيدات
+      options:
+        - label: لقد بحثت في الـ Issues المفتوحة ولم أجد تكراراً.
+          required: true

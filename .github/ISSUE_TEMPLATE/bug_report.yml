@@ -1,0 +1,87 @@
+name: 🐞 Bug report
+description: تقرير عن خلل في @kholasaelktob_Bot — Report a bug
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        شكراً لإبلاغنا. املأ الحقول التالية بأكبر قدر ممكن من التفاصيل.
+        Thanks for the report. Please fill in as much detail as you can.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: ماذا حدث؟ — What happened?
+      description: اشرح المشكلة بوضوح. لو ممكن، اربط برسالة معينة من البوت.
+      placeholder: مثال — طلبت كتاب "نظرية الفستق" والبوت أرسل رابطاً معطلاً.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: خطوات إعادة الإنتاج — Steps to reproduce
+      description: قائمة مرقّمة بالخطوات حتى تظهر المشكلة.
+      placeholder: |
+        1. اضغط /start
+        2. اكتب اسم الكتاب
+        3. اضغط زر "ابحث"
+        4. لاحظ أن ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: المتوقع — Expected behaviour
+      placeholder: ما الذي كنت تتوقع أن يحدث بدلاً مما حدث؟
+    validations:
+      required: false
+
+  - type: input
+    id: telegram-id
+    attributes:
+      label: Telegram numeric user ID (optional)
+      description: لو معروف ومتاح. هذا يساعدنا في فحص الـ logs بدقة.
+      placeholder: "123456789"
+    validations:
+      required: false
+
+  - type: input
+    id: when
+    attributes:
+      label: متى حصل؟ — Approximate time (UTC or Cairo TZ)
+      placeholder: "2026-05-07 14:30 Cairo"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: حساب — Account tier
+      options:
+        - Free
+        - Premium (paid)
+        - Premium (referral reward)
+        - Don't know
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: لقطات شاشة / سجلات — Screenshots / logs
+      description: اسحب وأفلت أي صور هنا. تجنب لصق token أو معلومات حساسة.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: تأكيدات
+      options:
+        - label: لقد بحثت في الـ Issues المفتوحة ولم أجد تكراراً.
+          required: true
+        - label: لم أُدرج أي token أو credentials في هذا التقرير.
+          required: true
