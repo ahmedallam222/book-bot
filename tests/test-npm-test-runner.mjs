@@ -1,13 +1,12 @@
-// Tests Bug #21 — `npm test` script + portable runner.
+// Tests `npm test` script + portable runner.
 //
-// Pre-fix: `npm test` exited with 1 ("Error: no test specified")
-// because there was no test script. Local devs and CI workflows had
-// to know to run `npx tsx test-foo.mjs` (a plain `node test-foo.mjs`
-// fails with ERR_UNKNOWN_FILE_EXTENSION because the .mjs file imports
-// `./server/bot/*.ts`). The CI workflow had an inline shell loop
-// duplicating that knowledge.
-//
-// Post-fix: `script/run-tests.mjs` is the single source of truth.
+// History: pre-fix, `npm test` exited with 1 because there was no test
+// script. Local devs and CI workflows had to know to run
+// `npx tsx test-foo.mjs` (plain `node` fails with
+// ERR_UNKNOWN_FILE_EXTENSION because the .mjs files import
+// `./server/bot/*.ts`). Post-fix: `script/run-tests.mjs` is the single
+// source of truth, and tests live under `tests/` (moved from the repo
+// root for a cleaner public-facing layout).
 import fs from "fs";
 
 let pass = 0, fail = 0;
@@ -30,18 +29,24 @@ ok("test does not call npx tsx", !/npx tsx/.test(pkg.scripts.test),
 // — runner script —
 console.log("\nscript/run-tests.mjs");
 ok("uses spawnSync from node:child_process", runner.includes('from "node:child_process"'));
-ok("invokes tsx for each test",              /spawnSync\("npx", \["tsx", t\]/.test(runner));
+ok("invokes tsx for each test",              /spawnSync\("npx", \["tsx", `tests\/\$\{t\}`\]/.test(runner));
+ok("reads from tests/ directory",            /readdirSync\(TESTS_DIR\)/.test(runner));
 ok("globs test-*.mjs",                       /startsWith\("test-"\)\s*&&\s*[^\n]*?endsWith\("\.mjs"\)/.test(runner));
 ok("exits non-zero on failure",              /process\.exit\(1\)/.test(runner));
 ok("supports TEST_FILTER env",               runner.includes("TEST_FILTER"));
 ok("supports --keep-going flag",             runner.includes("--keep-going"));
 
-// CI workflow integration is intentionally NOT asserted here:
-// the OAuth app used for these PRs lacks the `workflow` scope so we
-// can't modify .github/workflows/ci.yml from CI. The existing inline
-// shell loop in CI still works with the new runner; updating CI to
-// use `npm test` is an optional follow-up that has to be done in a
-// separate PR with proper permissions.
+// — CI workflow integration —
+// CI currently uses an inline shell loop that globs test-*.mjs at the
+// repo root. Since the test files now live under tests/, we ship a
+// thin root-level shim (test-suite.mjs) that the existing CI loop
+// picks up and which delegates to script/run-tests.mjs. Once the
+// workflow file is updated to use `npm test` directly (requires the
+// `workflow` OAuth scope which Devin doesn't have), the shim can be
+// deleted.
+console.log("\nroot shim test-suite.mjs");
+const shim = fs.readFileSync("test-suite.mjs", "utf-8");
+ok("shim invokes script/run-tests.mjs", shim.includes("script/run-tests.mjs"));
 
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);

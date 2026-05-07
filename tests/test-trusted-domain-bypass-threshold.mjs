@@ -27,8 +27,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { urlFilenameRelevance } from "./server/bot/text.ts";
-import { TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD } from "./server/bot/config.ts";
+import { urlFilenameRelevance } from "../server/bot/text.ts";
+import { TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD } from "../server/bot/config.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,7 +46,7 @@ check("TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD ≥ 0.55",
 
 // Verify the call site in pdfValidator.ts uses the constant (not 0.15).
 const validatorSrc = fs.readFileSync(
-  path.join(__dirname, "server/bot/pdfValidator.ts"), "utf8",
+  path.join(__dirname, "../server/bot/pdfValidator.ts"), "utf8",
 );
 check("pdfValidator.ts imports TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD",
   validatorSrc.includes("TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD"),
@@ -135,7 +135,7 @@ console.log("\n=== E4: env override behaviour (sanity) ===");
 // Direct re-import won't re-evaluate (ESM module caching); we just
 // assert the source pattern is correct.
 const configSrc = fs.readFileSync(
-  path.join(__dirname, "server/bot/config.ts"), "utf8",
+  path.join(__dirname, "../server/bot/config.ts"), "utf8",
 );
 check("config.ts wires env override for TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD",
   configSrc.includes("process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD"),

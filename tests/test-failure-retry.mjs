@@ -37,7 +37,7 @@ function check(label, condition, expected, actual) {
 }
 
 // ── 1. Static module exports + constants ──
-const retrySrc = await readFile(path.join(root, "server/bot/failureRetry.ts"), "utf-8");
+const retrySrc = await readFile(path.join(root, "../server/bot/failureRetry.ts"), "utf-8");
 
 const exportedNames = [
   "recordFailure",
@@ -70,7 +70,7 @@ check("RETRY_WORKER_INTERVAL_MS >= 5min", intervalMatch && Number(intervalMatch[
 check("RETRY_WORKER_STARTUP_MS >= 1min",  startupMatch && Number(startupMatch[1]) * Number(startupMatch[2]) * Number(startupMatch[3]) >= 60 * 1000);
 
 // Rescue thresholds mirror bookRequest.ts (so retries see same candidate set)
-const bookReqSrc = await readFile(path.join(root, "server/bot/bookRequest.ts"), "utf-8");
+const bookReqSrc = await readFile(path.join(root, "../server/bot/bookRequest.ts"), "utf-8");
 const reqBest    = bookReqSrc.match(/RESCUE_BEST_PDF_THRESHOLD\s*=\s*([\d.]+)/);
 const retryBest  = retrySrc.match(/RETRY_RESCUE_BEST_PDF_THRESHOLD\s*=\s*([\d.]+)/);
 check("RETRY_RESCUE_BEST_PDF_THRESHOLD matches bookRequest.ts",
@@ -125,7 +125,7 @@ check("recordFailure skipped when showPaidBookMessage",
   /!showPaidBookMessage\s*&&\s*userMessageId/.test(bookReqSrc));
 
 // ── 3. Bot startup wiring ──
-const indexSrc = await readFile(path.join(root, "server/bot/index.ts"), "utf-8");
+const indexSrc = await readFile(path.join(root, "../server/bot/index.ts"), "utf-8");
 check("index.ts imports startFailureRetryWorker",
   /import\s+\{\s*startFailureRetryWorker\s*\}\s+from\s+["']\.\/failureRetry/.test(indexSrc));
 check("index.ts calls startFailureRetryWorker",
@@ -137,7 +137,7 @@ check("retry worker started after alertWatcher",
   startAlertIdx > 0 && startRetryIdx > startAlertIdx);
 
 // ── 4. /retry_failures admin command ──
-const cmdSrc = await readFile(path.join(root, "server/bot/commands.ts"), "utf-8");
+const cmdSrc = await readFile(path.join(root, "../server/bot/commands.ts"), "utf-8");
 check("commands.ts imports runRetryPass + listPendingFailures",
   /import\s+\{\s*runRetryPass,\s*listPendingFailures\s*\}\s+from\s+["']\.\/failureRetry/.test(cmdSrc));
 check("/retry_failures regex registered", /bot\.onText\(\s*\/\^\\\/retry_failures/.test(cmdSrc));
@@ -148,7 +148,7 @@ check("/retry_failures triggers runRetryPass with triggeredBy='admin'",
 // ── 5. Compiled-bundle markers ──
 let bundle = "";
 try {
-  bundle = await readFile(path.join(root, "dist/index.cjs"), "utf-8");
+  bundle = await readFile(path.join(root, "../dist/index.cjs"), "utf-8");
 } catch {
   console.log("SKIP  bundle markers (dist/index.cjs not built — run npm run build)");
 }

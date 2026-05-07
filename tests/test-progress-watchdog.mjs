@@ -19,7 +19,7 @@ import {
   armProgressWatchdog,
   clearProgressWatchdog,
   _watchdogCount,
-} from "./server/bot/progressWatchdog.ts";
+} from "../server/bot/progressWatchdog.ts";
 
 let pass = 0, fail = 0;
 function check(name, cond, want, got) {
