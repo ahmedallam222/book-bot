@@ -24,7 +24,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)));
-const src  = readFileSync(`${ROOT}/server/bot/analytics.ts`, "utf8");
+const src  = readFileSync(`${ROOT}/../server/bot/analytics.ts`, "utf8");
 
 let pass = 0, fail = 0;
 function check(name, cond, hint = "") {

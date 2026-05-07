@@ -13,8 +13,8 @@
 
 import {
   formatStreakLine, buildMilestoneMessage, buildBrokenStreakMessage,
-} from "./server/bot/streak.ts";
-import { BADGES } from "./server/bot/badges.ts";
+} from "../server/bot/streak.ts";
+import { BADGES } from "../server/bot/badges.ts";
 
 let pass = 0, fail = 0;
 function check(name, cond, info = "") {

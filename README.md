@@ -20,7 +20,7 @@
 ![TS Modules](https://img.shields.io/badge/TS_Modules-68-blue?style=flat-square)
 ![Sources](https://img.shields.io/badge/Arabic_Sources-14-orange?style=flat-square)
 ![AI Providers](https://img.shields.io/badge/AI_Providers-10-purple?style=flat-square)
-![Tests](https://img.shields.io/badge/Smoke_Tests-13-success?style=flat-square)
+![Tests](https://img.shields.io/badge/Smoke_Tests-45-success?style=flat-square)
 
 <br/>
 
@@ -303,7 +303,7 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
 | Browser automation | Playwright (Chromium) | Used only for noor-book Cloudflare bypass |
 | Build | esbuild → CJS bundle | <600 KB output, ~50ms cold build |
 | Container | Docker + Compose | One-command dev + prod parity |
-| CI | GitHub Actions | typecheck + build + 13 smoke tests on every PR |
+| CI | GitHub Actions | typecheck + build + 45 smoke tests on every PR |
 
 ---
 
@@ -646,7 +646,9 @@ book-bot/
 │   ├── PRODUCTION.md                 ← deploy notes
 │   └── SERVER_SYNC_PLAN.md
 │
-├── test-*.mjs                        ← 13 smoke tests (CI runs them all)
+├── tests/                            ← 45 deterministic smoke tests
+│   └── test-*.mjs                    ← runs in CI via `npm test`
+├── test-suite.mjs                    ← thin shim so the legacy CI loop still works
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 ├── LICENSE                           ← MIT
@@ -796,7 +798,7 @@ Redis state is intentionally **not** part of the backup loop — every Redis key
 
 ## 🧪 Testing
 
-Tests live as standalone `test-*.mjs` files at the repo root. Each file is a deterministic probe: no network, no real Telegram. Many tests import the live `.ts` modules through `tsx` for accurate behaviour.
+Tests live as standalone `test-*.mjs` files under <code>tests/</code>. Each file is a deterministic probe: no network, no real Telegram. Many tests import the live `.ts` modules through `tsx` for accurate behaviour.
 
 ```bash
 # run the full suite
@@ -812,27 +814,33 @@ npm run build
 TEST_FILTER=streak npm test
 ```
 
-Coverage of current tests (13 files):
+Coverage of key tests (45 files total):
 
 | Test | What it pins down |
 |---|---|
 | `test-cache-key-normalization.mjs` | Arabic normalization → Redis key parity |
 | `test-cache-poison-defense.mjs` | Refuse to cache opaque/numeric URLs from untrusted sources |
+| `test-cairo-timezone.mjs` | Cairo TZ math for daily resets + streaks |
 | `test-dedup-isPremium.mjs` | Per-request memoisation cuts Redis round-trips |
 | `test-direct-send-safety.mjs` | Direct-mode never delivers a viewer-only / paid URL |
 | `test-engagement.mjs` | Streak + badges + referral correctness (54 assertions) |
 | `test-failure-retry.mjs` | Apology message uses Modern Standard Arabic |
+| `test-firecrawl-parse.mjs` | Firecrawl response shape + URL extraction |
 | `test-garbage-meta-and-noor-tag.mjs` | Reject "1 Image" titles + early-skip noor non-book pages |
 | `test-leaderboard.mjs` | Canonical key + ISO-week + complaint filter + bundle markers |
 | `test-leaderboard-cache-hits.mjs` | Cache-hit gate regression check (9 assertions) |
 | `test-markdown-balance.mjs` | Telegram Markdown markers paired in /invite messages |
 | `test-paid-book-fallback.mjs` | Paid-book detection produces user-visible explanation |
 | `test-parser-preserves-قراءة.mjs` | Don't strip "قراءة" / "اقرأ" when they are part of a title |
+| `test-payment-idempotency.mjs` | Telegram redelivery never grants double Premium |
 | `test-premium-expiration.mjs` | TTL-based expiry + lazy cleanup |
+| `test-queue-fixes.mjs` | Atomic queue dequeue + DLQ behavior |
 | `test-source-weighting.mjs` | Auto-disable thresholds (tier-1, tier-2, trust) |
 | `test-summary-badge-wiring.mjs` | Summary badge import + call ordering (10 assertions) |
 | `test-telemetry-self-trim.mjs` | Trace-store self-trims to bounded memory |
 | `test-validate-numeric-id.mjs` | Telegram ID validation incl. `Number.isSafeInteger` |
+
+…and 24 more covering Firecrawl parsing, source ranking, payment validation, daily digest, queue recovery, summary cache keys, and other surface area.
 
 CI workflow: <code>.github/workflows/ci.yml</code> — typecheck, build, then every smoke test, blocking PR merge on failure.
 
@@ -867,7 +875,7 @@ Contributions are welcome. The full guide is in <code>CONTRIBUTING.md</code> —
 
 1. Fork → branch (`feat/...` or `fix/...`).
 2. Make sure `npm run typecheck`, `npm run build`, and `npm test` all pass.
-3. Add / update a `test-*.mjs` for any non-trivial behaviour change.
+3. Add / update a `tests/test-*.mjs` for any non-trivial behaviour change.
 4. Open a PR against `main` with a clear description of the **problem**, the **fix**, and any **trade-offs**.
 5. CI must be green; one approving review is required.
 

@@ -11,7 +11,7 @@
 // result. Instead of mocking Firecrawl, we exercise the ranking
 // indirectly by calling urlFilenameRelevance (the underlying primitive)
 // and then we duplicate the scoring formula here as a sanity check.
-import { urlFilenameRelevance } from "./server/bot/text.js";
+import { urlFilenameRelevance } from "../server/bot/text.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, info = "") { if (cond) pass++; else fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${info ? ` (${info})` : ""}`); }
