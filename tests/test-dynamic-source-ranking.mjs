@@ -7,8 +7,8 @@
 //
 // Run from repo root: npx tsx test-dynamic-source-ranking.mjs
 import fs from "fs";
-import { rankSourcesByTrust } from "./server/bot/analytics.ts";
-import { SOURCE_RANK_MIN_SAMPLES } from "./server/bot/config.ts";
+import { rankSourcesByTrust } from "../server/bot/analytics.ts";
+import { SOURCE_RANK_MIN_SAMPLES } from "../server/bot/config.ts";
 
 let pass = 0, fail = 0;
 const expect = (label, ok, got, want) => {

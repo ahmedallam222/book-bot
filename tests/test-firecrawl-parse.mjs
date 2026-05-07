@@ -40,7 +40,7 @@ function check(cond, msg) {
 
 // ─── D1: bundle markers ───────────────────────────────────────────
 console.log("\n─── D1: Bundle marker check (dist/index.cjs) ───");
-const bundlePath = path.join(__dirname, "dist", "index.cjs");
+const bundlePath = path.join(__dirname, "..", "dist", "index.cjs");
 const bundle     = fs.readFileSync(bundlePath, "utf-8");
 
 // New module markers — these names should not be tree-shaken since
@@ -126,7 +126,7 @@ globalThis.fetch = async (url, init) => {
 // simple, use Node's native esm resolution against our source.
 let mod;
 try {
-  mod = await import("./server/bot/firecrawlParse.ts");
+  mod = await import("../server/bot/firecrawlParse.ts");
 } catch (e) {
   // tsx is the test runner — fall back to a top-level dynamic import
   // that should work when invoked via `npx tsx test-firecrawl-parse.mjs`.

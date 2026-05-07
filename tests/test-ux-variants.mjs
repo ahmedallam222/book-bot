@@ -34,9 +34,9 @@ import {
   REACTION_PAID_BOOK,
   pickRandom,
   chance,
-} from "./server/bot/uiVariants.ts";
+} from "../server/bot/uiVariants.ts";
 
-import { buildProgress, buildSuccessMsg, buildPaidBookMessage, buildNoResults } from "./server/bot/ui.ts";
+import { buildProgress, buildSuccessMsg, buildPaidBookMessage, buildNoResults } from "../server/bot/ui.ts";
 
 let pass = 0, fail = 0;
 function check(name, cond, want, got) {

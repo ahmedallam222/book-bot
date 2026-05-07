@@ -8,7 +8,7 @@
 // → different keys, both passed NX, ran AI twice
 //
 // Post-fix: both paths use summary:lock:{userId}:{canonicalBook}.
-import { canonicalizeForCache } from "./server/bot/text.js";
+import { canonicalizeForCache } from "../server/bot/text.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, info = "") { if (cond) pass++; else fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${info ? ` (${info})` : ""}`); }
