@@ -22,7 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalizeForCache } from "./server/bot/text.ts";
+import { canonicalizeForCache } from "../server/bot/text.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,7 +36,7 @@ function check(name, cond, want, got) {
 console.log("=== K1: source uses canonicalizeForCache ===");
 
 const summarySrc = fs.readFileSync(
-  path.join(__dirname, "server/bot/summary.ts"), "utf8",
+  path.join(__dirname, "../server/bot/summary.ts"), "utf8",
 );
 
 // Locate the cacheKey function and assert it uses canonicalizeForCache.

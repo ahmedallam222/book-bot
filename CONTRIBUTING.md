@@ -88,10 +88,18 @@ npx tsc --noEmit
 # تحقق من البناء
 npm run build
 
+# تشغيل الاختبارات الـ deterministic كلها (45 ملف)
+npm test
+
+# تشغيل subset أثناء التطوير
+TEST_FILTER=cache npm test
+
 # اختبار يدوي
 npm run dev
 # جرب: /start، /search كتاب، /premium، /stats
 ```
+
+ملفات الاختبار تعيش تحت `tests/test-*.mjs`. أضف اختباراً جديداً لأي تغيير سلوكي غير تافه.
 
 ---
 

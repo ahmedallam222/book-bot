@@ -32,7 +32,7 @@ function check(name, cond, want, got) {
 console.log("=== S1: source: queuedIds.add(id) after lpush ===");
 
 const queueSrc = fs.readFileSync(
-  path.join(__dirname, "server/bot/queue.ts"), "utf8",
+  path.join(__dirname, "../server/bot/queue.ts"), "utf8",
 );
 
 // We expect: the requeue branch now adds the id back into `queuedIds`

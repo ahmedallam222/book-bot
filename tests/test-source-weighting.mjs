@@ -1,14 +1,14 @@
 // Probes for find-to-send-loss mitigation (PR vs main).
 // Run from repo root: npx tsx test-source-weighting.mjs
 
-import { sanitizeDomainKey } from "./server/bot/analytics.ts";
+import { sanitizeDomainKey } from "../server/bot/analytics.ts";
 import {
   MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
   MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
   LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
   UNRELIABLE_DOMAINS,
-} from "./server/bot/config.ts";
-import { urlFilenameRelevance } from "./server/bot/text.ts";
+} from "../server/bot/config.ts";
+import { urlFilenameRelevance } from "../server/bot/text.ts";
 
 let pass = 0, fail = 0;
 const expect = (label, ok, got, want) => {
