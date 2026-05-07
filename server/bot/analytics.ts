@@ -183,15 +183,22 @@ export async function trackDownload(
   if (found && !fromCache) {
     pipe.hincrby(dailyKey, "downloads", 1);
     pipe.hincrby("stats:total", "downloads", 1);
-    // ── أكثر الكتب تحميلاً ─────────────────────
-    //
-    // Source preference: العنوان الكنسي اللي البوت سلّمه (cached.bookName)
-    // لو موجود — لأنه ثابت بغض النظر عن صياغة المستخدم. وإلا نرجع للـ
-    // user query كـ fallback.
-    //
-    // الـ key نخزّنه canonicalBookKey() عشان يدمج صيغ مختلفة
-    // (ى/ي، ة/ه، أ/إ/آ، ترقيم لاصق). الـ display name (الصيغة
-    // الجمالية للعرض) نخزّنه في hash منفصل.
+  }
+  // ── أكثر الكتب تحميلاً ─────────────────────
+  //
+  // FIX (PR #103): الـ leaderboard لازم يحسب كل التحميلات الناجحة،
+  // سواء جت من الكاش أو من بحث جديد. الإصدار السابق كان داخل
+  // gate `if (found && !fromCache)` فالـ cache hits ما كانتش
+  // بتُحسب — يعني بمجرد ما الكتاب يتكاش، scoreه يتجمد.
+  //
+  // Source preference: العنوان الكنسي اللي البوت سلّمه (cached.bookName)
+  // لو موجود — لأنه ثابت بغض النظر عن صياغة المستخدم. وإلا نرجع للـ
+  // user query كـ fallback.
+  //
+  // الـ key نخزّنه canonicalBookKey() عشان يدمج صيغ مختلفة
+  // (ى/ي، ة/ه، أ/إ/آ، ترقيم لاصق). الـ display name (الصيغة
+  // الجمالية للعرض) نخزّنه في hash منفصل.
+  if (found) {
     const sourceTitle = (canonicalTitle && canonicalTitle.trim())
       ? canonicalTitle.trim()
       : bookName.trim();
