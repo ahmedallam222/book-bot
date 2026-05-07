@@ -115,7 +115,10 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   if (badges.length === 0) {
     badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— حمّل كتباً واصنع سلسلة لفتحها_`;
   } else {
-    const list = badges.map(b => `${b.emoji} ${b.name}`).join(" · ");
+    // FIX (PR #103): escMd على اسم كل شارة. الأسماء الحالية كلها نظيفة،
+    // لكن أي شارة جديدة فيها `_` أو `*` كانت ستكسر `/profile` بنفس
+    // bug PR #102. Defensive escaping يحمي مستقبلياً.
+    const list = badges.map(b => `${b.emoji} ${escMd(b.name)}`).join(" · ");
     badgesBlock = `🎓 *الشارات:* ${badges.length} / ${BADGES.length}\n_${list}_`;
   }
 
