@@ -7,6 +7,84 @@
 
 ---
 
+## [32.2.0] — Audit fixes: leaderboard cache-hit gate + summary badge wiring — 2026-05-07
+
+### 🐞 Bug fixes (discovered in deep audit)
+
+#### 1. CRITICAL — Leaderboard ignored cache hits (frozen scores)
+- **Symptom**: Once a book entered the cache, its `stats:top_books` score
+  stopped growing. Popular cached books displayed a misleadingly low rank
+  while users kept downloading them.
+- **Root cause** in `analytics.ts:trackDownload` lines 183-208:
+  the entire leaderboard write block (`zincrby` + display `hset`) was
+  wrapped inside `if (found && !fromCache) { … }`. Since most repeat
+  downloads of popular books are cache hits, the bulk of real-world
+  delivery traffic skipped the leaderboard entirely. The canonical-title
+  merge logic introduced in 32.1.0 (`cached.bookName`) was effectively
+  dead code because cache-hit paths never reached it.
+- **Fix**: Split the gate. The `downloads` counter remains gated on
+  `!fromCache` (it is semantically separate from `cache_hits`), but the
+  leaderboard increments + display hash now sit under a parallel
+  `if (found) { … }` block so they fire on every successful delivery,
+  cache or not. Side effect: the canonical-title merge now actually runs
+  for cache hits, so future variants of the same cached book unify under
+  one entry as the original PR #101 intended.
+
+#### 2. MEDIUM — `📘 ملخّصاتي` badge could never be earned
+- **Symptom**: Users could request 100 summaries; the badge counter
+  `sum:count:{userId}` was never created in Redis and the badge was
+  never awarded.
+- **Root cause**: `trackSummaryAndAward` in `badges.ts:145` was exported
+  but had **zero callers** — `summaryHandler.ts` did not import it.
+- **Fix**: `summaryHandler.ts` now invokes `trackSummaryAndAward(userId)`
+  fire-and-forget after `deliverSummary`, on success only. If the
+  threshold is reached, `buildNewBadgeMessage` is called and the badge
+  notification is sent ~1.2s after the summary arrives.
+
+#### 3. LOW (defensive) — Badge names rendered raw inside Markdown
+- `admin.ts:buildProfileMessage` joined `b.name` directly inside an
+  italic block. Current 10 badge names contain no Markdown specials,
+  but a future badge with `_` or `*` in its name would have produced a
+  Telegram `400 Bad Request: can't parse entities` exactly like the
+  `/invite` bug fixed in 32.1.1.
+- **Fix**: `escMd(b.name)` applied per badge before joining.
+
+#### 4. LOW — `/start` skipped `user:lastSeen` update
+- Other entry points (`/last`, message handler, callbacks) write
+  `user:lastSeen` so dashboard `active7` broadcast targeting works.
+  `/start` was the lone exception — users who only ever used `/start`
+  were invisible to the broadcast targeting.
+- **Fix**: Added the same `redis.zadd("user:lastSeen", Date.now(), userId)`
+  fire-and-forget at the top of the `/start` handler.
+
+### 🧪 Tests added
+- `test-leaderboard-cache-hits.mjs` (9 assertions): static-source check
+  asserting `zincrby(TOP_BOOKS_KEY)`, `zincrby(weeklyKey)`, and
+  `hset(TOP_BOOKS_DISPLAY_HASH)` are **outside** the `(found && !fromCache)`
+  gate but **inside** an `if (found) { … }` block. Catches future
+  regressions of the cache-hit drop.
+- `test-summary-badge-wiring.mjs` (10 assertions): confirms imports,
+  call site, ordering after `deliverSummary`, and the
+  `SUMMARY_THRESHOLD === 10` invariant.
+
+### Files changed
+- `server/bot/analytics.ts` — split the cache-hit gate.
+- `server/bot/summaryHandler.ts` — wire `trackSummaryAndAward`.
+- `server/bot/admin.ts` — `escMd` on badge names.
+- `server/bot/commands.ts` — `lastSeen` write in `/start`.
+- `test-leaderboard-cache-hits.mjs` (new).
+- `test-summary-badge-wiring.mjs` (new).
+- `package.json` / `package-lock.json` — bump 32.1.1 → 32.2.0.
+
+### Risk
+LOW. All four changes are additive or relax an over-restrictive gate:
+- Bug 1 only ever **adds** writes that should have been there.
+- Bug 2 fires only after a successful `deliverSummary`, fail-open.
+- Bug 3 is purely defensive (no current badge has special chars).
+- Bug 4 is a one-liner copying a pattern used elsewhere in the file.
+
+---
+
 ## [32.1.1] — `/invite` Markdown parse error hotfix — 2026-05-07
 
 ### 🐞 Bug fix (CRITICAL — feature was broken in production)

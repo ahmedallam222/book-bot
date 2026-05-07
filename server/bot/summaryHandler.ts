@@ -21,6 +21,7 @@ import {
 } from "./summary.js";
 import type { SummaryResponse } from "./aiProviders/types.js";
 import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
+import { trackSummaryAndAward, buildNewBadgeMessage } from "./badges.js";
 
 // Per-user dedup window in seconds — the same user spamming the
 // summary button should hit cache; this prevents re-running the
@@ -255,6 +256,25 @@ export async function runSummaryFlow(
       bookType: resp.bookType,
     });
     await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId);
+
+    // ── Engagement signal: 📘 ملخّصاتي badge (10 ملخصات) ──
+    // FIX (PR #103): trackSummaryAndAward كان dead code — معرّف
+    // في badges.ts لكن ما اتنادى أبداً. النتيجة: مهما المستخدم استخدم
+    // الـ feature، الشارة لن تُمنح. الـ counter `sum:count:{uid}`
+    // يتحدّث الآن، وعند 10 ملخصات تُمنح الشارة برسالة منفصلة.
+    // Fire-and-forget: فشل الـ awarding لا يُعطّل تسليم الملخص.
+    trackSummaryAndAward(userId).then(async (badge) => {
+      if (badge) {
+        const text = await buildNewBadgeMessage(userId, badge);
+        await new Promise(r => setTimeout(r, 1200));
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+      }
+    }).catch((e) => {
+      L.warn("summaryHandler", "trackSummaryAndAward failed", {
+        userId,
+        err: String(e).slice(0, 100),
+      });
+    });
   } catch (e: any) {
     // The per-user counter was incremented by checkAndConsumeUsage
     // before this AI call ran. The user is not getting a summary, so
