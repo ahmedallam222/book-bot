@@ -1,6 +1,6 @@
 // Tests Cairo timezone helpers — verifies dates/reset countdown anchor
 // to Africa/Cairo, NOT UTC.
-import { cairoDateString, msUntilCairoMidnight, buildResetTime } from "./server/bot/text.js";
+import { cairoDateString, msUntilCairoMidnight, buildResetTime } from "../server/bot/text.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, info = "") { if (cond) pass++; else fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${info ? ` (${info})` : ""}`); }

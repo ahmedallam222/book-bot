@@ -20,7 +20,7 @@ import {
   normalizeForCache,
   cleanSearchQuery,
   urlFilenameRelevance,
-} from "./server/bot/text.ts";
+} from "../server/bot/text.ts";
 
 let pass = 0, fail = 0;
 function check(name, cond, want, got) {

@@ -10,12 +10,12 @@ import fs from "fs";
 import {
   buildDailyDigestMessage,
   yesterdayCairoKey,
-} from "./server/bot/dailyDigest.ts";
+} from "../server/bot/dailyDigest.ts";
 import {
   DAILY_DIGEST_HOUR_CAIRO,
   DAILY_DIGEST_DISABLED,
-} from "./server/bot/config.ts";
-import { cairoHourNumber, cairoDateString } from "./server/bot/text.ts";
+} from "../server/bot/config.ts";
+import { cairoHourNumber, cairoDateString } from "../server/bot/text.ts";
 
 let pass = 0, fail = 0;
 const expect = (label, ok, got, want) => {
