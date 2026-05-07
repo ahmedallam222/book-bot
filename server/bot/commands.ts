@@ -81,6 +81,10 @@ export function registerCommands(
         return;
       }
     }
+    // FIX (PR #103): تحديث user:lastSeen في /start كمان — الـ dashboard
+    // broadcast targeting الـ active7 كان يفقد المستخدمين اللي يعملوا
+    // /start من غير ما يكتبوا اسم كتاب أو يستخدموا /last.
+    redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
     try {
       // BUG-FIX: getUserDailyLimit بتنده isPremium جواها → كان بيتعمل مرتين. دلوقتي نمرّر prem.
       const prem  = await isPremium(userId);
