@@ -370,10 +370,14 @@ export async function buildInviteMessage(
     const total  = state.nextTier.count;
     const filledBars = Math.round((filled / total) * 8);
     const bar = "🟩".repeat(Math.min(filledBars, 8)) + "⬜".repeat(Math.max(0, 8 - filledBars));
+    // FIX (PR #102): old version was `_X *Y* X_` — nested italic+bold isn't
+    // supported by Telegram's old Markdown parser, and an unmatched leading
+    // `_` after "انضمامه." combined with this would yield
+    // "can't parse entities" 400 errors on every /invite call.
     progress =
       `\n\n📊 *تقدمك:* ${state.count} من ${state.nextTier.count}\n` +
       `${bar}\n` +
-      `_${state.nextTier.remaining} إحال${state.nextTier.remaining === 1 ? "ة" : "ات"} للوصول إلى *+${state.nextTier.days} يوم Premium*_`;
+      `*${state.nextTier.remaining}* إحال${state.nextTier.remaining === 1 ? "ة" : "ات"} للوصول إلى *+${state.nextTier.days} يوم Premium*`;
   } else if (state.count > 0) {
     progress = `\n\n📊 *إحالاتك:* ${state.count}\n_وصلت لكل المستويات المتاحة — استمر للحصول على +90 يوم كل 25 إحالة._`;
   }
@@ -394,7 +398,7 @@ export async function buildInviteMessage(
     `◦ ٢٠ إحالات → *+٦٠ يوم*\n` +
     `◦ ٥٠ إحالة → *+٩٠ يوم*\n` +
     `◦ كل ٢٥ إحالة بعدها → *+٩٠ يوم*\n\n` +
-    `🎁 صديقك يحصل على *${WELCOME_GIFT_DAYS} أيام Premium* مجاناً عند انضمامه._${progress}${tiersClaimedLine}\n\n` +
+    `🎁 صديقك يحصل على *${WELCOME_GIFT_DAYS} أيام Premium* مجاناً عند انضمامه.${progress}${tiersClaimedLine}\n\n` +
     `💡 *تنبيه:* الإحالة تُحتسب فقط بعد ما صديقك يحمّل أول كتاب — لمنع التحايل بحسابات وهمية.`;
 
   return { text, link };
