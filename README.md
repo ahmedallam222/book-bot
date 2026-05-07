@@ -2,9 +2,9 @@
 
 # 📚 Kholasa Books Bot — خلاصة الكتب
 
-### Arabic-first Telegram bot that searches 13 Arabic libraries, validates the PDF with multi-stage AI, and delivers the file directly inside Telegram.
+### Arabic-first Telegram bot that searches **14 Arabic libraries** in parallel, AI-validates the PDF, and delivers the file inside Telegram in under 10 seconds.
 
-#### بوت تيليغرام يبحث في 13 مكتبة عربية، يتحقق من الـ PDF بنظام ذكي متعدد المراحل، ويُرسل الكتاب مباشرة داخل تيليغرام.
+#### بوت تيليغرام عربي يبحث في **١٤ مكتبة عربية** بالتوازي، يتحقق من الـ PDF بنظام ذكي متعدد المراحل، ويرسل الكتاب مباشرة داخل تيليغرام في أقل من ١٠ ثوانٍ.
 
 <br/>
 
@@ -16,16 +16,17 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com)
 
-![Lines of Code](https://img.shields.io/badge/Lines_of_Code-14k+-blueviolet?style=flat-square)
-![TS Modules](https://img.shields.io/badge/TS_Modules-59-blue?style=flat-square)
-![Sources](https://img.shields.io/badge/Arabic_Sources-13-orange?style=flat-square)
+![Lines of Code](https://img.shields.io/badge/Lines_of_Code-18k+-blueviolet?style=flat-square)
+![TS Modules](https://img.shields.io/badge/TS_Modules-68-blue?style=flat-square)
+![Sources](https://img.shields.io/badge/Arabic_Sources-14-orange?style=flat-square)
 ![AI Providers](https://img.shields.io/badge/AI_Providers-10-purple?style=flat-square)
+![Tests](https://img.shields.io/badge/Smoke_Tests-13-success?style=flat-square)
 
 <br/>
 
-> **Try it:** [@kholasaelktob_Bot](https://t.me/kholasaelktob_Bot) on Telegram. Type a book name in Arabic and watch it arrive as a PDF.
+> 🚀 **Try it live:** [@kholasaelktob_Bot](https://t.me/kholasaelktob_Bot) — type a book name in Arabic and watch it arrive as a PDF.
 
-[Quickstart](#-quickstart) · [Features](#-features) · [Architecture](#%EF%B8%8F-architecture) · [API](#-rest-api) · [Contributing](CONTRIBUTING.md)
+[Quickstart](#-quickstart) · [Features](#-features) · [Engagement](#-engagement-system) · [Architecture](#%EF%B8%8F-architecture) · [Sources](#-sources-covered) · [AI Stack](#-ai-provider-failover) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -35,6 +36,7 @@
 
 - [Why?](#-why)
 - [Features](#-features)
+- [Engagement system](#-engagement-system)
 - [Live demo](#-live-demo--how-to-use)
 - [Architecture](#%EF%B8%8F-architecture)
 - [Tech stack](#-tech-stack)
@@ -63,7 +65,7 @@
 
 ## 🔭 Why?
 
-Searching for an Arabic book PDF online usually takes 5–15 minutes — broken links, paywalled mirrors, fake "download" buttons, files that turn out to be table-of-contents PDFs, and AI-generated junk. Kholasa Books does that work for you in **under 10 seconds on average**:
+Searching for an Arabic book PDF online usually takes 5–15 minutes — broken links, paywalled mirrors, fake "download" buttons, files that turn out to be table-of-contents PDFs, and AI-generated junk. **Kholasa Books does that work for you in under 10 seconds on average:**
 
 ```
 "الأمير الصغير"  →  Kholasa  →  📄 Real PDF inside Telegram
@@ -71,11 +73,12 @@ Searching for an Arabic book PDF online usually takes 5–15 minutes — broken 
 
 What makes it different from a generic Google search bot:
 
-- **Quality-gated**: every PDF passes through a multi-stage validator (HTTP check → magic bytes → text density → page count → AI judge). Junk files get rejected before they reach you.
-- **Cost-aware AI**: a filename score + trust-list bypass eliminates ~70% of AI calls. The bot stays cheap to run even at scale.
-- **Source-health-aware**: each of the 13 libraries has its own success/failure stats and gets auto-disabled when it goes bad. No single broken source kills the bot.
-- **Resilient**: 3 workers pulling from a Redis queue, DLQ for failures, graceful shutdown, full job recovery on restart.
-- **Arabic-first**: handles dialects (خليجي, مصري, شامي), removes filler verbs ("لخّصلي", "تحميل", "ابغى"), normalizes diacritics, preserves quoted titles intact.
+- 🛡️ **Quality-gated** — every PDF passes through a multi-stage validator (HTTP probe → magic bytes → text density → page count → AI judge). Junk is rejected before it reaches you.
+- 💸 **Cost-aware AI** — a filename trust score + per-source allowlist eliminates ~70% of AI calls. The bot stays cheap to run even at scale.
+- 📊 **Source-health-aware** — each of the 14 libraries has its own success/failure stats and gets auto-disabled when it goes bad. No single broken source kills the bot.
+- ⚙️ **Resilient** — 3 workers pulling from a Redis queue, DLQ for failures, graceful shutdown, full job recovery on restart.
+- 🇸🇦 **Arabic-first** — handles dialects (خليجي, مصري, شامي), strips filler verbs (`لخصلي`, `تحميل`, `ابغى`), normalizes diacritics + hamza variants + ى/ي + ة/ه, preserves quoted titles intact.
+- 🔥 **Built for retention** — streak system, 10-tier badges, tiered referral rewards, leaderboards. Users come back daily.
 
 ---
 
@@ -85,13 +88,15 @@ What makes it different from a generic Google search bot:
 
 | Domain | Details |
 |---|---|
-| 🔍 **Smart search** | 13 Arabic libraries searched in parallel via [Firecrawl](https://firecrawl.dev), with fuzzy fallback for typos. Understands dialect triggers and intent words. |
+| 🔍 **Smart search** | 14 Arabic libraries searched in parallel via [Firecrawl](https://firecrawl.dev), with fuzzy fallback for typos. Understands dialect triggers and intent words. |
 | 📄 **Real PDFs only** | Multi-stage validator: HTTP check → `%PDF` magic bytes → text density → page count → Mistral AI judge. Junk and viewer-only links never reach the user. |
-| 📘 **AI book summaries** | Per-book structured summary (overview, key ideas, chapters, takeaways) with multi-provider AI failover. Cached per-book, daily quotas. |
-| 🎲 **Discovery** | `/random` across 15 genres, `/weekly` curated pick, `/top` most-requested, `/history` last 7 books. |
+| 📘 **AI book summaries** | Per-book structured summary (overview, key ideas, chapters, takeaways) with 10-provider AI failover. Cached per-book, daily quotas. |
+| 🎲 **Discovery** | `/random` across 15 genres, weekly curated picks, real-time **leaderboards** (all-time + ISO-week bucketed), `/history` last 7 books. |
+| 🔥 **Engagement** | Daily reading streak (Cairo-TZ atomic), 10 unlockable badges, friend referrals with tiered Premium rewards (3→7d, 5→14d, 10→30d, 20→60d, 50→90d). |
+| 👤 **Personal profile** | `/profile` shows your stats: total downloads, current streak, max streak, badges earned, Premium status, referrals tier. |
 | 🔖 **Personal organisation** | Wishlist (`/wishlist`), last-book one-tap reload (`/last`), queue inspection (`/queue`), cancel pending (`/cancel`). |
-| 💳 **Telegram-native payments** | Premium via Telegram Stars — no card data, no third-party gateway. Renewals **extend** time rather than replace it. |
-| 🛡️ **Defensive UX** | Clear error messages, "report broken file" button, rate-limit warnings, paid-book detection with explanation. |
+| 💳 **Telegram-native payments** | Premium via Telegram Stars — no card data, no third-party gateway. Renewals **extend** TTL rather than replace it. Idempotent against payment redelivery. |
+| 🛡️ **Defensive UX** | Clear error messages, "report broken file" button, rate-limit warnings, paid-book detection with explanation, complaint-aware leaderboard. |
 
 ### For operators
 
@@ -99,10 +104,79 @@ What makes it different from a generic Google search bot:
 |---|---|
 | 📊 **Live dashboard** | Daily/weekly funnel, top books, per-source health, queue/DLQ stats, telemetry traces per request. |
 | 👥 **User management** | Ban/unban, manual premium grants with custom durations, per-user daily-limit overrides, free-text notes. |
-| 🔌 **Source toggles** | Enable/disable any of the 13 libraries from the dashboard. Auto-disable kicks in for failing or AI-rejected sources. |
+| 🔌 **Source toggles** | Enable/disable any of the 14 libraries from the dashboard. Auto-disable kicks in for failing or AI-rejected sources (3-tier policy). |
+| 🚫 **Hard-blocked domains** | Mark a domain as never-fetch (zero scraping attempts), separate from priority demotion. |
 | 📢 **Targeted broadcasts** | Send Markdown messages to all users, premium-only, or active-7-day cohort. Rate-limited at 30 msg/sec to respect Telegram limits. |
 | 🔧 **Maintenance mode** | One-click maintenance toggle. Auto-announces service-back to known groups when cleared. |
 | 🚨 **Auto-alerts** | Admin gets a Telegram DM when DLQ spikes, success rate drops, Firecrawl quota is near, or rate-limited. |
+| 📈 **Daily digest** | Auto-generated 24h report (active users, success rate, top books, per-source numbers) sent to admins each morning. |
+
+---
+
+## 🔥 Engagement system
+
+Built in to keep users coming back daily. Three independent loops, all powered by Redis with atomic operations.
+
+### 🔥 Reading streaks (Duolingo-style)
+
+```
+Day 1  →  🔥 streak 1
+Day 2  →  🔥 streak 2 · أعلى: 2
+Day 3  →  🔥🔥 *ثلاثة أيام متتالية!* — milestone notification
+Day 7  →  🔥🔥 *أسبوع كامل!* — milestone
+Day 14 →  🔥🔥🔥 *أسبوعين!*
+Day 30 →  🌟 *شهر كامل!*
+Day 60 →  🌟🌟 *شهرين متتاليين!*
+Day 100 →  💎 *مائة يوم!*
+```
+
+- **Atomic Lua script** — concurrent downloads can't double-count or corrupt the streak.
+- **Cairo-timezone day boundaries** — no off-by-one bugs from UTC midnight.
+- **Broken-streak rescue message** — "💔 خسرت سلسلة X يوم" appears when a 3+ day streak resets.
+- **Idempotent** — multiple downloads on the same day don't bump the counter.
+
+### 🏅 10 unlockable badges
+
+| Category | Badge | Trigger |
+|---|---|---|
+| Downloads | 📚 قارئ مبتدئ | 5 books |
+| Downloads | 📖 قارئ منتظم | 20 books |
+| Downloads | 🏆 قارئ شغوف | 50 books |
+| Downloads | 🎓 موسوعة | 100 books |
+| Downloads | 💎 مكتبة كاملة | 250 books |
+| Streak | 🔥 أسبوع متواصل | 7-day streak |
+| Streak | 🔥🔥 شهر متواصل | 30-day streak |
+| Streak | 💎 ثبات نادر | 100-day streak |
+| Summary | 📘 ملخّصاتي | 10 AI summaries |
+| Social | 👥 سفير | 3 referrals |
+
+Awarded with `SADD` (atomic, idempotent) and immediately announced in a separate Telegram message.
+
+### 🎁 Tiered referral rewards
+
+```
+?start=ref_<userId>  →  invitee gets +3 days Premium on first download (welcome gift)
+                    →  referrer counter increments
+```
+
+| Referrals | Referrer reward |
+|---|---|
+| 3 | +7 days Premium |
+| 5 | +14 days |
+| 10 | +30 days |
+| 20 | +60 days |
+| 50 | +90 days |
+| Every +25 after 50 | +90 days |
+
+**All rewards extend an existing Premium TTL via `SETEX` — no permanent grants are possible.** Referrals are activated only on the invitee's first successful download (not on `/start`), so bot-clicks don't count.
+
+### 📊 Leaderboards
+
+- **🏆 Top all-time** — `stats:top_books` sorted set, canonical-key normalized to merge "هكذا تتعافي" / "هكذا تتعافى" / "هكذا تتعافي + author" into one entry.
+- **📅 Top this week** — separate ISO-week bucket (`stats:top_books:week:YYYY-Www`, 21-day TTL) so the weekly view actually changes week-to-week.
+- **Cache-hit aware** — every successful delivery (cache hit or fresh download) increments the leaderboard.
+- **Complaint filter** — messages like "هذا ليس الكتاب المطلوب" are excluded from leaderboard.
+- **Smart truncation** — long titles cut at word boundaries (no more "Full boo" mid-word).
 
 ---
 
@@ -111,6 +185,9 @@ What makes it different from a generic Google search bot:
 1. Open [@kholasaelktob_Bot](https://t.me/kholasaelktob_Bot) on Telegram.
 2. Type any Arabic book name (or `/search رواية حوار مع صديقي الملحد`).
 3. Wait ~5–10 seconds — the bot replies with a PDF.
+4. Tap **📘 ملخص الكتاب** under the file for an AI-generated structured summary.
+5. Use `/profile` to see your streak, badges, and Premium status.
+6. Use `/invite` to invite friends and earn Premium days.
 
 In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bot_username>`.
 
@@ -120,7 +197,13 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
 | `/search كتاب` | Direct search |
 | `/random` | Random Arabic book by genre |
 | `/last` | Re-deliver your most recent book |
+| `/profile` | Your stats, streak, badges, Premium status |
+| `/invite` | Your referral link + tier progress |
 | `/wishlist` | Save / list books for later |
+| `/queue` | Position in worker queue |
+| `/cancel` | Cancel a pending request |
+| `/stats` | Today's remaining quota |
+| `/history` | Last 7 books you requested |
 | `/help` | Full command list |
 
 ---
@@ -152,14 +235,16 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
 ║   SEARCH ENGINE      │   VALIDATION + DELIVERY               ║
 ║   ────────────────   │   ─────────────────────               ║
 ║   Redis cache?       │   HEAD probe (8s)                     ║
-║   Firecrawl ×13      │   filename trust score                ║
+║   Firecrawl ×14      │   filename trust score                ║
 ║   Fuzzy fallback     │   %PDF magic bytes                    ║
 ║   Cache 1h hit/5m miss│  text density + pages                ║
 ║                      │   Mistral AI (10-provider failover)   ║
 ║                      │   sendDocument                        ║
 ║                      │   cache fileId → Postgres             ║
 ╠══════════════════════╧═══════════════════════════════════════╣
-║   STATE       Redis (queues, cache, rate-limits)             ║
+║   ENGAGEMENT  Streak Lua · Badges SADD · Referral tiers      ║
+╠══════════════════════════════════════════════════════════════╣
+║   STATE       Redis (queues, cache, rate-limits, streaks)    ║
 ║               Postgres (users, premium, search-logs, audit)  ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
@@ -172,28 +257,34 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
         ▼  bookNameParser.ts  (strips "ابغى" / "روايه" / "تحميل" / "لخصلي" …)
    "الأمير الصغير"
         │
-        ▼  Guards (Redis pipeline)
-   ban? maintenance? rateLimit? dailyLimit?
+        ▼  Guards (Redis pipeline — ban? maintenance? rate? daily?)
         │  PASS
         ▼  enqueue()  →  priority = high (premium/admin) or normal (free)
    USER: "⏳ طلبك في الطابور — موقع #N"
         │
         ▼  Worker picks up job
    searchWithFuzzyFallback()
-   ├─ Redis cache HIT?  ──→ skip Firecrawl, use cached URLs
-   ├─ Firecrawl scrape (13 sources, parallel)
+   ├─ Redis cache HIT?  ──→ skip Firecrawl, use cached file_id
+   ├─ Firecrawl scrape (14 sources, parallel)
    └─ Fuzzy match fallback if no exact hits
         │
         ▼  findValidPdfUrls()
-   filter blacklist · filter viewer-only · per-source trust
+   filter blacklist · filter hard-blocked · filter viewer-only · per-source trust
         │
         ▼  downloadAndSend()
    HTTP HEAD (8s) → %PDF bytes → text density → page count
    ├─ filename score ≥ threshold AND domain trusted ──→ skip AI (saves cost)
    └─ Mistral AI judge (with 9-provider failover)
         │  PASS
-        ▼
-   sendDocument → cache fileId → trackDownload() → ✅ user receives PDF
+        ▼  sendDocument → cache fileId → Postgres write
+        │
+        ▼  Engagement signals (parallel, fail-open)
+   ├─ updateStreakOnDownload (atomic Lua)
+   ├─ checkDownloadBadges (SADD per threshold)
+   ├─ activateReferralOnFirstDownload (welcome gift + tier check)
+   └─ trackDownload → leaderboard zincrby (canonical key)
+        │
+        ▼  ✅ user receives PDF (+ optional 🔥 streak + 🏅 badge messages)
 ```
 
 ---
@@ -205,40 +296,41 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
 | Runtime | Node.js 20 + TypeScript 5.4 | Strict mode, native `fetch`, top-level `await`, AsyncLocalStorage |
 | Bot library | `node-telegram-bot-api` 0.67 | Mature, long-polling and webhook support, Stars/payments built-in |
 | HTTP server | Express 4 + Helmet 8 | Battle-tested, simple, good middleware ecosystem |
-| Queue & cache | Redis 7 + Lua scripts | Single-RTT atomic operations for rate-limits and dedup |
+| Queue & cache | Redis 7 + Lua scripts | Single-RTT atomic operations for rate-limits, streaks, dedup |
 | Database | PostgreSQL 16 + Drizzle ORM | Type-safe queries, native migrations, no schema drift |
 | Search | Firecrawl API | Multi-domain crawl in one credit, AI-friendly extraction |
 | AI | 10-provider failover stack | See [AI provider failover](#-ai-provider-failover) |
 | Browser automation | Playwright (Chromium) | Used only for noor-book Cloudflare bypass |
-| Build | esbuild → CJS bundle | <500KB output, ~50ms cold build |
+| Build | esbuild → CJS bundle | <600 KB output, ~50ms cold build |
 | Container | Docker + Compose | One-command dev + prod parity |
-| CI | GitHub Actions | typecheck + build + 11 smoke tests on every PR |
+| CI | GitHub Actions | typecheck + build + 13 smoke tests on every PR |
 
 ---
 
 ## 📚 Sources covered
 
-The 13 Arabic libraries currently configured (priority order):
+The **14 Arabic libraries** currently configured (priority order):
 
-| # | Source | Notes |
-|---|---|---|
-| 1 | 🏛 Internet Archive (`archive.org`) | Trusted; mostly classical literature |
-| 2 | 🌙 مكتبة نور (`noor-book.com`) | Cloudflare-protected; resolved via Playwright |
-| 3 | 📗 هنداوي (`hindawi.org`) | High-quality classical Arabic literature |
-| 4 | 📖 المكتبة الوقفية (`waqfeya.net`) | Religious & academic |
-| 5 | 📚 المكتبة الشاملة (`shamela.ws`) | Largest Arabic Islamic library |
-| 6 | 📗 مكتبة الكتب (`maktabakotob.com`) | General catalog |
-| 7 | 📘 كتوباتي (`ketobati.com`) | Modern fiction |
-| 8 | 📕 فولة بوك (`foulabook.com`) | Mixed catalog |
-| 9 | 📓 نوف بوك (`noufbook.com`) | Mixed catalog |
-| 10 | 📙 الكتاب العربي (`elkitabelarabi.com`) | Mixed catalog |
-| 11 | 📒 كتاب PDF (`ketabpdf.com`) | Mixed catalog |
-| 12 | 📔 كتب PDF (`kotobpdf.com`) | Mixed catalog |
-| 13 | 📓 كتوبم (`kotobm.com`) | Mixed catalog |
+| # | Source | Domain | Notes |
+|---|---|---|---|
+| 1 | 🏛️ Internet Archive | `archive.org` | Trusted; classical literature, large catalog |
+| 2 | 🌙 مكتبة نور | `noor-book.com` | Cloudflare-protected; resolved via Playwright |
+| 3 | 📗 هنداوي | `hindawi.org` | High-quality classical Arabic literature |
+| 4 | 📖 المكتبة الوقفية | `waqfeya.net` | Religious & academic |
+| 5 | 📚 المكتبة الشاملة | `al-maktaba.org` | Largest Arabic Islamic library |
+| 6 | 📗 مكتبة الكتب | `books-library.net` | General catalog |
+| 7 | 📘 كتوباتي | `kotobati.com` | Modern fiction |
+| 8 | 📕 فولة بوك | `foulabook.com` | Mixed catalog |
+| 9 | 📓 نوف بوك | `novbook.net` | Mixed catalog |
+| 10 | 📙 الكتاب العربي | `arabic-book.net` | Mixed catalog |
+| 11 | 📄 كتاب PDF | `ktabpdf.com` | Mixed catalog |
+| 12 | 🗂️ كتب PDF | `kutub-pdf.net` | Mixed catalog |
+| 13 | 📑 كتوبم | `kutubm.com` | Mixed catalog |
+| 14 | 📕 مكتبتي PDF | `mktbtypdf.com` | Mixed catalog |
 
-Each source has its own success/failure counters in Redis and is auto-disabled when its rolling rejection rate crosses tier-specific thresholds. Operators can also toggle any source manually from the dashboard.
+Each source has its own success/failure counters in Redis and is **auto-disabled** when its rolling rejection rate crosses tier-specific thresholds. Operators can toggle any source manually from the dashboard, or **hard-block** a domain so it's never queried.
 
-> Adding a source is straightforward: append an entry to <code>server/bot/sources.ts</code> with name, hostname, priority, and (optionally) trusted-filename patterns.
+> Adding a source is straightforward: append an entry to <code>server/bot/sources.ts</code> with name, hostname, priority, and (optionally) trusted-filename patterns. No deploy gymnastics.
 
 ---
 
@@ -263,167 +355,108 @@ Each provider has a small adapter under <code>server/bot/aiProviders/*.ts</code>
 
 ---
 
-## ⚡ Quickstart
+## 🚀 Quickstart
 
-### Option 1 — Docker (recommended)
+### Local dev (Docker, recommended)
 
 ```bash
+# 1. Clone and configure
 git clone https://github.com/ahmedallam222/book-bot.git
 cd book-bot
-
 cp .env.example .env
-# edit .env — at minimum set BOT_TOKEN, FIRECRAWL_API_KEY, POSTGRES_PASSWORD
+# Open .env and set BOT_TOKEN, FIRECRAWL_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY
 
-docker compose up -d --build
+# 2. Spin up the full stack (bot + postgres + redis)
+docker compose up -d
+
+# 3. Watch the logs
 docker compose logs -f bot
 ```
 
-Expected log:
+You should see:
+
 ```
-[INFO] [bot] Starting Kholasa Books bot...
-[Redis] connected
 [INFO] [bot] Bot started: @your_bot (123456789)
-[INFO] [queue] recoverStuckJobs done {"cleared":0,"orphanUserJobIds":0,...}
 [INFO] [bot] 3 workers started
-[INFO] [alerts] Alert watcher started — admins: 1
+[INFO] [server] Server ready on 0.0.0.0:5000 — Dashboard: /dashboard
 ```
 
-Hit `/start` in Telegram, send a book name, watch it arrive.
+Open `http://localhost:5000/dashboard?token=<DASHBOARD_TOKEN>` to access the admin UI.
 
-### Option 2 — Native (development)
+### Local dev (no Docker)
 
 ```bash
-# Prereqs: Node.js 20+, Redis 7, Postgres 16 running locally
-git clone https://github.com/ahmedallam222/book-bot.git
-cd book-bot
-
+# Requires Node 20+, Postgres 16, Redis 7 running locally
 npm ci
-cp .env.example .env       # edit with local DB/Redis URLs
-npm run db:push            # create tables
-npm run dev                # tsx watch mode
+cp .env.example .env  # configure DATABASE_URL, REDIS_URL, BOT_TOKEN, …
+npm run db:push       # apply schema
+npm run dev           # tsx watch mode
 ```
 
-### Get your tokens
+### Test that it works
 
-| Token | Where to get it | Required? |
-|---|---|---|
-| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` | ✅ |
-| `FIRECRAWL_API_KEY` | https://firecrawl.dev/dashboard | ✅ |
-| `POSTGRES_PASSWORD` | Generate: `openssl rand -hex 24` | ✅ |
-| `DASHBOARD_SECRET` | Generate: `openssl rand -hex 32` | ✅ for prod |
-| `MISTRAL_API_KEY` | https://mistral.ai/api | recommended |
-| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | recommended |
-| `ADMIN_IDS` | Your Telegram ID (use [@userinfobot](https://t.me/userinfobot)) | recommended |
+In Telegram, message your bot:
+
+```
+الأمير الصغير
+```
+
+Within ~10 seconds you should receive a PDF. If not, check:
+
+- `docker compose logs bot` for errors
+- The dashboard's "per-source health" card
+- That `FIRECRAWL_API_KEY` has remaining credits
 
 ---
 
 ## ⚙️ Environment variables
 
-The bot reads **51 environment variables** total. The most important ones are listed below; the full list with defaults is in <code>.env.example</code>.
+The full set is documented in `.env.example`. Highlights:
 
-### Required
-
-```env
-BOT_TOKEN=                                   # @BotFather token
-POSTGRES_PASSWORD=change_me_strong           # openssl rand -hex 24
-DATABASE_URL=postgresql://bookbot:${POSTGRES_PASSWORD}@db:5432/bookbot
+```bash
+# ─── Required ────────────────────────────────────────
+BOT_TOKEN=                                     # from @BotFather
+FIRECRAWL_API_KEY=                             # firecrawl.dev (search)
+MISTRAL_API_KEY=                               # mistral.ai (PDF validator)
+GEMINI_API_KEY=                                # ai.google.dev (summaries)
+DATABASE_URL=postgresql://bookbot:pw@db:5432/bookbot
 REDIS_URL=redis://redis:6379
-FIRECRAWL_API_KEY=                           # firecrawl.dev
-```
 
-### Strongly recommended
+# ─── Admin & dashboard ──────────────────────────────
+ADMIN_IDS=123456789,987654321                  # comma-separated Telegram IDs
+DASHBOARD_TOKEN=<long-random-string>           # bearer auth for /dashboard
 
-```env
-MISTRAL_API_KEY=                             # PDF validator AI judge
-GEMINI_API_KEY=                              # Summary generator (primary)
-ADMIN_IDS=123456789,987654321                # comma-separated Telegram IDs
-DASHBOARD_SECRET=                            # openssl rand -hex 32
-DASHBOARD_ORIGIN=http://localhost:5000       # CORS origin for dashboard fetches
-DASHBOARD_URL=                               # public URL shown in /admin reply
-NODE_ENV=production
-```
+# ─── Operational tuning ─────────────────────────────
+DAILY_LIMIT_FREE=5                             # downloads/day, free tier
+DAILY_LIMIT_PREMIUM=10
+QUEUE_WORKERS=3
+BOT_PORT_BIND=127.0.0.1                        # 0.0.0.0 to expose; PUT REVERSE PROXY!
 
-### Server / networking
+# ─── PDF validator thresholds ───────────────────────
+PDF_VALIDATE_REJECT_THRESHOLD=0.12             # filename score that auto-rejects
+PDF_VALIDATE_TRUST_THRESHOLD=0.50              # filename score that bypasses AI
+PDF_MIN_PAGES=15                               # below this → "looks like TOC"
 
-```env
-PORT=5000
-BOT_PORT_BIND=127.0.0.1                      # 0.0.0.0 to expose; PUT REVERSE PROXY!
-BIND_HOST=0.0.0.0                            # inside container
-TRUST_PROXY=0                                # 1 behind nginx/caddy, 2 behind cloudflare
-LOG_LEVEL=INFO                               # DEBUG | INFO | WARN | ERROR
-LOG_FILE=                                    # path or empty for stdout
-```
-
-### AI provider failover (optional, all have free tiers)
-
-```env
+# ─── AI failover (set what you have) ────────────────
 CEREBRAS_API_KEY=
-CLOUDFLARE_AI_ACCOUNT_ID=
-CLOUDFLARE_AI_API_TOKEN=
-GITHUB_MODELS_TOKEN=
+CLOUDFLARE_AI_TOKEN=
 GROQ_API_KEY=
+GITHUB_MODELS_TOKEN=
 OPENROUTER_API_KEY=
 SAMBANOVA_API_KEY=
-TIMEOUT_AI_PROVIDER=20000                    # ms
+YOUCOM_API_KEY=
+
+# ─── Summary daily caps ─────────────────────────────
+SUMMARY_DAILY_LIMIT_FREE=2
+SUMMARY_DAILY_LIMIT_PREMIUM=10
+SUMMARY_DAILY_LIMIT_GLOBAL=1200                # global daily cap
+
+# ─── Hard-blocked domains (optional) ────────────────
+HARD_BLOCKED_DOMAINS_EXTRA=                    # comma-separated, never fetch
+NOORBOOK_BROWSER_IDLE_MS=120000                # idle browser auto-close
 ```
 
-### PDF validator thresholds
-
-```env
-PDF_VALIDATE_ACCEPT_THRESHOLD=0.40           # filename score that bypasses AI
-PDF_VALIDATE_REJECT_THRESHOLD=0.12           # filename score that auto-rejects
-MISTRAL_BYPASS_FILENAME_THRESHOLD=0.55       # if score ≥ this, skip AI on trusted domains
-MISTRAL_NO_STREAK_LIMIT=4                    # consecutive AI rejections before short-circuit
-MISTRAL_FAIL_OPEN=false                      # if Mistral itself fails, accept (true) or reject (false)
-```
-
-### Source auto-disable
-
-```env
-SOURCE_AUTO_DISABLE_MIN_ATTEMPTS=8           # tier-1: don't disable until 8 attempts
-SOURCE_AUTO_DISABLE_MAX_RATE=0.50            # tier-1: disable if >50% fail
-SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS=5      # tier-2 (harder): from 5 attempts
-SOURCE_AUTO_DISABLE_HARD_MAX_RATE=0.80       # tier-2: disable if >80% fail
-SOURCE_AUTO_DISABLE_TRUST_MIN_ATTEMPTS=10    # trust-list sources: from 10
-SOURCE_AUTO_DISABLE_TRUST_MAX_RATE=0.85      # trust: disable only if >85% fail
-LOW_SUCCESS_RATE_PENALTY_THRESHOLD=0.30      # rank below others when <30% success
-MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN=4
-MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST=10
-```
-
-### Summary feature
-
-```env
-SUMMARY_DAILY_LIMIT_FREE=3                   # per-user free quota
-SUMMARY_DAILY_LIMIT_GLOBAL=1200              # global daily cap
-SUMMARY_CACHE_TTL_SECONDS=2592000            # 30 days per-book cache
-```
-
-### noor-book Cloudflare resolver
-
-```env
-PLAYWRIGHT_CHROMIUM_PATH=                    # leave empty unless custom build
-NOORBOOK_TIMEOUT_MS=30000                    # fail-fast on CF challenge
-NOORBOOK_DOWNLOAD_TIMEOUT_MS=30000
-NOORBOOK_BROWSER_IDLE_MS=120000              # idle browser auto-close
-```
-
-### Misc
-
-```env
-WORKER_COUNT=3
-TEMP_DIR=/tmp/kholasa_books
-BANNED_IDS=                                  # initial bans (comma-separated)
-PUBLIC_API_ORIGIN=                           # CORS for /api/search etc.
-SKIP_DOMAINS_EXTRA=                          # extra blacklist (csv)
-UNRELIABLE_DOMAINS_EXTRA=
-VIEWER_ONLY_DOMAINS_EXTRA=
-MAINTENANCE_ANNOUNCE_CHAT_IDS=               # group IDs to announce service-back
-MAINTENANCE_END_MESSAGE=                     # custom message override
-CHROMIUM_PATH=                               # alternative to PLAYWRIGHT_CHROMIUM_PATH
-```
-
-> Full reference: see <code>.env.example</code> and <code>server/bot/config.ts</code>.
+See `.env.example` for the full list (51 vars total) with defaults and explanations.
 
 ---
 
@@ -431,152 +464,108 @@ CHROMIUM_PATH=                               # alternative to PLAYWRIGHT_CHROMIU
 
 ### User commands
 
-| Command | Effect |
+| Command | Description |
 |---|---|
-| `/start` | Welcome + your daily-usage stats |
-| `/search [book]` | Direct search (also: just type the name) |
-| `/random [genre]` | Random book; 15 supported genres |
-| `/weekly` | Editor's pick of the week |
-| `/stats` | Your usage today vs your daily limit |
-| `/history` | Your last 7 books with re-download buttons |
-| `/top` | Most-requested books bot-wide |
-| `/last` | Re-deliver the most recent book you got |
-| `/wishlist [book]` | Save / list / remove from wishlist |
-| `/queue` | Inspect your pending requests |
-| `/cancel` | Cancel all your pending requests |
-| `/premium` | Subscription details + upgrade |
-| `/help` | Full command reference |
+| `/start` | Welcome + remaining quota |
+| `/search <book>` | Direct search (skips intent detection) |
+| `/random` | Random Arabic book picked from genre catalog |
+| `/last` | Re-deliver the most recent book you requested |
+| `/profile` | Your reading stats: streak, badges, Premium status, referrals |
+| `/invite` | Your referral link + tier progress + earned-rewards summary |
+| `/wishlist <book>` | Add a book to your personal wishlist |
+| `/wishlist` | Show your wishlist |
+| `/history` | Your last 7 requests |
+| `/queue` | Your current position in the worker queue |
+| `/cancel` | Cancel a pending request |
+| `/stats` | Quota used today + reset time |
+| `/premium` | Buy Premium with Telegram Stars |
+| `/help` | Full command list |
 
-### Admin commands (`ADMIN_IDS` only)
+### Admin commands (require `ADMIN_IDS`)
 
-| Command | Effect |
+| Command | Description |
 |---|---|
-| `/admin` | Open the admin panel inside Telegram |
-| `/ban <id>` / `/unban <id>` | Block / unblock a user |
-| `/premium_add <id>` / `/premium_remove <id>` | Manual premium grants |
-| `/set_limit <id> <n>` / `/reset_limit <id>` | Custom daily limit |
-| `/note <id> <text\|clear>` | Free-text note attached to a user |
-| `/purge_cache <book>` | Force-refresh a cached book |
+| `/admin` | Open the admin keyboard |
+| `/premium_add <userId>` | Grant Premium (with optional days) |
+| `/premium_remove <userId>` | Revoke Premium |
 
-### Group activation
-
-```
-بوت اسم الكتاب         bot اسم الكتاب
-كتاب اسم الكتاب         @<bot_username> اسم الكتاب
-```
-
-The bot only responds to triggered messages in groups — it never spams.
+The admin keyboard exposes the full set: maintenance toggle, broadcast composer, source toggles, ban/unban, daily-limit overrides, premium grants, telemetry traces, and live source-health stats.
 
 ---
 
-## 💳 Premium tier
+## 💎 Premium tier
 
-| | 🆓 Free | ⭐ Premium |
+Premium is purely **time-bounded** — there is no permanent grant. All rewards (manual admin grants, referral tier rewards, payment renewals) extend the TTL via `SETEX`.
+
+| Capability | Free | Premium |
 |---|---|---|
-| Downloads/day | 3 | 15 |
-| Summaries/day | 3 | unlimited (subject to global cap) |
+| Daily downloads | 5 | 10 |
+| Daily AI summaries | 2 | 10 |
 | Queue priority | normal | high |
-| Price | free | 100 Telegram Stars / month |
+| Renewal | n/a | Telegram Stars |
 
-Payment flow: `/premium` → `sendInvoice` (XTR currency) → `pre_checkout_query` (must reply within 10s) → `successful_payment` event → `renewPremium()`.
-
-Renewals **extend** existing subscription — renewing 10 days before expiry adds 30 days on top, never replaces.
+Activated via `/premium`, paid through Telegram Stars. The successful-payment handler is **idempotent** against Telegram's redelivery quirk (uses `SET … NX` on the unique `telegram_payment_charge_id`), so a single payment never grants double Premium.
 
 ---
 
 ## 📊 Admin dashboard
 
-Available at `http://your-host:5000/dashboard` (auth: `Authorization: Bearer $DASHBOARD_SECRET`).
+A single-file SPA served at `/dashboard?token=<DASHBOARD_TOKEN>`. Mobile-responsive, Arabic-localized.
 
-```
-📈 Daily / weekly funnel — search → results → validate → deliver
-🏆 Top requested books
-🔌 Per-source health (success rate, attempts, last-error timestamp)
-   Toggle any of the 13 sources on/off
-📋 Queue inspector — high / normal / DLQ with re-queue & purge
-🧠 Live process metrics (memory, workers, uptime)
-👥 User management — premium / banned / per-user note / custom limits
-📢 Targeted broadcast — Markdown body, target = all | premium | active7
-🔧 Maintenance toggle — auto-announces service-back to known groups
-🔍 Telemetry traces — full per-request step timing
-```
+What you can do from it:
 
-Built as a single static SPA + a fetch-driven JSON API. Mobile-responsive.
+- **Funnel** — daily/weekly requests, found, validated, delivered.
+- **Top books** — all-time + weekly leaderboards (canonical-key normalized).
+- **Per-source health** — success rate, last failure, auto-disable status.
+- **Telemetry traces** — each step of every recent request, with timing.
+- **Queue + DLQ** — current depth, in-flight jobs, failure samples.
+- **User management** — search by ID, ban/unban, Premium grants, daily-limit overrides, free-text notes.
+- **Source toggles** — enable/disable any of the 14 sources.
+- **Maintenance mode** — one-click toggle, auto-announces resume to known groups.
+- **Broadcast** — compose Markdown messages targeted at all / premium / active-7d cohorts.
+- **Audit log** — every admin action recorded with actor, target, action.
 
 > ⚠️ The dashboard is **HTTP only** out of the box. For production, terminate TLS at a reverse proxy (Caddy, Nginx, Traefik) and bind the bot to `127.0.0.1` via `BOT_PORT_BIND`. See [Security](#-security).
 
 ---
 
-## 🌐 REST API
+## 🔌 REST API
 
-The bot also exposes a small public + admin HTTP API.
+A minimal authenticated REST API for ops + integrations. All routes require `Authorization: Bearer <DASHBOARD_TOKEN>`.
 
-### Public (no auth)
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/stats/daily?days=7` | Funnel for the last N days |
+| `GET` | `/api/stats/sources` | Per-source success/failure |
+| `GET` | `/api/top-books?limit=20` | All-time leaderboard |
+| `GET` | `/api/top-books-weekly?limit=20` | Current ISO-week leaderboard |
+| `GET` | `/api/queue/status` | Queue depth + worker count |
+| `GET` | `/api/users/:id` | User record + Premium status |
+| `POST` | `/api/users/:id/premium` | Grant Premium (body: `{ days }`) |
+| `POST` | `/api/broadcast` | Send a broadcast (body: `{ target, text }`) |
+| `POST` | `/api/maintenance` | Toggle maintenance (body: `{ enabled }`) |
+| `GET` | `/healthz` | Liveness check (no auth) |
 
-```http
-GET /api/health                              → { ok, uptime, ts }
-GET /api/search?q=الأمير الصغير              → search a book
-GET /api/random?genre=novels                 → random book
-GET /api/top-books?limit=10                  → top requested
-GET /api/genres                              → list supported genres
-```
-
-Sample response:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "title": "ألف شمس مشرقة",
-    "pdfUrl": "https://archive.org/...",
-    "source": "Internet Archive",
-    "cached": true
-  }
-}
-```
-
-### Admin (`Authorization: Bearer $DASHBOARD_SECRET`)
-
-```http
-GET    /api/admin/overview
-GET    /api/admin/stats/daily | /weekly | /top-books | /sources
-GET    /api/admin/queue
-DELETE /api/admin/queue/dlq
-POST   /api/admin/users/:id/premium    { "enable": true,  "days": 30 }
-PUT    /api/admin/users/:id/limit      { "limit": 10 }
-POST   /api/admin/users/:id/ban        { "reason": "spam" }
-PUT    /api/admin/maintenance          { "active": true }
-POST   /api/admin/broadcast            { "message": "...", "target": "premium" }
-POST   /api/admin/sources/:domain/toggle { "action": "enable" }
-GET    /api/admin/telemetry/traces
-GET    /api/admin/telemetry/funnel
-```
+Per-IP rate-limits apply to public endpoints (`/healthz` only).
 
 ---
 
 ## 🔒 Security
 
-| Mechanism | What it protects against |
-|---|---|
-| **Timing-safe auth** (`timingSafeEqual`) | Brute-force discovery of `DASHBOARD_SECRET` |
-| **Lua atomic rate-limit** | Sliding-window race conditions on burst traffic |
-| **Redis pipeline guards** | All checks (ban / maintenance / rate / daily) in one round-trip — no TOCTOU |
-| **Per-IP rate-limit** | Backstop for unauthenticated public API |
-| **Input sanitization** | Length cap, character whitelist, `escMd()` for Markdown payloads |
-| **`validateNumericId`** | `/^\d{5,15}$/` + `Number.isSafeInteger` — rejects `@username` and bigint edge values |
-| **Helmet + strict CORS** | Default secure HTTP headers, configurable allow-list |
-| **PDF validator** | %PDF magic bytes + text density + page count + AI judge |
-| **50 MB hard limit** | Telegram's upload ceiling — blocks oversized files early |
-| **Auto-blacklist** | 3 user reports → URL is permanently blocked |
-| **Graceful shutdown** | SIGTERM/SIGINT → workers drain → DB/Redis close cleanly. No request lost. |
-| **fail2ban (ops)** | Banned IPs after repeated SSH failures |
-| **Audit log** | Every `setPremium`, `ban`, `purge` writes to Postgres `audit_log` |
+**The dashboard ships HTTP-only with bearer auth — adequate for trusted networks but not the public internet.** Always put a TLS-terminating reverse proxy in front before exposing.
 
-For production:
-- Always front the dashboard with a TLS-terminating reverse proxy (Caddy is easiest — auto Let's Encrypt).
-- Run on a private subnet + `BOT_PORT_BIND=127.0.0.1`.
-- Rotate `BOT_TOKEN` periodically (`@BotFather` → `/revoke`).
-- Use `pg_dump` backups (script provided — see [Backups](#-backups--disaster-recovery)).
+Other defenses:
+
+- **Helmet** — sane HTTP security headers.
+- **Bearer token** — all `/api/*` and `/dashboard` require `DASHBOARD_TOKEN`.
+- **IP rate-limit** — sliding-window, atomic Lua, per-route configurable.
+- **Telegram payload validation** — every update is shape-checked against expected fields.
+- **Postgres parameterized queries via Drizzle** — no raw SQL, no injection vectors.
+- **Atomic Redis ops everywhere** — Lua scripts for streaks, rate-limits, and idempotent payment handling.
+- **No secret leaks in logs** — every error is shaped with `String(e).slice(0, 200)` and reviewed.
+- **Run on a private subnet + `BOT_PORT_BIND=127.0.0.1`** — the proxy is the only public ingress.
+
+If you find a vulnerability, please **email** rather than open a public issue. Contact: see GitHub profile.
 
 ---
 
@@ -598,29 +587,37 @@ book-bot/
 │   │
 │   └── bot/
 │       ├── index.ts                  ← bot bootstrap + event listeners
-│       ├── commands.ts               ← /start, /search, /admin, …
+│       ├── commands.ts               ← /start, /search, /profile, /invite …
 │       ├── callbacks.ts              ← inline-keyboard handlers
 │       ├── messageHandler.ts         ← free-text + group triggers
-│       ├── bookRequest.ts            ← guards + enqueue
+│       ├── bookRequest.ts            ← guards + enqueue + engagement hooks
 │       ├── bookNameParser.ts         ← Arabic dialect / verb stripping
 │       ├── engine.ts                 ← search orchestration
 │       ├── fuzzy.ts                  ← typo-tolerant title matching
-│       ├── sources.ts                ← 13 library configs
+│       ├── sources.ts                ← 14 library configs
 │       ├── pdfValidator.ts           ← multi-stage PDF judge
+│       ├── verify.ts                 ← URL filtering + hard-block
 │       ├── download.ts               ← HTTP fetch + Telegram sendDocument
 │       ├── noorBookResolver.ts       ← Playwright Cloudflare bypass
 │       ├── queue.ts                  ← Redis high/normal/DLQ
 │       ├── workers.ts                ← worker loop + retries
 │       ├── userSettings.ts           ← premium / limits / notes
-│       ├── analytics.ts              ← funnel & top-books
+│       ├── analytics.ts              ← funnel + leaderboards (canonical-key)
+│       ├── streak.ts                 ← daily streak (atomic Lua, Cairo TZ)
+│       ├── badges.ts                 ← 10-tier badge unlocking
+│       ├── referral.ts               ← tiered referral rewards
+│       ├── admin.ts                  ← /profile builder + admin handlers
 │       ├── telemetry.ts              ← per-request trace
 │       ├── alertWatcher.ts           ← admin Telegram alerts
 │       ├── rateLimit.ts              ← Lua sliding window
 │       ├── ipRateLimit.ts            ← public-API per-IP guard
 │       ├── summary.ts                ← AI summary generator
-│       ├── summaryHandler.ts         ← summary command flow
+│       ├── summaryHandler.ts         ← summary command flow + badge wiring
 │       ├── reactions.ts              ← bot emoji reactions
-│       ├── config.ts                 ← all constants
+│       ├── text.ts                   ← Arabic normalization + Markdown escape
+│       ├── weekly.ts                 ← weekly digest (top books + funnel)
+│       ├── dailyDigest.ts            ← daily admin DM
+│       ├── config.ts                 ← all constants + hard-blocked list
 │       │
 │       └── aiProviders/              ← 10 swappable AI adapters
 │           ├── registry.ts           ← failover order + selection
@@ -640,6 +637,7 @@ book-bot/
 ├── shared/schema.ts                  ← Drizzle types (single source of truth)
 ├── script/
 │   ├── build.ts                      ← esbuild bundler
+│   ├── run-tests.mjs                 ← test runner used by CI
 │   ├── postgres-backup.sh            ← daily pg_dump with rotation
 │   └── migrate-*.mjs                 ← one-off data migrations
 │
@@ -648,7 +646,7 @@ book-bot/
 │   ├── PRODUCTION.md                 ← deploy notes
 │   └── SERVER_SYNC_PLAN.md
 │
-├── test-*.mjs                        ← 11 smoke tests (CI runs them all)
+├── test-*.mjs                        ← 13 smoke tests (CI runs them all)
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 ├── LICENSE                           ← MIT
@@ -760,6 +758,8 @@ Auto-alerts (Telegram DM to admins):
 
 Implementation: `server/bot/alertWatcher.ts`. Atomicity is provided by Redis `SET … NX` cooldown locks so two checks can't fire the same alert twice.
 
+A **daily digest** is auto-DM'd to admins each morning with: 24h active users, success rate, top books, per-source numbers, queue/DLQ depth.
+
 ---
 
 ## 💾 Backups & disaster recovery
@@ -777,7 +777,7 @@ The script:
 - Uses a `.tmp` + atomic rename so a half-finished dump never overwrites a good one.
 - Prunes anything older than **14 days** automatically.
 
-For full DR, replicate the dumps off-site. Suggested follow-up:
+For full DR, replicate the dumps off-site:
 
 ```bash
 aws s3 cp /var/backups/bookbot/ s3://your-bucket/bookbot/ --recursive
@@ -790,24 +790,29 @@ gunzip -c /var/backups/bookbot/bookbot-2026-05-05.sql.gz \
   | docker exec -i book-bot-db-1 psql -U bookbot -d bookbot
 ```
 
+Redis state is intentionally **not** part of the backup loop — every Redis key is either rebuilt from Postgres on restart or has a TTL that forgets within hours.
+
 ---
 
 ## 🧪 Testing
 
-Tests live as standalone `test-*.mjs` files at the repo root and are executed individually by CI. Each file is a deterministic probe: no network, no real Telegram. Many tests import the live `.ts` modules through `tsx` for accurate behaviour.
+Tests live as standalone `test-*.mjs` files at the repo root. Each file is a deterministic probe: no network, no real Telegram. Many tests import the live `.ts` modules through `tsx` for accurate behaviour.
 
 ```bash
-# run them all locally
-for t in test-*.mjs; do echo "═══ $t ═══"; npx tsx "$t"; done
+# run the full suite
+npm test
 
 # typecheck
-npx tsc --noEmit
+npm run typecheck
 
 # build
 npm run build
+
+# run a single test by filter
+TEST_FILTER=streak npm test
 ```
 
-Coverage of current tests:
+Coverage of current tests (13 files):
 
 | Test | What it pins down |
 |---|---|
@@ -815,11 +820,17 @@ Coverage of current tests:
 | `test-cache-poison-defense.mjs` | Refuse to cache opaque/numeric URLs from untrusted sources |
 | `test-dedup-isPremium.mjs` | Per-request memoisation cuts Redis round-trips |
 | `test-direct-send-safety.mjs` | Direct-mode never delivers a viewer-only / paid URL |
+| `test-engagement.mjs` | Streak + badges + referral correctness (54 assertions) |
+| `test-failure-retry.mjs` | Apology message uses Modern Standard Arabic |
 | `test-garbage-meta-and-noor-tag.mjs` | Reject "1 Image" titles + early-skip noor non-book pages |
+| `test-leaderboard.mjs` | Canonical key + ISO-week + complaint filter + bundle markers |
+| `test-leaderboard-cache-hits.mjs` | Cache-hit gate regression check (9 assertions) |
+| `test-markdown-balance.mjs` | Telegram Markdown markers paired in /invite messages |
 | `test-paid-book-fallback.mjs` | Paid-book detection produces user-visible explanation |
 | `test-parser-preserves-قراءة.mjs` | Don't strip "قراءة" / "اقرأ" when they are part of a title |
 | `test-premium-expiration.mjs` | TTL-based expiry + lazy cleanup |
 | `test-source-weighting.mjs` | Auto-disable thresholds (tier-1, tier-2, trust) |
+| `test-summary-badge-wiring.mjs` | Summary badge import + call ordering (10 assertions) |
 | `test-telemetry-self-trim.mjs` | Trace-store self-trims to bounded memory |
 | `test-validate-numeric-id.mjs` | Telegram ID validation incl. `Number.isSafeInteger` |
 
@@ -836,14 +847,15 @@ The bot is engineered to stay cheap. Key tactics:
 - **Redis pipeline for guards** — ban / maintenance / rate / daily checks all run in a single network round-trip per request.
 - **Lua sliding-window rate-limit** — atomic, no race, no Lua-script reload.
 - **Per-source success/failure counters cached in-memory** with 30s TTL — analytics queries don't hit Redis on every request.
-- **Garbage-title detection** — early-rejects PDFs whose `/Title` metadata is "1 Image", "Untitled", "Microsoft Word - …", etc., before sending the AI a misleading prompt.
+- **Garbage-title detection** — early-rejects PDFs whose `/Title` metadata is "1 Image", "Untitled", "Microsoft Word - …", before sending the AI a misleading prompt.
 - **Bounded telemetry** — trace store self-trims to 200 entries.
 - **noor-book early-skip** — non-book noor URLs (`/tag`, `/category`, `/user`, `/search`) get rejected without spinning Chromium for 30s.
-- **3 workers** with bounded concurrency — predictable resource usage on a 2GB VM.
+- **Hard-blocked domains** — known-bad domains never reach the HEAD-probe step.
+- **3 workers** with bounded concurrency — predictable resource usage on a 2 GB VM.
 
 Order-of-magnitude prod numbers (tracked daily):
-- p50 delivery time: ~5s (cache hit ~1s)
-- p95 delivery time: ~12s
+- p50 delivery time: ~5 s (cache hit ~1 s)
+- p95 delivery time: ~12 s
 - AI calls per delivered book: ~0.3
 - Firecrawl credits per delivered book: ~0.4 (cache absorbs the rest)
 
@@ -851,15 +863,15 @@ Order-of-magnitude prod numbers (tracked daily):
 
 ## 🤝 Contributing
 
-Contributions are welcome. The full guide is in <code>CONTRIBUTING.md</code> — a short version:
+Contributions are welcome. The full guide is in <code>CONTRIBUTING.md</code> — short version:
 
 1. Fork → branch (`feat/...` or `fix/...`).
-2. Make sure `npx tsc --noEmit` and `npm run build` pass.
+2. Make sure `npm run typecheck`, `npm run build`, and `npm test` all pass.
 3. Add / update a `test-*.mjs` for any non-trivial behaviour change.
 4. Open a PR against `main` with a clear description of the **problem**, the **fix**, and any **trade-offs**.
 5. CI must be green; one approving review is required.
 
-We follow Conventional Commits (`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `test:`, `chore:`).
+We follow **Conventional Commits** (`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `test:`, `chore:`).
 
 Issues for newcomers are labelled `good first issue`. Before you start a large feature, please open an issue first to align on the design.
 
@@ -867,10 +879,10 @@ Issues for newcomers are labelled `good first issue`. Before you start a large f
 
 ## 🗺️ Roadmap
 
-Done:
+**Done:**
 - [x] Two-tier Redis queue + DLQ
 - [x] Multi-stage PDF validator with Mistral AI fallback
-- [x] Telegram Stars payments
+- [x] Telegram Stars payments (with idempotent redelivery)
 - [x] Web admin dashboard (mobile-responsive)
 - [x] Per-request telemetry traces + funnel
 - [x] Arabic dialect / intent-verb stripping
@@ -882,8 +894,11 @@ Done:
 - [x] Daily Postgres backup script with rotation
 - [x] Docker log rotation
 - [x] CI: typecheck + build + smoke tests on every PR
+- [x] **Engagement: streak + 10 badges + tiered referrals** (v32.0)
+- [x] **Real weekly leaderboard with canonical-key normalization** (v32.1)
+- [x] **Hard-blocked domains list** (v32.0)
 
-Planned:
+**Planned:**
 - [ ] Webhook mode (currently long-poll only)
 - [ ] Wishlist hit-notification when a previously-unavailable book becomes available
 - [ ] English-language book support
@@ -892,6 +907,10 @@ Planned:
 - [ ] S3 off-site backup wrapper
 - [ ] OpenTelemetry exporter (Prometheus + Grafana ready)
 - [ ] Vitest migration for the smoke tests
+- [ ] Personalized recommendations ("readers who downloaded X also enjoyed Y")
+- [ ] Reading goals (`/goal 5` → monthly target with progress bar)
+- [ ] Voice search (Whisper transcription)
+- [ ] Inline mode (`@kholasaelktob_Bot أرض زيكولا` works in any chat)
 
 ---
 
@@ -901,7 +920,7 @@ Planned:
 No — `MISTRAL_API_KEY` and `GEMINI_API_KEY` are enough for full functionality. Adding more providers buys you redundancy when a free tier hits its rate limit.
 
 **Q: What about copyright?**
-The bot only **points to** PDFs that are already publicly indexable on third-party libraries. It does not host content. The 13 sources are all public Arabic libraries that publish books openly. Operators are responsible for legal compliance in their jurisdiction.
+The bot only **points to** PDFs that are already publicly indexable on third-party libraries. It does not host content. The 14 sources are all public Arabic libraries that publish books openly. Operators are responsible for legal compliance in their jurisdiction.
 
 **Q: Can it handle non-Arabic books?**
 The pipeline is language-agnostic; only the parser and source list are Arabic-tuned. Adding English support is on the roadmap.
@@ -918,18 +937,25 @@ We started with standalone `.mjs` files because every test is fully deterministi
 3. Update `BOT_TOKEN` in `.env` on the server.
 4. `docker compose up -d --force-recreate bot`.
 
+**Q: Are there any rate limits I should know about?**
+Yes — see <code>server/bot/rateLimit.ts</code>. Per-user: 1 request / 6 s, 5 requests / minute (free), 10 / minute (premium). Per-IP for the public API: 10 req/min by default. All sliding-window via Redis Lua.
+
+**Q: How is the streak feature timezone-aware?**
+All date keys use **Cairo timezone (UTC+2)**, not UTC, to prevent off-by-one errors. The streak Lua script atomically computes `today` / `yesterday` strings in Cairo TZ before incrementing.
+
 ---
 
 ## 🙏 Acknowledgments
 
 This project stands on the shoulders of:
 
-- The 13 Arabic libraries that publish public-domain and open-access content for free — without them this bot would be useless.
+- The **14 Arabic libraries** that publish public-domain and open-access content for free — without them this bot would be useless.
 - [Firecrawl](https://firecrawl.dev) for making multi-domain search affordable.
 - [Mistral AI](https://mistral.ai) for an honest free tier that doesn't rate-limit hostile.
+- [Google Gemini](https://ai.google.dev) for high-quality Arabic summary generation.
 - [node-telegram-bot-api](https://github.com/yagop/node-telegram-bot-api) maintainers — by far the most stable JS Telegram lib.
 - [Drizzle ORM](https://orm.drizzle.team) for typed migrations that don't drift.
-- The [Devin](https://devin.ai) AI engineer that helped land 60+ PRs over the project's life.
+- [Devin](https://devin.ai) — the AI engineer that helped land 100+ PRs over the project's life.
 
 ---
 
@@ -943,8 +969,10 @@ You are free to fork, modify, self-host, and redistribute. Attribution appreciat
 
 <div align="center">
 
+### ⭐ Star this repo if you find it useful
+
 **Built with ❤️ for Arabic readers**
 
-[⬆ Back to top](#-kholasa-books-bot--خلاصة-الكتب)
+[Try the bot](https://t.me/kholasaelktob_Bot) · [Read the changelog](CHANGELOG.md) · [Contribute](CONTRIBUTING.md) · [⬆ Back to top](#-kholasa-books-bot--خلاصة-الكتب)
 
 </div>
