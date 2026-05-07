@@ -2,7 +2,7 @@
 // LEADING position only, never from inside a book title. This prevents
 // cache pollution where "كتاب الموتى" and "الموتى" (different books)
 // would otherwise canonicalize to the same key.
-import { cleanSearchQuery, canonicalizeForCache } from "./server/bot/text.js";
+import { cleanSearchQuery, canonicalizeForCache } from "../server/bot/text.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, info = "") { if (cond) pass++; else fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${info ? ` (${info})` : ""}`); }

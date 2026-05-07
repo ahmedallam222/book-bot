@@ -20,8 +20,8 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const ROOT  = resolve(dirname(fileURLToPath(import.meta.url)));
-const handler = readFileSync(`${ROOT}/server/bot/summaryHandler.ts`, "utf8");
-const badges  = readFileSync(`${ROOT}/server/bot/badges.ts`, "utf8");
+const handler = readFileSync(`${ROOT}/../server/bot/summaryHandler.ts`, "utf8");
+const badges  = readFileSync(`${ROOT}/../server/bot/badges.ts`, "utf8");
 
 let pass = 0, fail = 0;
 function check(name, cond, hint = "") {

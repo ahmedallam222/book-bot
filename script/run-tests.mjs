@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────────────
-// Runs every `test-*.mjs` deterministic probe in the repo root via
-// `tsx` (so the .mjs files can import .ts modules directly without
-// pre-compilation). Bug #21 — pre-fix, `npm test` didn't exist and a
-// plain `node test-foo.mjs` failed with ERR_UNKNOWN_FILE_EXTENSION
-// when the test imported any `./server/bot/*.ts` source. CI worked
-// around it via an inline shell loop; this script consolidates that
-// into a portable, single-source-of-truth runner.
+// Runs every `tests/test-*.mjs` deterministic probe via `tsx` (so the
+// .mjs files can import .ts modules directly without pre-compilation).
+// Pre-fix history: `npm test` didn't exist and a plain `node test-foo.mjs`
+// failed with ERR_UNKNOWN_FILE_EXTENSION when the test imported any
+// `./server/bot/*.ts` source. CI worked around it via an inline shell
+// loop; this script consolidates that into a portable, single-
+// source-of-truth runner. Test files were moved from the repo root to
+// `tests/` for a cleaner public-facing layout.
 //
 // Behaviour:
-//   - Lists `test-*.mjs` in the repo root, alphabetical.
+//   - Lists `tests/test-*.mjs`, alphabetical.
 //   - Runs each in-band, prints a banner + a per-test PASS/FAIL line.
 //   - Exits 0 only if all tests pass; first failure halts the run
 //     unless --keep-going is passed (CI uses default to fail fast).
@@ -19,14 +20,15 @@
 
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT       = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const TESTS_DIR  = join(ROOT, "tests");
 const KEEP_GOING = process.argv.includes("--keep-going");
 const FILTER     = process.env.TEST_FILTER || "";
 
-const tests = readdirSync(ROOT)
+const tests = readdirSync(TESTS_DIR)
   .filter((f) => f.startsWith("test-") && f.endsWith(".mjs"))
   .filter((f) => !FILTER || f.includes(FILTER))
   .sort();
@@ -44,7 +46,7 @@ const startAll = Date.now();
 for (const t of tests) {
   const t0 = Date.now();
   console.log(`\n═══ ${t} ═══`);
-  const res = spawnSync("npx", ["tsx", t], {
+  const res = spawnSync("npx", ["tsx", `tests/${t}`], {
     cwd:   ROOT,
     stdio: "inherit",
     shell: false,

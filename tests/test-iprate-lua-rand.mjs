@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here  = dirname(fileURLToPath(import.meta.url));
-const path  = join(here, "server/bot/ipRateLimit.ts");
+const path  = join(here, "../server/bot/ipRateLimit.ts");
 const src   = readFileSync(path, "utf8");
 
 let pass = 0, fail = 0;

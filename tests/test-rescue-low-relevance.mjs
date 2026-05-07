@@ -30,7 +30,7 @@ function check(label, condition, expected, actual) {
 }
 
 // ── 1. urlFilenameRelevance — title-based fallback math ──
-const { urlFilenameRelevance } = await import("./server/bot/text.ts");
+const { urlFilenameRelevance } = await import("../server/bot/text.ts");
 
 {
   const book = "في قلبي أنثى عبرية";
@@ -67,7 +67,7 @@ const { urlFilenameRelevance } = await import("./server/bot/text.ts");
 }
 
 // ── 2. Verify the augmentation block exists in bookRequest.ts ──
-const bookReqSrc = await readFile(path.join(root, "server/bot/bookRequest.ts"), "utf-8");
+const bookReqSrc = await readFile(path.join(root, "../server/bot/bookRequest.ts"), "utf-8");
 
 const integrationMarkers = [
   ["RESCUE-LOW-RELEVANCE comment block",     /RESCUE-LOW-RELEVANCE/],
@@ -112,7 +112,7 @@ check("buildNoResults call passes apologetic=true",
   "apologetic=true call", "missing");
 
 // ── 5. ui.ts message format ──
-const uiSrc = await readFile(path.join(root, "server/bot/ui.ts"), "utf-8");
+const uiSrc = await readFile(path.join(root, "../server/bot/ui.ts"), "utf-8");
 
 check("ui.ts buildNoResults takes apologetic param",
   /export function buildNoResults\(\s*bookName: string,\s*_usedFuzzy: boolean,\s*apologetic\s*=\s*false/.test(uiSrc),
@@ -139,7 +139,7 @@ check("urlSearchTitle declared before rescue use", declIdx > 0 && useIdx > declI
 // ── 7. Existing call sites with old signature still compile ──
 // callbacks.ts uses buildPaidBookMessage(bookName) — the apologetic
 // param defaults to false, so this should still work without change.
-const cbSrc = await readFile(path.join(root, "server/bot/callbacks.ts"), "utf-8");
+const cbSrc = await readFile(path.join(root, "../server/bot/callbacks.ts"), "utf-8");
 check("callbacks.ts buildPaidBookMessage(bookName) still compiles (default apologetic=false)",
   /buildPaidBookMessage\(bookName\)/.test(cbSrc),
   "default-arg call", "missing");
