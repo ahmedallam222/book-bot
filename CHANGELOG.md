@@ -7,6 +7,66 @@
 
 ---
 
+## [32.1.0] — Leaderboard fix (top books canonicalization + real weekly bucketing) — 2026-05-07
+
+### 🐞 Bug fixes (CRITICAL)
+
+#### 1. "أفضل كتب الأسبوع" أصبحت فعلاً أسبوعية
+- قبل: `weekly.ts` كان يقرأ من نفس الـ Redis key (`stats:top_books`) اللي بيقرأ منه "🏆 الأكثر تحميلاً" — فالقائمتين كانت متطابقة 100%، الـ button name كذِب على المستخدم.
+- بعد: weekly bucket حقيقي `stats:top_books:week:{YYYY-Www}` بـ TTL 21 يوم. الـ ISO-week محسوب بتوقيت القاهرة فيتطابق مع باقي الـ daily keys.
+- أُضيف `getWeeklyTopBooks()` في `analytics.ts` يقرأ من الـ bucket الحالي.
+
+#### 2. تكرار نفس الكتاب بصيغ مختلفة
+- قبل: `analytics.ts:trackDownload` كان يكتب الـ user query الخام كـ leaderboard member. النتيجة: `هكذا تتعافي` (ي) و `هكذا تتعافى` (ى) entries منفصلة، رغم إنهم نفس الكتاب. **مثبت من production Redis**: السطرين كان عندهم 2 + 2 بدل 4.
+- بعد: نخزّن `canonicalBookKey()` (canonicalize + strip trailing punctuation + cap 100ch) كـ member، ونحفظ أحدث صياغة كنسية في hash `stats:top_books_display`. عند القراءة، نعمل HMGET للـ display names لكل الـ canonical keys.
+
+#### 3. الكتب من الكاش بتدمج تحت العنوان الكنسي
+- قبل: لما يوزر A يطلب "هكذا تتعافي" ويوزر B يطلب "هكذا تتعافى عندما تكون مستعدا تأليف بريانا وايست"، كل واحد بيتم تسجيله بصياغته. حتى مع canonicalization، اختلاف اسم المؤلف يبقي الـ keys مختلفة.
+- بعد: `bookRequest.ts` (الـ 2 cache-hit sites) بيمرّر `cached.bookName` (العنوان الكنسي اللي البوت سلّمه فعلاً) كـ `canonicalTitle` لـ `trackDownload`. كل المستخدمين اللي بيوصلوا لنفس الـ cached entry بأي صياغة → leaderboard entry واحد.
+
+### 🎨 Polish
+
+#### 4. اقتصاص ذكي عند حدود الكلمات
+- قبل: `b.book.slice(0, 55)` كان يقطع وسط الكلمة. مثال من production: `Jan Kott , Shakespeare Our Contemporary (1964) Full book` → `Full boo` (مفقودة `k`).
+- بعد: `truncateAtWord(text, 80)` في `text.ts` — يقطع عند آخر مسافة ≥ 80% maxLen، ويزيد `…` للإشارة. حد العرض زاد من 55 إلى 80.
+
+#### 5. فلتر شكاوى في الـ leaderboard
+- قبل: `هذا ليس الكتاب المطلوب` (count 3 في production) كان يدخل القائمة كاسم كتاب لأن البوت سلّم ملف، فالـ trackDownload شغّل.
+- بعد: `isComplaintQuery()` يكشف الجمل اللي فيها كلمات شكوى ("ليس الكتاب المطلوب"، "wrong book"، "كتاب غلط"...) ويتجاهلها من الـ leaderboard فقط (الـ daily counts و user stats عادية).
+
+#### 6. علامات ترقيم لاصقة في النهاية
+- قبل: `سيكولوجية الذكاء'.` تتسجل بالـ `'.` في الآخر.
+- بعد: `canonicalBookKey` يحذف `^[\s.,;:!?'"`«»—–\-ـ]+|[\s.,;:!?'"`«»—–\-ـ]+$` من الـ key.
+
+### 🛠️ Migration script
+
+- `scripts/migrate-top-books.mjs` — يقرأ كل الـ entries القديمة من `stats:top_books`، يـ canonicalize كل واحد، يجمع الـ scores اللي عندها canonical key مكرر، ويستبدل الـ key الأصلي atomic.
+- `--dry` mode للـ preview بدون كتابة.
+- يكتب أحدث/أعلى-score display name في `stats:top_books_display`.
+- التشغيل: `docker exec book-bot-bot-1 node scripts/migrate-top-books.mjs`
+
+### 📁 الملفات المتغيرة
+
+#### Modified:
+- `server/bot/text.ts` — أضيف 4 helpers: `canonicalBookKey()`, `isoWeekKey()`, `truncateAtWord()`, `isComplaintQuery()`
+- `server/bot/analytics.ts` — `trackDownload` يقبل `canonicalTitle` ويكتب canonical key + weekly bucket + display hash + complaint filter. أضيف `getWeeklyTopBooks()`. `getTopBooks` يستخدم HMGET للـ display.
+- `server/bot/weekly.ts` — يقرأ من weekly bucket، يستخدم `truncateAtWord(80)`. تنظيف كامل للـ comments السابقة.
+- `server/bot/admin.ts` — `buildTopBooksMessage` و `admin_top` و `admin_stats` يستخدموا `truncateAtWord` بدل `slice` الخام.
+- `server/bot/bookRequest.ts` — الـ 2 cache-hit sites بيمرّروا `cached.bookName` كـ canonicalTitle.
+
+#### New:
+- `scripts/migrate-top-books.mjs` — migration script
+- `test-leaderboard.mjs` — 49 deterministic tests (canonicalization، ISO week، truncation، complaint detection، bundle markers)
+
+### ✅ Verification
+
+- typecheck: pass
+- build: 563.1kb bundle
+- tests: 42/42 passing (was 41 + 1 new = 42)
+- production data tested: extracted live `stats:top_books` from EC2، ran canonicalization manually — verified `هكذا تتعافي` و `هكذا تتعافى` يدمجوا في key واحد.
+
+---
+
 ## [32.0.0] — Engagement Loop (Streak + Badges + Referral) — 2026-05-07
 
 طلب Donna: ROI analysis للـ retention/virality. النتيجة: البوت 2 active
