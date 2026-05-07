@@ -1,6 +1,6 @@
 {
   "name": "kholasa-books-bot",
-  "version": "32.1.1",
+  "version": "32.2.0",
   "description": "خلاصة الكتب — Arabic Telegram Book Download Bot",
   "type": "module",
   "engines": {
