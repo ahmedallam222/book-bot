@@ -24,6 +24,20 @@ export const ARABIC_SOURCES: SourceConfig[] = [
       `https://www.noor-book.com/%D8%A8%D8%AD%D8%AB?q=${encodeURIComponent(q)}`,
   },
   {
+    // ar.welib.st — مرآة عربية لـ Anna's Archive / Z-Library
+    // المصدر محمي بـ Cloudflare بالكامل. Firecrawl غالباً يلاقي صفحات
+    // /md5/{hash} في فهرس Google (لأنها مفهرسة)، وبعد كده welibResolver
+    // (Playwright) بيدخل الموقع، يستنّى الـ wait-then-reveal counter،
+    // وياخد الـ signed URL على welib-public.org. شوف server/bot/welibResolver.ts.
+    domain:    "welib.st",
+    name:      "ويليب",
+    emoji:     "📚",
+    priority:  3,
+    isArabic:  true,
+    searchUrl: (q) =>
+      `https://ar.welib.st/search?index=&q=${encodeURIComponent(q)}`,
+  },
+  {
     domain:    "hindawi.org",
     name:      "هنداوي",
     emoji:     "📗",

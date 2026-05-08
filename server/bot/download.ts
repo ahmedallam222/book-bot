@@ -15,6 +15,7 @@ import { ensureTempDir, safeDeleteTemp } from "./tempFiles.js";
 import { escMd, urlFilenameRelevance } from "./text.js";
 import { validatePdfContent } from "./pdfValidator.js";
 import { downloadNoorBookPdf } from "./noorBookResolver.js";
+import { downloadWelibPdf, isWelibHost } from "./welibResolver.js";
 import type { DownloadResult } from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -521,6 +522,15 @@ export async function downloadAndSend(
     return noorBookDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral, searchResultTitle);
   }
 
+  // ── *.welib.st / *.welib.org → Playwright (CF + 35-60s wait timer) ──
+  // الموقع محمي بـ Cloudflare وعنده بروتوكول wait-then-reveal
+  // للـ download URL. فلا HTTP-only path ممكن يوصل لـ PDF — بنسلّم لـ welibResolver
+  // اللي بيفتح Chromium ، يستنّى ظهور الـ anchor على welib-public.org ، ثم
+  // يسحب الرابط الـsigned ويحمّل بـ fetch عادي.
+  if (isWelibHost(pdfUrl)) {
+    return welibDownloadAndSend(bot, chatId, pdfUrl, bookName, token, originalUrl, skipMistral, searchResultTitle);
+  }
+
   L.dlStart(pdfUrl, bookName);
   const t0 = Date.now();
 
@@ -905,6 +915,147 @@ export async function downloadAndSend(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ══════════════════════════════════════════════
+// WELIB SPECIAL FLOW
+// downloadWelibPdf بتفتح headless chromium، تبوتستراب الـ cf_clearance
+// عبر GET /، تروح لـ /slow_download/{md5}/0/0/convert، تستنّى ظهور anchor
+// على welib-public.org، ثم تحمّل الـ signed URL بـ fetch عادي (الـ CDN مفيش
+// عليه CF). بعد ما الـ PDF موجود محلياً، نكمل بنفس validate + send.
+// ══════════════════════════════════════════════
+async function welibDownloadAndSend(
+  bot:               TelegramBot,
+  chatId:            number,
+  pdfUrl:            string,
+  bookName:          string,
+  _token:            string,
+  originalUrl:       string,
+  skipMistral        = false,
+  searchResultTitle  = "",
+): Promise<DownloadResult> {
+  L.dlStart(pdfUrl, bookName);
+  const t0 = Date.now();
+
+  ensureTempDir();
+  const tempPath = path.join(
+    TEMP_DIR,
+    `${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`,
+  );
+
+  const result = await downloadWelibPdf(pdfUrl, tempPath);
+  if (!result.ok) {
+    L.dlFail(pdfUrl, `welib: ${result.error?.slice(0, 80) ?? "unknown"}`);
+    safeDeleteTemp(tempPath);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  }
+
+  // ── magic bytes ──────────────────────────────
+  // لو welib's /convert رجّع حاجة مفهاش PDF magic (مثلاً epub غير معدّل)
+  // بنرفضه بدل ما نبعت للمستخدم ملف على إنه PDF وهو لأ.
+  try {
+    if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size < 1024) {
+      L.dlFail(pdfUrl, "welib: temp file too small or missing");
+      safeDeleteTemp(tempPath);
+      await recordUrlFailure(pdfUrl);
+      return { ok: false };
+    }
+
+    const magicBuf = Buffer.alloc(10);
+    const fh = await fsPromises.open(tempPath, "r");
+    try {
+      await fh.read(magicBuf, 0, 10, 0);
+    } finally {
+      await fh.close();
+    }
+
+    if (!magicBuf.includes(Buffer.from("%PDF"))) {
+      L.dlFail(pdfUrl, "welib: no PDF signature in file");
+      safeDeleteTemp(tempPath);
+      await recordUrlFailure(pdfUrl);
+      return { ok: false };
+    }
+  } catch (e: any) {
+    L.dlFail(pdfUrl, `welib: magic check failed: ${String(e).slice(0, 80)}`);
+    safeDeleteTemp(tempPath);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  }
+
+  // ── content validation ───────────────────────
+  // originalUrl (e.g. /md5/{hash}) بيدخل لـ Mistral كـ URL hint — الـ md5 فيه
+  // مفيش slug للكتاب، لكن الـ metaTitle من PDF بيكون عربي وصحيح.
+  const validation = await validatePdfContent(
+    tempPath, bookName, originalUrl, skipMistral, "", searchResultTitle,
+  );
+  if (!validation.accepted) {
+    L.warn("download", "welib PDF rejected — content mismatch", {
+      book:      bookName.slice(0, 50),
+      url:       pdfUrl.slice(0, 80),
+      score:     validation.score.toFixed(2),
+      metaTitle: validation.metaTitle.slice(0, 60) || "(empty)",
+      event:     validation.event,
+      mistral:   validation.mistralUsed,
+    });
+    safeDeleteTemp(tempPath);
+    return {
+      ok: false,
+      rejectedContent: true,
+      mistralRejected: validation.mistralUsed,
+    };
+  }
+
+  // ── sendDocument ─────────────────────────────
+  const fname = buildPdfFilename(bookName, validation.metaTitle);
+  const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
+
+  let sent: TelegramBot.Message;
+  let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
+  const sendDocPromise = bot.sendDocument(
+    chatId,
+    tempPath,
+    {
+      caption:    buildCaption(bookName, validation.metaTitle),
+      parse_mode: "Markdown",
+    },
+    { filename: fname, contentType: "application/pdf" },
+  ) as Promise<TelegramBot.Message>;
+  try {
+    sent = await Promise.race([
+      sendDocPromise,
+      new Promise<never>((_, rej) => {
+        uploadTimerId = setTimeout(
+          () => rej(new Error("UPLOAD_TIMEOUT")),
+          TIMEOUT_UPLOAD,
+        );
+      }),
+    ]);
+  } catch (e: any) {
+    sendDocPromise.catch((lateErr) => {
+      L.debug("download", "welib sendDocument late-rejection (race already lost)", {
+        err: String(lateErr).slice(0, 100),
+      });
+    });
+    safeDeleteTemp(tempPath);
+    L.dlFail(pdfUrl, `welib upload: ${String(e?.message || e).slice(0, 80)}`);
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  } finally {
+    if (uploadTimerId !== null) clearTimeout(uploadTimerId);
+    safeDeleteTemp(tempPath);
+  }
+
+  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+  L.dlLocal(bookName, sizeMB, Date.now() - t0);
+  await recordUrlSuccess(pdfUrl);
+
+  return {
+    ok:       true,
+    fileId:   sent.document?.file_id,
+    sizeMB,
+    sendMode: "local",
+  };
 }
 
 // ══════════════════════════════════════════════
