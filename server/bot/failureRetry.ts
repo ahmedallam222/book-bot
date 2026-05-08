@@ -40,7 +40,7 @@ import TelegramBot from "node-telegram-bot-api";
 import crypto from "node:crypto";
 import { L } from "./logger.js";
 import { redis } from "./redis.js";
-import { canonicalizeForCache, urlFilenameRelevance } from "./text.js";
+import { canonicalizeForCache, escMd, urlFilenameRelevance } from "./text.js";
 import { searchAllSources } from "./engine.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
@@ -341,9 +341,16 @@ async function retryOne(
   // Fall back gracefully if the original message was deleted —
   // allow_sending_without_reply lets Telegram drop the quote rather
   // than rejecting the whole message.
-  const displayName = rec.userName ? `@${rec.userName}` : "🙏";
+  //
+  // bookName + userName are user-controlled and may contain Markdown
+  // metacharacters (`_`, `*`, `[`, `]`, ` `` `). Escaping them defends
+  // against `can't parse entities` rejections from Telegram. Telegram
+  // usernames officially allow only alphanumerics + `_`, so the
+  // underscore is the realistic clash with our `_..._` italic wrapper.
+  const safeBook = escMd(rec.bookName.slice(0, 60));
+  const displayName = rec.userName ? `@${escMd(rec.userName)}` : "🙏";
   const apology =
-    `🙏 *أعتذر على التأخير* — وجدتُ كتاب "${rec.bookName.slice(0, 60)}" الآن\n` +
+    `🙏 *أعتذر على التأخير* — وجدتُ كتاب "${safeBook}" الآن\n` +
     `_${displayName}، كنتَ قد طلبته من قبل ولم يكن متاحاً حينها_`;
 
   await bot.sendMessage(rec.chatId, apology, {
