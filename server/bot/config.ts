@@ -164,6 +164,12 @@ export const SUMMARY_CACHE_TTL_SECONDS = parseInt(
 //   لا تطابق العنوان المطلوب. (التقاط الـ subdomain العام archive.org/ia800
 //   لا يكفي لأن CA mirror خارج النطاق المطابق.)
 // - arabic-book.net: 0/2 — عيّنة صغيرة لكن صفر نجاح؛ نخفّض ترتيبه احتياطاً.
+// - x2.books-library.net: 0/3 — في تدقيق 2026-05-08، 100٪ فشل تحميل (Mistral
+//   لا يدخل القصة لأن الـ HTTP يفشل قبل الوصول لـ validator). عيّنة 3 صغيرة
+//   لكن مع الـ HARD tier الجديد (3 attempts + 0% rate) يحجب تلقائياً.
+// - dn790006.ca.archive.org: 0/0/N (مرفوض من Mistral مرات متعددة) —
+//   نفس النمط في dn790009.ca.archive.org. أي subdomain من ca.archive.org
+//   هو IA mirror لا يطابق العنوان المطلوب — نخفّض ترتيبه أيضاً.
 export const UNRELIABLE_DOMAINS: string[] = [
   "archive.org",
   "ia800",
@@ -172,7 +178,9 @@ export const UNRELIABLE_DOMAINS: string[] = [
   "islamhouse.com",
   "scholar.archive.org",
   "dn790009.ca.archive.org",
+  "dn790006.ca.archive.org",
   "arabic-book.net",
+  "x2.books-library.net",
   ...(process.env.UNRELIABLE_DOMAINS_EXTRA || "")
     .split(",")
     .map(d => d.trim())
@@ -207,8 +215,12 @@ export const SOURCE_AUTO_DISABLE_MAX_RATE = parseFloat(
 // مصادر بتفشل فشل كاتاستروفي (HTML بدل PDF، 5xx متكرر، DNS فشل …) —
 // لازم يتحجبوا أسرع. Tier ثاني: عدد محاولات أقل + نسبة نجاح ≤ 0% فعلياً.
 // المستخدم يضيع وقته 5 محاولات في مصدر باظ بدل 8.
+//
+// 2026-05-08: خفّضنا الحدّ الأدنى من 5 إلى 3. تدقيق production أظهر
+// مصادر بـ 0/3 (مثل x2.books-library.net) تظل نشطة لأنها لم تصل لـ 5
+// محاولات بعد. ثلاث محاولات بـ 0٪ نجاح إشارة كافية لإيقاف المصدر.
 export const SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS = parseInt(
-  process.env.SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS || "5",
+  process.env.SOURCE_AUTO_DISABLE_HARD_MIN_ATTEMPTS || "3",
   10,
 );
 export const SOURCE_AUTO_DISABLE_HARD_MAX_RATE = parseFloat(
@@ -345,12 +357,23 @@ export const TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD = parseFloat(
 //     host and move to the next domain.
 //
 // Tunable via env. Set to 0 to disable a cap entirely.
+//
+// 2026-05-08 — bumped from 6/2 → 8/4. Production telemetry showed
+// `tel:dl:per_domain_capped` firing 80+ times in 24h while only 21%
+// of "found" requests delivered a PDF. Hindawi (the most common
+// per-domain capped source) often has 5-7 candidate URLs per query,
+// so a cap of 2 abandons before reaching higher-quality candidates.
+// Bumping to 4 gives those candidates a fair chance while still
+// preventing one source from monopolizing the loop. Per-request
+// global cap raised to 8 in proportion (still well under the
+// historic 90s × N timeout budget; per-URL fast paths typically
+// finish in 5-30s).
 export const MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST = parseInt(
-  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "6",
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "8",
   10,
 );
 export const MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN = parseInt(
-  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "2",
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "4",
   10,
 );
 
