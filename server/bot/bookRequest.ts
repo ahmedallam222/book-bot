@@ -12,7 +12,7 @@ import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
 import { recordFailure } from "./failureRetry.js";
-import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
+import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
   REACTION_NO_RESULT, REACTION_ERROR,
@@ -919,6 +919,21 @@ async function performFullSearch(
         } else {
           trackSourceAttempt(dlDomain, false).catch(() => {});
         }
+        // 2026-05-08: trace.phase parity with download_done. Without this
+        // the `links_only` outcome traces only show `download_started`
+        // for every attempt and no terminal phase — operators have to
+        // infer reasons from logger output. Categorize so funnel views
+        // can split timeout vs HTTP vs Mistral vs heuristic rejects.
+        const failReason = result.rejectedContent
+          ? (result.mistralRejected ? "mistral_no" : "heuristic_reject")
+          : (result.permanent ? "permanent_error" : "transient_error");
+        trace.phase("download_failed", {
+          url: pdfUrl.slice(0, 80),
+          domain: dlDomain,
+          reason: failReason,
+          ms: Date.now() - t0,
+        });
+        redis.incr(`tel:dl:fail_reason:${failReason}`).catch(() => {});
       }
       // Track only Mistral-driven rejections; HTTP failures, timeouts, or
       // heuristic-only rejects don't count toward the streak (they're not
@@ -1073,9 +1088,24 @@ async function performFullSearch(
       });
     }
 
+    // 2026-05-08: when search produced verified URL candidates but every
+    // download attempt failed, surface the top URLs to the user via
+    // `buildLinksOnly` instead of the silent no-results message. The
+    // user gets actionable fallback links they can try manually rather
+    // than a dead-end "لم أجد" reply.
+    //
+    // Only used when paid-signal is below threshold — for genuine paid
+    // books the buy-page link would mislead the user into thinking the
+    // PDF is one click away.
+    const hasFallbackLinks = !showPaidBookMessage && validUrls.length > 0;
+    if (hasFallbackLinks) {
+      redis.incr("tel:dl:links_only_message_sent").catch(() => {});
+    }
     const failMsg = showPaidBookMessage
       ? buildPaidBookMessage(bookName, /* apologetic */ true)
-      : buildNoResults(bookName, false, /* apologetic */ true);
+      : hasFallbackLinks
+        ? buildLinksOnly(bookName, validUrls)
+        : buildNoResults(bookName, false, /* apologetic */ true);
 
     // Skip auto-retry if we have a *strong* paid-signal — those books
     // are deliberately not free, so retrying won't change the outcome
