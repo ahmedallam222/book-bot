@@ -1,31 +1,10 @@
 version: 2
 updates:
   # Node.js dependencies for the bot/server/client
+  # Conservative: only minor + patch bumps. Major bumps require manual review
+  # since they often contain breaking API changes (e.g. Express 5, Zod 4, Vite 8)
+  # that can break the build silently.
   - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Africa/Cairo"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "javascript"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
-    groups:
-      development-dependencies:
-        dependency-type: "development"
-      production-dependencies:
-        dependency-type: "production"
-        update-types:
-          - "minor"
-          - "patch"
-
-  # GitHub Actions workflow updates
-  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -35,12 +14,51 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    # Both groups limited to minor + patch to avoid breaking-change surprises.
+    # Major bumps must be opened manually after compatibility review.
+    groups:
+      development-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      production-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Block all major bumps repo-wide. Re-enable selectively when we are
+      # ready to handle a specific upgrade.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions workflow updates
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Cairo"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
       - "github-actions"
     commit-message:
       prefix: "ci"
       include: "scope"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # Dockerfile base-image updates
+  # Pin to the current major (node 20-alpine). Major bumps must be reviewed
+  # manually; node 26 broke `tsx` and the bundled build last time.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -48,10 +66,13 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Africa/Cairo"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "docker"
     commit-message:
       prefix: "build"
       include: "scope"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
