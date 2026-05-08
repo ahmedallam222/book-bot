@@ -25,7 +25,7 @@
     "pg": "^8.11.5",
     "playwright-core": "^1.49.0",
     "react": "^19.2.6",
-    "react-dom": "^18.2.0",
+    "react-dom": "^19.2.6",
     "recharts": "^3.8.1",
     "zod": "^4.4.3"
   },
@@ -35,7 +35,7 @@
     "@types/node-telegram-bot-api": "^0.64.7",
     "@types/pg": "^8.11.5",
     "@types/react": "^19.2.14",
-    "@types/react-dom": "^18.2.25",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.2.1",
     "drizzle-kit": "^0.31.10",
     "esbuild": "^0.25.12",
