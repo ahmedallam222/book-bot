@@ -471,8 +471,11 @@ async function enrichWithMarkdown(results: BookResult[], userQuery: string): Pro
     }
   } catch {}
 
+  // welib.st صفحاته كلها محمية بـ Cloudflare ومفيهاش direct PDF link حتى
+  // لو الـ scrape نجح (الرابط بيتولّد ديناميكياً بعد counter). نتركها لـ
+  // welibResolver وقت التحميل بدل ما نحرق Firecrawl credits.
   const needsEnrich = results
-    .filter((r) => !r.directPdfUrl && r.url)
+    .filter((r) => !r.directPdfUrl && r.url && !/(?:^|\.)welib\.(?:st|org)\//i.test(r.url))
     .slice(0, MAX_ENRICH);
 
   if (needsEnrich.length === 0) return results;
