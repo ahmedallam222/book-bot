@@ -26,7 +26,7 @@
     "playwright-core": "^1.49.0",
     "react": "^19.2.6",
     "react-dom": "^18.2.0",
-    "recharts": "^2.12.0",
+    "recharts": "^3.8.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
