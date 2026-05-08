@@ -37,16 +37,14 @@ ok("supports TEST_FILTER env",               runner.includes("TEST_FILTER"));
 ok("supports --keep-going flag",             runner.includes("--keep-going"));
 
 // — CI workflow integration —
-// CI currently uses an inline shell loop that globs test-*.mjs at the
-// repo root. Since the test files now live under tests/, we ship a
-// thin root-level shim (test-suite.mjs) that the existing CI loop
-// picks up and which delegates to script/run-tests.mjs. Once the
-// workflow file is updated to use `npm test` directly (requires the
-// `workflow` OAuth scope which Devin doesn't have), the shim can be
-// deleted.
-console.log("\nroot shim test-suite.mjs");
-const shim = fs.readFileSync("test-suite.mjs", "utf-8");
-ok("shim invokes script/run-tests.mjs", shim.includes("script/run-tests.mjs"));
+// CI now invokes `npm test` directly (the workflow file uses `run: npm test`),
+// which delegates to script/run-tests.mjs. The previous root-level shim
+// (test-suite.mjs) has been removed for a cleaner public-facing root.
+console.log("\nCI workflow uses npm test directly");
+const ci = fs.readFileSync(".github/workflows/ci.yml", "utf-8");
+ok("workflow runs `npm test`",          /run:\s*npm test/.test(ci));
+ok("no inline test-*.mjs glob loop",     !/for t in test-\*\.mjs/.test(ci));
+ok("no root-level test-suite.mjs shim",  !fs.existsSync("test-suite.mjs"));
 
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
