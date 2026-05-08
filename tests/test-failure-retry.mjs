@@ -99,6 +99,24 @@ check("recordFailure skips ADMIN_IDS", /ADMIN_IDS\.has\(rec\.userId\)/.test(retr
 check("retry sends apology with reply_to_message_id", /reply_to_message_id:\s*rec\.userMessageId/.test(retrySrc));
 check("retry uses allow_sending_without_reply",       /allow_sending_without_reply:\s*true/.test(retrySrc));
 
+// Markdown-escape regression — production logs (2026-05-07/08) showed the
+// retry scheduler crashing on `apology send failed (non-fatal) … can't
+// parse entities … starting at by`. Cause: bookName + userName were
+// interpolated into Markdown without escaping, so any `_` in a Telegram
+// username (officially allowed) or any `*`/`_`/`` ` `` in a book name
+// broke the `_…_` italic wrapper. Fix mirrors PR #102's `/invite` fix.
+check("apology imports escMd from text",
+  /import\s+\{[^}]*\bescMd\b[^}]*\}\s+from\s+["']\.\/text/.test(retrySrc));
+check("apology escapes bookName via escMd",
+  /escMd\(rec\.bookName\.slice\(0,\s*60\)\)/.test(retrySrc));
+check("apology escapes userName via escMd",
+  /escMd\(rec\.userName\)/.test(retrySrc));
+// Defensive: the apology must NOT interpolate raw bookName/userName into
+// the Markdown template literal anymore. Catch regressions where someone
+// reverts to `${rec.bookName}` directly.
+check("apology never references rec.bookName.slice without escMd",
+  !/"\$\{rec\.bookName\.slice\(0,\s*60\)\}"/.test(retrySrc));
+
 // Telemetry counter (matches the existing tel:dl:* / tel:retry:* convention)
 check("retry counter tel:retry:delivered", /redis\.incr\(["']tel:retry:delivered["']\)/.test(retrySrc));
 
