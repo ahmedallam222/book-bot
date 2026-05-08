@@ -12,6 +12,7 @@ import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import { listPremiumUsers }           from "./userSettings.js";
 import { shutdownNoorBookBrowser }    from "./noorBookResolver.js";
+import { shutdownWelibBrowser }       from "./welibResolver.js";
 import type { QueueJob }              from "./types.js";
 
 // ══════════════════════════════════════════════
@@ -72,6 +73,11 @@ export async function gracefulShutdown(timeoutMs = 30_000): Promise<void> {
   // الـ OS، وتظهر warnings عن orphan processes في الـ container logs.
   try { await shutdownNoorBookBrowser(); }
   catch (e) { L.warn("bot", "shutdownNoorBookBrowser failed", { err: String(e).slice(0, 80) }); }
+
+  // أغلق welib Playwright browser كذلك — نفس السبب: idle close timer قد
+  // يكون لسه بعيد، فنُعجِّل الإغلاق هنا.
+  try { await shutdownWelibBrowser(); }
+  catch (e) { L.warn("bot", "shutdownWelibBrowser failed", { err: String(e).slice(0, 80) }); }
 }
 
 // ── startBot ──────────────────────────────────
