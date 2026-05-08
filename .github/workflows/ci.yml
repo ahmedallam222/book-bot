@@ -12,9 +12,9 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
@@ -29,10 +29,4 @@ jobs:
         run: npm run build
 
       - name: Run smoke tests
-        # ملفات test-*.mjs في الجذر تستورد .ts مباشرة فتحتاج tsx
-        run: |
-          set -e
-          for t in test-*.mjs; do
-            echo "═══ $t ═══"
-            npx tsx "$t"
-          done
+        run: npm test
