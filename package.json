@@ -24,7 +24,7 @@
     "node-telegram-bot-api": "^0.67.0",
     "pg": "^8.11.5",
     "playwright-core": "^1.49.0",
-    "react": "^18.2.0",
+    "react": "^19.2.6",
     "react-dom": "^18.2.0",
     "recharts": "^2.12.0",
     "zod": "^3.23.8"
@@ -34,7 +34,7 @@
     "@types/node": "^20.12.7",
     "@types/node-telegram-bot-api": "^0.64.7",
     "@types/pg": "^8.11.5",
-    "@types/react": "^18.2.79",
+    "@types/react": "^19.2.14",
     "@types/react-dom": "^18.2.25",
     "@vitejs/plugin-react": "^4.2.1",
     "drizzle-kit": "^0.31.10",
