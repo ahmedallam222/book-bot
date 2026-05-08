@@ -190,6 +190,46 @@ export function buildNoResults(
   );
 }
 
+// ── رسالة "وجدت روابط لكن لم أحمّل" ───────────
+// Sent when search returned candidate URLs but every download attempt
+// failed (timeouts, HTTP errors, validator rejects, per-domain caps,
+// global cap reached). The user gets the top-N verified links so they
+// can manually try one — better than the silent "no PDF" message which
+// loses signal that we actually found candidates.
+//
+// Used only when `paidSignalCount` is below the threshold (i.e. NOT a
+// genuine paid book). Safe URL list is the post-verify candidate list
+// already filtered by directSendUnsafe / blacklist / hard-blocks, so
+// every link here passed pre-validation.
+//
+// Why not include URLs in `buildNoResults`: that path is also taken
+// when `results.length === 0` (search found nothing) — there are no
+// links to surface in that case.
+export function buildLinksOnly(
+  bookName: string,
+  links: readonly string[],
+): string {
+  if (!links || links.length === 0) {
+    // defensive — should never happen because callers gate on
+    // results.length > 0, but if it does fall back to the regular
+    // no-results message rather than producing an empty section.
+    return buildNoResults(bookName, false, /* apologetic */ true);
+  }
+  const top = links.slice(0, 3);
+  const linksBlock = top
+    .map((u, i) => `${i + 1}. ${escMd(u)}`)
+    .join("\n");
+  return (
+    `🙏 _عذراً، لم أتمكّن من تحميل الكتاب تلقائياً._\n\n` +
+    `🔗 *وجدت روابط محتملة*\n` +
+    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
+    `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
+    `جرّب الروابط يدوياً:\n` +
+    `${linksBlock}\n\n` +
+    `_بعض المصادر تتطلب تجاوز إعلان أو تأكيد قبل التحميل._`
+  );
+}
+
 // ── رسالة كتاب مدفوع / غير متوفر مجاناً ───────
 // Sent when classifyAccess() flagged at least one search result as
 // paid/protected (matches PROTECTED_ACCESS_PATTERNS like "اشترِ", "buy now",

@@ -36,12 +36,15 @@ const expect = (label, ok, got, want) => {
 
 // ── Test 2: env-tunables exist with sane defaults ──
 {
-  expect("MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST default 6",
-         MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST === 6,
-         MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST, 6);
-  expect("MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN default 2",
-         MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN === 2,
-         MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN, 2);
+  // 2026-05-08: bumped 6/2 → 8/4 in the reliability pack — see
+  // config.ts comments for rationale (per_domain_capped firing 80+
+  // times in 24h while delivery rate sat at 21%).
+  expect("MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST default 8",
+         MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST === 8,
+         MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST, 8);
+  expect("MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN default 4",
+         MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN === 4,
+         MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN, 4);
   expect("LOW_SUCCESS_RATE_PENALTY_THRESHOLD default 0.30",
          LOW_SUCCESS_RATE_PENALTY_THRESHOLD === 0.30,
          LOW_SUCCESS_RATE_PENALTY_THRESHOLD, 0.30);
@@ -122,33 +125,34 @@ function simulateCappedLoop(urls, perDomainCap, globalCap) {
 }
 
 {
-  // Scenario A: 5 hindawi + 2 bookleaks. Cap = 2 per-domain, 6 global.
-  // Expectation: 2 hindawi tried + 2 bookleaks tried = 4 total, 3 hindawi skipped.
+  // Scenario A: 6 hindawi + 2 bookleaks. Cap = 4 per-domain, 8 global.
+  // Expectation: 4 hindawi tried + 2 bookleaks tried = 6 total, 2 hindawi skipped.
   const urls = [
     "https://downloads.hindawi.org/books/1.pdf",
     "https://downloads.hindawi.org/books/2.pdf",
     "https://downloads.hindawi.org/books/3.pdf",
     "https://downloads.hindawi.org/books/4.pdf",
     "https://downloads.hindawi.org/books/5.pdf",
+    "https://downloads.hindawi.org/books/6.pdf",
     "https://bookleaks.com/a.pdf",
     "https://bookleaks.com/b.pdf",
   ];
-  const r = simulateCappedLoop(urls, 2, 6);
-  expect("Per-domain cap stops Hindawi after 2 tries", r.tried.filter(u => u.includes("hindawi")).length === 2,
-         r.tried.filter(u => u.includes("hindawi")).length, 2);
+  const r = simulateCappedLoop(urls, 4, 8);
+  expect("Per-domain cap stops Hindawi after 4 tries", r.tried.filter(u => u.includes("hindawi")).length === 4,
+         r.tried.filter(u => u.includes("hindawi")).length, 4);
   expect("Per-domain cap allows both bookleaks URLs",  r.tried.filter(u => u.includes("bookleaks")).length === 2,
          r.tried.filter(u => u.includes("bookleaks")).length, 2);
-  expect("Per-domain cap registers 3 skips",          r.domainSkips === 3, r.domainSkips, 3);
-  expect("Global cap NOT reached at 4 < 6",            r.globalHit === false, r.globalHit, false);
+  expect("Per-domain cap registers 2 skips",          r.domainSkips === 2, r.domainSkips, 2);
+  expect("Global cap NOT reached at 6 < 8",            r.globalHit === false, r.globalHit, false);
 }
 
 {
-  // Scenario B: 8 distinct domains, global cap 6.
-  // Expectation: only 6 tried, 2 abandoned via globalCap.
-  const urls = Array.from({ length: 8 }, (_, i) =>
+  // Scenario B: 10 distinct domains, global cap 8.
+  // Expectation: only 8 tried, 2 abandoned via globalCap.
+  const urls = Array.from({ length: 10 }, (_, i) =>
     `https://domain${i}.example.com/book.pdf`);
-  const r = simulateCappedLoop(urls, 2, 6);
-  expect("Global cap stops at 6", r.total === 6, r.total, 6);
+  const r = simulateCappedLoop(urls, 4, 8);
+  expect("Global cap stops at 8", r.total === 8, r.total, 8);
   expect("Global cap flag set",  r.globalHit === true, r.globalHit, true);
 }
 
