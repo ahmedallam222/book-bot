@@ -1,6 +1,7 @@
 import { isBlacklisted } from "./blacklist.js";
 import { L }              from "./logger.js";
 import { UA, VIEWER_ONLY_DOMAINS, HARD_BLOCKED_DOMAINS } from "./config.js";
+import { isWelibHost }    from "./welibResolver.js";
 
 // ══════════════════════════════════════════════
 // VERIFY — التحقق من صلاحية روابط PDF
@@ -57,14 +58,20 @@ export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatch> {
   });
 
   // ── welib URLs — let download.ts handle them ──
-  // ar.welib.st is fully behind Cloudflare; a HEAD without cf_clearance
-  // returns 403 ("Just a moment…") which the 4xx-skip path below would
-  // otherwise mark as permanently dead. The resolver bootstraps CF
-  // cookies in Playwright at download time, so we keep welib URLs in
-  // the candidate set and bypass the HEAD probe entirely.
-  const isWelibUrl = (u: string) => /(?:^|\/\/[^/]*?\.)welib\.(?:st|org)\//i.test(u);
-  const welibUrls = notViewerOnly.filter(isWelibUrl);
-  const nonWelib = notViewerOnly.filter((u) => !isWelibUrl(u));
+  // welib (welib.st / welib.org, with or without subdomain) sits fully
+  // behind Cloudflare; a HEAD without cf_clearance returns 403 ("Just
+  // a moment…") which the 4xx-skip path below would otherwise mark as
+  // permanently dead. The resolver bootstraps CF cookies in Playwright
+  // at download time, so we keep welib URLs in the candidate set and
+  // bypass the HEAD probe entirely.
+  //
+  // Source-of-truth for "is this a welib URL?" lives in
+  // `isWelibHost(url)` in welibResolver.ts — using a real URL parser
+  // there means bare welib.st AND ar.welib.st AND welib.org variants
+  // all match identically, instead of drifting between two ad-hoc
+  // regexes here and there.
+  const welibUrls = notViewerOnly.filter(isWelibHost);
+  const nonWelib  = notViewerOnly.filter((u) => !isWelibHost(u));
 
   // ── HEAD check لأول 6 URLs ───────────────────
   const toCheck = nonWelib.slice(0, 6);
