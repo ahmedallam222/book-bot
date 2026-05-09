@@ -1024,6 +1024,41 @@ export async function validatePdfContent(
   if (!effectiveMetaTitle) {
     redis.incr(TEL_EXTRACT_FAILED).catch(() => {});
 
+    // P4 (audit 2026-05-09): split monolithic extract_failed into a
+    // per-reason taxonomy so ops can attribute the 191 audit hits to
+    // distinct root causes — each maps to a different remediation:
+    //
+    //   garbage_meta_no_search       — PDF /Title is placeholder
+    //                                  ("Untitled", "Slide 1") AND search
+    //                                  pipeline gave us no title hint.
+    //                                  Remediation: tighter source filter.
+    //
+    //   garbage_meta_search_unusable — PDF /Title is placeholder AND a
+    //                                  searchTitle was passed through but
+    //                                  failed length/letter test.
+    //                                  Remediation: searchTitle plumbing
+    //                                  bug upstream.
+    //
+    //   no_meta_no_search            — /Title sits beyond first 64KB AND
+    //                                  no searchTitle. Common on Hindawi.
+    //                                  Remediation: extend scan window
+    //                                  or wire searchTitle from engine.
+    //
+    //   no_meta_search_unusable      — /Title beyond scan AND searchTitle
+    //                                  was passed but unusable (≤ 4
+    //                                  chars or no letters).
+    //                                  Remediation: validate searchTitle
+    //                                  earlier in the pipeline.
+    //
+    // The umbrella TEL_EXTRACT_FAILED stays incremented (back-compat for
+    // dashboards). The new per-reason counters are ADDITIVE.
+    let extractFailedReason: string;
+    if (garbageMetaDetected && !searchTitle) extractFailedReason = "garbage_meta_no_search";
+    else if (garbageMetaDetected)            extractFailedReason = "garbage_meta_search_unusable";
+    else if (!searchTitle)                   extractFailedReason = "no_meta_no_search";
+    else                                     extractFailedReason = "no_meta_search_unusable";
+    redis.incr(`tel:pdf:extract_failed_reason:${extractFailedReason}`).catch(() => {});
+
     // v25 FIX: اسم الملف العشوائي/الرقمي مع غياب metaTitle = صفر معلومة
     // مثال: "yxps7.pdf", "53814181.pdf", "abc123.pdf"
     // في هذه الحالة Mistral يخمّن بناءً على الموضوع لا العنوان → كتاب غلط مؤكد
@@ -1052,6 +1087,9 @@ export async function validatePdfContent(
       (_hasAlpha && _hasDigit && _alphaOnly.length < 4); // حروف < 4 مع أرقام → بلا معنى (TT-79, AB-3)
     if (isMeaninglessFilename && MISTRAL_API_KEY) {
       redis.incr(TEL_REJECTED).catch(() => {});
+      // P4 disposition counter: how many extract_failed cases short-
+      // circuit on the meaningless-filename guard (no Mistral call).
+      redis.incr("tel:pdf:no_meta_rejected_meaningless_fn").catch(() => {});
       L.warn("pdfValidator", "candidate_rejected_title_mismatch — no metaTitle + meaningless filename", {
         book: bookName.slice(0, 50), filename: filenameHint.slice(0, 30),
       });
@@ -1108,6 +1146,12 @@ export async function validatePdfContent(
       const accepted = await askMistral(bookName, "", pdfUrl, filenameHint);
       if (accepted) redis.incr(TEL_ACCEPTED).catch(() => {});
       else          redis.incr(TEL_REJECTED).catch(() => {});
+      // P4 disposition counter: extract_failed cases that fell through
+      // to Mistral (the expensive path). Lets ops track Mistral spend
+      // attributable specifically to missing metadata.
+      redis.incr(accepted
+        ? "tel:pdf:no_meta_mistral_accepted"
+        : "tel:pdf:no_meta_mistral_rejected").catch(() => {});
       L.info("pdfValidator",
         accepted
           ? "candidate_accepted_title_match (Mistral, no meta)"
@@ -1118,6 +1162,10 @@ export async function validatePdfContent(
     }
 
     // لا Mistral ولا metaTitle ولا filename مفيد → fail-open
+    // P4 disposition counter: pure fail-open path (no Mistral
+    // configured, no metaTitle). Tracks how often the bot accepts
+    // a file with zero validation signal.
+    redis.incr("tel:pdf:no_meta_failopen_accepted").catch(() => {});
     L.info("pdfValidator", "No metaTitle, no Mistral key — fail-open accept", { book: bookName.slice(0, 50) });
     return { accepted: true, score: 0.5, event: "no_metadata_accepted", mistralUsed: false, metaTitle: "" };
   }
