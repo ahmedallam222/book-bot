@@ -229,6 +229,136 @@ export async function downloadWelibPdf(
 }
 
 // ══════════════════════════════════════════════
+// SEARCH — list /md5/{hash} candidates for a free-text query.
+//
+// Why we need our own search step (instead of relying on Firecrawl):
+//   ar.welib.st is fully behind Cloudflare. Firecrawl (which does
+//   `(site:welib.st OR ...)` Google queries) almost never gets back
+//   welib URLs because Google's index of welib is sparse — the pages
+//   sit behind a CF interstitial so Googlebot indexes only stubs.
+//   Result: even though welib has the book, the bot never sees a
+//   welib URL in the candidate set and falls back to weaker sources.
+//
+// This helper opens the same headless Chromium used by the resolver,
+// reuses the welibResolver mutex (CF cookies + rate-limit are per-IP),
+// bootstraps cf_clearance via GET /, then GET /search?index=&q=... and
+// extracts every distinct /md5/{32-hex} link from the result page.
+//
+// Output is a `WelibSearchResult[]` of canonical /md5/ URLs that
+// callers (engine.ts) can fold into their normal candidate list.
+// The download path is unchanged: welibDownloadAndSend → resolver.
+// ══════════════════════════════════════════════
+export interface WelibSearchResult {
+  url:   string; // canonical https://ar.welib.st/md5/{hash}
+  md5:   string; // 32-char lowercase hex
+  title: string; // best-effort heading text from the search row
+}
+
+const WELIB_SEARCH_ORIGIN = "https://ar.welib.st";
+
+export function buildWelibSearchUrl(query: string): string {
+  const q = (query || "").trim();
+  if (!q) return "";
+  // index= explicitly empty = "all indexes"; ext=pdf filters to PDF
+  // results so we don't surface epub/mobi candidates the resolver
+  // would still convert (slow + sometimes garbled).
+  return `${WELIB_SEARCH_ORIGIN}/search?index=&q=${encodeURIComponent(q)}&ext=pdf`;
+}
+
+export async function searchWelib(
+  query: string,
+  opts?: { maxResults?: number; timeoutMs?: number },
+): Promise<WelibSearchResult[]> {
+  const q = (query || "").trim();
+  if (!q) return [];
+  const maxResults = Math.max(1, Math.min(50, opts?.maxResults ?? 10));
+  const timeoutMs = Math.max(5_000, opts?.timeoutMs ?? WELIB_RESOLVE_TIMEOUT_MS);
+
+  return withWelibLock(async () => {
+    let context: BrowserContext | null = null;
+    const t0 = Date.now();
+    try {
+      const browser = await getBrowser();
+      context = await browser.newContext({
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        locale: "ar-SA",
+        viewport: { width: 1280, height: 800 },
+        acceptDownloads: false,
+        extraHTTPHeaders: {
+          "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
+        },
+      });
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      const page: Page = await context.newPage();
+      page.setDefaultTimeout(timeoutMs);
+
+      // Bootstrap cf_clearance — same pattern as the resolver.
+      await page.goto(WELIB_SEARCH_ORIGIN + "/?lang=ar", {
+        waitUntil: "domcontentloaded",
+        timeout:   timeoutMs,
+      });
+      await page.waitForTimeout(1000);
+
+      const searchUrl = buildWelibSearchUrl(q);
+      L.info("welib", "search:navigate", { q: q.slice(0, 60), url: searchUrl.slice(0, 120) });
+      await page.goto(searchUrl, {
+        waitUntil: "domcontentloaded",
+        timeout:   timeoutMs,
+      });
+      // Welib hydrates result rows after DOMContentLoaded. Give it a
+      // beat so the /md5/ anchors land in the DOM.
+      await page.waitForTimeout(1500);
+
+      const results = await page.evaluate((max: number) => {
+        const out: Array<{ md5: string; url: string; title: string }> = [];
+        const seen = new Set<string>();
+        const anchors = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>("a[href*='/md5/']"),
+        );
+        for (const a of anchors) {
+          const m = a.href.match(/\/md5\/([a-f0-9]{32})/i);
+          if (!m) continue;
+          const md5 = m[1].toLowerCase();
+          if (seen.has(md5)) continue;
+          seen.add(md5);
+          // Try to find a heading near the anchor — falls back to
+          // the anchor's own text content.
+          const headingEl =
+            a.querySelector("h1, h2, h3, h4, strong, b") ??
+            a.closest("article, li, div")?.querySelector("h1, h2, h3, h4") ??
+            a;
+          const title = (headingEl?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200);
+          out.push({ md5, url: `https://ar.welib.st/md5/${md5}`, title });
+          if (out.length >= max) break;
+        }
+        return out;
+      }, maxResults);
+
+      L.info("welib", "search:done", {
+        q:       q.slice(0, 60),
+        results: results.length,
+        ms:      Date.now() - t0,
+      });
+      return results;
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      L.warn("welib", "search:failed", {
+        q:     q.slice(0, 60),
+        error: msg.slice(0, 200),
+        ms:    Date.now() - t0,
+      });
+      return [];
+    } finally {
+      await context?.close().catch(() => {});
+      scheduleIdleClose();
+    }
+  });
+}
+
+// ══════════════════════════════════════════════
 // extractSignedDownloadUrl — Playwright-only step
 // Bootstrap CF cookies, navigate, poll for the welib-public.org anchor.
 // Exposed for test injection / direct use.
