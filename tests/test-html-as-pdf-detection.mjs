@@ -28,11 +28,14 @@
 //      body vs other binary mismatch.
 //
 // Counters added:
-//   tel:download:prevalidate_html_rejected         — preValidate caught HTML
-//   tel:download:prevalidate_bad_magic_rejected    — preValidate caught other non-PDF
-//   tel:download:local_prevalidate_rejected        — local-path preValidate fired
-//   tel:download:post_stream_html_rejected         — strict post-stream caught HTML
-//   tel:download:post_stream_bad_magic_rejected    — strict post-stream caught non-PDF
+//   tel:dl:prevalidate_html_rejected         — preValidate caught HTML
+//   tel:dl:prevalidate_bad_magic_rejected    — preValidate caught other non-PDF
+//   tel:dl:local_prevalidate_rejected        — local-path preValidate fired
+//   tel:dl:post_stream_html_rejected         — strict post-stream caught HTML
+//   tel:dl:post_stream_bad_magic_rejected    — strict post-stream caught non-PDF
+//
+// Naming: matches the project-standard `tel:dl:*` prefix used by all
+// other download-related telemetry (see bookRequest.ts, download.ts:568).
 
 import { readFileSync } from "node:fs";
 
@@ -67,8 +70,8 @@ ok(
 );
 
 ok(
-  "T4 — local-path preValidate failure increments tel:download:local_prevalidate_rejected",
-  /tel:download:local_prevalidate_rejected/.test(downloadSrc),
+  "T4 — local-path preValidate failure increments tel:dl:local_prevalidate_rejected",
+  /tel:dl:local_prevalidate_rejected/.test(downloadSrc),
 );
 
 ok(
@@ -105,6 +108,19 @@ ok(
 ok(
   "T10 — strict prefix check positioned AFTER the temp-file size check (so we don't double-fail empty files)",
   /temp file too small or missing[\s\S]{0,2000}?magicHead\s*=\s*magic\.subarray/m.test(downloadSrc),
+);
+
+ok(
+  "T11 — counters use project-standard tel:dl:* prefix (regression for Devin Review on #136)",
+  // Every download-related telemetry counter in the project uses the
+  // tel:dl: prefix. The original P3 commit accidentally introduced
+  // tel:download: which broke ops dashboards filtering on tel:dl:*.
+  !/tel:download:/.test(downloadSrc) &&
+  /tel:dl:prevalidate_html_rejected/.test(downloadSrc) &&
+  /tel:dl:prevalidate_bad_magic_rejected/.test(downloadSrc) &&
+  /tel:dl:local_prevalidate_rejected/.test(downloadSrc) &&
+  /tel:dl:post_stream_html_rejected/.test(downloadSrc) &&
+  /tel:dl:post_stream_bad_magic_rejected/.test(downloadSrc),
 );
 
 console.log(`\nResults: ${pass} passed, ${fail} failed`);
