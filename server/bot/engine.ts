@@ -44,9 +44,42 @@ export async function isFirecrawlDown(): Promise<boolean> {
   } catch { return false; }
 }
 
+// Stale-cache guard.
+//
+// Between 2026-05-02 and the fix in commit 312373d, SEARCH_CACHE_TTL_HIT
+// was 3_600_000 (intended as "1h in ms") but Redis SETEX expects seconds,
+// so every `sc:*` write during that window persisted for ~41.66 days.
+// The fix corrected new writes but left ~72 popular queries (audited
+// 2026-05-09: العادات الذرية، صحيح مسلم، رياض الصالحين، …) with TTLs
+// of 33-37 days remaining — locked into pre-welib results until June.
+//
+// We can't change a key's TTL without DEL+SET, but we can refuse to
+// trust any cache entry whose TTL exceeds the intended HIT TTL by
+// more than a 60s safety margin. Such entries are obviously written
+// by a buggy code path and treated as a cache miss → a fresh search
+// runs and overwrites them with the correct (now-3600s) TTL.
+//
+// 60s margin: covers clock skew + the small drift between SETEX
+// being issued and TTL being read on the next request.
+const STALE_CACHE_TTL_THRESHOLD_SEC = SEARCH_CACHE_TTL_HIT + 60;
+
 export async function getSearchCacheResults(query: string): Promise<BookResult[]> {
   try {
-    const raw = await redis.get(searchCacheKey(query));
+    const key = searchCacheKey(query);
+    const ttl = await redis.ttl(key);
+    if (ttl > STALE_CACHE_TTL_THRESHOLD_SEC) {
+      // Poisoned by the historical ms-vs-seconds bug. Drop the key
+      // and report cache miss so the caller does a fresh search.
+      L.warn("engine", "search cache entry has impossibly long TTL — dropping as stale", {
+        key:   key.slice(0, 80),
+        ttl,
+        max:   STALE_CACHE_TTL_THRESHOLD_SEC,
+      });
+      redis.del(key).catch(() => {});
+      redis.incr("tel:cache:stale_ttl_dropped").catch(() => {});
+      return [];
+    }
+    const raw = await redis.get(key);
     if (!raw) return [];
     return JSON.parse(raw) as BookResult[];
   } catch { return []; }
