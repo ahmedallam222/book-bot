@@ -341,6 +341,53 @@ export function truncateAtWord(text: string, maxLen = 80): string {
   return `${sliced.slice(0, maxLen - 1).trim()}…`;
 }
 
+// ── Script detection helpers ──────────────────────────────────────────
+//
+// Used by the title-gate to recognise *cross-language* candidates: e.g.
+// the user types Arabic "العادات الذرية" and the only available PDF is
+// the English original "Atomic habits (PDFDrive).pdf". Token-overlap
+// scoring returns 0 for such pairs (zero shared characters, zero shared
+// transliterated bigrams) — so the existing `urlFilenameRelevance`
+// gate would block direct-send AND blow trust ceilings even for
+// search-engine-confident matches.
+//
+// Strategy: detect the script of each side (Arabic vs Latin), and when
+// they differ on a search-engine-trusted candidate, downstream code
+// (pdfValidator) treats that as "this is a translation match candidate"
+// rather than "this is a wrong book". The Mistral prompt also receives
+// an explicit translation hint so it can stop hedging on bestsellers.
+//
+// We classify a string by counting Arabic-block chars vs ASCII letters.
+// Whichever is dominant wins; ties or empty strings → "unknown".
+
+const ARABIC_BLOCK_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g;
+const LATIN_LETTER_RE = /[A-Za-z]/g;
+
+export type Script = "arabic" | "latin" | "unknown";
+
+export function detectScript(s: string): Script {
+  if (!s) return "unknown";
+  const arabicCount = (s.match(ARABIC_BLOCK_RE) || []).length;
+  const latinCount  = (s.match(LATIN_LETTER_RE) || []).length;
+  if (arabicCount === 0 && latinCount === 0) return "unknown";
+  if (arabicCount > latinCount) return "arabic";
+  if (latinCount > arabicCount) return "latin";
+  return "unknown";  // strict tie — don't claim either
+}
+
+// True iff the two inputs are written in different alphabets (e.g. Arabic
+// query vs Latin filename). Used to recognise "translation pair" cases
+// where filename-token overlap inherently can't work.
+//
+// Returns false when either side is "unknown" — we only claim a cross-
+// language case when we're confident about both scripts.
+export function isCrossLanguagePair(a: string, b: string): boolean {
+  const sa = detectScript(a);
+  const sb = detectScript(b);
+  if (sa === "unknown" || sb === "unknown") return false;
+  return sa !== sb;
+}
+
 /**
  * يُستخدم لترتيب URLs قبل التحميل —
  * أسماء الملفات الرقمية تحصل على 0.3 neutral بدل 0
