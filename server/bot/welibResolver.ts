@@ -34,7 +34,7 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
 import { L } from "./logger.js";
-import { UA } from "./config.js";
+import { UA, WELIB_PROXY_URL, WELIB_PROXY_SECRET } from "./config.js";
 
 let _browserPromise: Promise<Browser> | null = null;
 let _browserCloseTimer: NodeJS.Timeout | null = null;
@@ -305,9 +305,58 @@ export async function extractSignedDownloadUrl(slowUrl: string): Promise<string 
 }
 
 // ══════════════════════════════════════════════
+// buildProxyFetchTarget — pure helper, exported for tests.
+//
+// Returns the URL + headers used to fetch the signed welib URL. When
+// WELIB_PROXY_URL + WELIB_PROXY_SECRET are configured, the request is
+// routed through the Cloudflare Worker proxy (see
+// cloudflare/welib-proxy/). Otherwise the bot fetches the signed URL
+// directly — which currently times out on AWS EC2 because welib's CDN
+// blocks public-cloud egress IPs.
+//
+// We pass the proxy config as arguments rather than reading them
+// inline so tests can exercise both branches deterministically.
+// ══════════════════════════════════════════════
+export function buildProxyFetchTarget(
+  signedUrl: string,
+  proxyUrl:  string,
+  secret:    string,
+): { fetchUrl: string; headers: Record<string, string>; viaProxy: boolean } {
+  const baseHeaders: Record<string, string> = {
+    "User-Agent":      UA,
+    "Accept":          "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
+  };
+
+  if (!proxyUrl || !secret) {
+    return { fetchUrl: signedUrl, headers: baseHeaders, viaProxy: false };
+  }
+
+  let proxy: URL;
+  try {
+    proxy = new URL(proxyUrl);
+  } catch {
+    // Misconfigured proxy URL — fall back to direct fetch rather than
+    // breaking the path entirely.
+    return { fetchUrl: signedUrl, headers: baseHeaders, viaProxy: false };
+  }
+  proxy.searchParams.set("url", signedUrl);
+
+  return {
+    fetchUrl: proxy.toString(),
+    headers: {
+      ...baseHeaders,
+      Authorization: `Bearer ${secret}`,
+    },
+    viaProxy: true,
+  };
+}
+
+// ══════════════════════════════════════════════
 // streamSignedUrlToFile — plain Node fetch (no browser).
-// The signed URL is on welib-public.org which is a regular CDN — no
-// Cloudflare challenge for the asset itself.
+// The signed URL is on welib-public.org. Direct fetches from AWS EC2
+// time out at the CDN; route through the Cloudflare Worker proxy when
+// configured (see cloudflare/welib-proxy/).
 // ══════════════════════════════════════════════
 async function streamSignedUrlToFile(
   url:        string,
@@ -316,14 +365,19 @@ async function streamSignedUrlToFile(
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WELIB_DOWNLOAD_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, {
+    const { fetchUrl, headers, viaProxy } = buildProxyFetchTarget(
+      url,
+      WELIB_PROXY_URL,
+      WELIB_PROXY_SECRET,
+    );
+    L.info("welib", "Streaming signed URL", {
+      viaProxy,
+      proxy: viaProxy ? new URL(fetchUrl).host : undefined,
+    });
+    const resp = await fetch(fetchUrl, {
       method:  "GET",
       signal:  ctrl.signal,
-      headers: {
-        "User-Agent":      UA,
-        "Accept":          "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ar,ar-SA;q=0.9,en;q=0.5",
-      },
+      headers,
       redirect: "follow",
     });
     if (!resp.ok || !resp.body) {
