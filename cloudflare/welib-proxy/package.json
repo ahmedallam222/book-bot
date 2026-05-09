@@ -1,0 +1,16 @@
+{
+  "name": "welib-proxy",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker that proxies welib-public.org CDN downloads, bypassing the AWS-IP block.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "secret:set": "wrangler secret put WELIB_PROXY_SECRET"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}
