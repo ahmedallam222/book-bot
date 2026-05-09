@@ -177,9 +177,18 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   const enriched = (await enrichWithMarkdown(merged, query))
     .sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
-  // Cache the results
+  // Cache the results.
+  //
+  // When `fcPaused=true` the result set is welib-only and therefore
+  // partial — we explicitly skipped the Firecrawl leg above. Caching
+  // it with the full hit-TTL (1h) would mean that for the 59m after
+  // FC's 60s rate-limit clears, every cache hit on this query would
+  // serve a degraded welib-only result without ever revisiting FC.
+  // Use the short MISS TTL (5m) instead so FC re-enters the picture
+  // shortly after it recovers, while still deduping in-flight
+  // requests during the FC outage itself.
   if (enriched.length) {
-    const ttl = SEARCH_CACHE_TTL_HIT;
+    const ttl = fcPaused ? SEARCH_CACHE_TTL_MISS : SEARCH_CACHE_TTL_HIT;
     redis.setex(searchCacheKey(query), ttl, JSON.stringify(enriched)).catch(() => {});
   } else {
     redis.setex(searchCacheKey(query), SEARCH_CACHE_TTL_MISS, JSON.stringify([])).catch(() => {});
