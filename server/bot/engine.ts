@@ -165,14 +165,18 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // Check cache first
   const cached = await getSearchCacheResults(query);
   if (cached.length) {
-    const sizeBefore = cached.length;
+    // Count noor-listing-only drops separately. Initial P2 implementation
+    // attributed *every* `sizeBefore - filtered.length` drop to the
+    // noor-listing counter, which over-counted whenever a result was
+    // dropped purely because its source domain was auto-disabled
+    // (Devin Review on #134).
+    const noorDropped = cached.filter(isNoorListingResult).length;
     const filtered = cached.filter(
       (r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || "") && !isNoorListingResult(r),
     );
-    if (filtered.length < sizeBefore) {
-      const dropped = sizeBefore - filtered.length;
-      L.info("engine", "filtered noor-book listing pages from cache", { query: query.slice(0, 60), dropped });
-      redis.incrby("tel:engine:noor_listing_filtered", dropped).catch(() => {});
+    if (noorDropped > 0) {
+      L.info("engine", "filtered noor-book listing pages from cache", { query: query.slice(0, 60), dropped: noorDropped });
+      redis.incrby("tel:engine:noor_listing_filtered", noorDropped).catch(() => {});
     }
     // لو الفلترة سحبت كل النتائج، اعتبرها cache miss — هنعمل بحث جديد.
     // ولو فضل بعضها، رجِّعها وهات نتائج جديدة بعدين عند الحاجة.
