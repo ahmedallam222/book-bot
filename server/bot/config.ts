@@ -76,6 +76,21 @@ export const BLACKLIST_THRESHOLD      = 3;
 // FIX v29: تحديث UA لـ Chrome 124 — بعض المواقع ترفض Chrome القديم
 export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+// ── welib CDN proxy ──────────────────────────
+// welib-public.org (the CDN that hosts the actual signed PDF URLs)
+// blocks public-cloud egress IPs (AWS / GCP / Azure). Production runs
+// on AWS EC2 so direct downloads time out at 90s. To bypass, we route
+// the signed-URL fetch through a Cloudflare Worker (see
+// `cloudflare/welib-proxy/`) — Cloudflare's edge IPs are not on the
+// blocklist.
+//
+// Both vars must be set together. If either is empty, the welib
+// resolver falls back to direct fetch (which will keep timing out on
+// EC2 — no silent regression, the failure mode is unchanged).
+export const WELIB_PROXY_URL = (process.env.WELIB_PROXY_URL || "").trim();
+export const WELIB_PROXY_SECRET = (process.env.WELIB_PROXY_SECRET || "").trim();
+export const WELIB_PROXY_ENABLED = WELIB_PROXY_URL.length > 0 && WELIB_PROXY_SECRET.length > 0;
+
 // ── Admin IDs ─────────────────────────────────
 // SECURITY: تُقرأ فقط من env. تم حذف الـ ID المثبت في المصدر — كان مكشوفاً
 // لأي شخص يقرأ الـ repo (والـ repo public). انظر deployment notes في الـ PR.

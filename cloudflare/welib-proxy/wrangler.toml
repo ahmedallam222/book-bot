@@ -1,0 +1,20 @@
+# Cloudflare Workers deployment config for welib-proxy.
+# See README.md for setup instructions.
+#
+# This file is checked into git. The shared secret is NOT stored here —
+# set it via:
+#   wrangler secret put WELIB_PROXY_SECRET
+#
+# That command prompts for the value and stores it as an encrypted env
+# binding in Cloudflare; it never lands on disk.
+
+name = "welib-proxy"
+main = "src/worker.js"
+compatibility_date = "2024-10-01"
+# 2025-vintage runtime APIs (Web Streams, etc.) — already stable.
+
+# Free Plan: 100k req/day across all Workers, 10ms CPU per request.
+# This proxy is bound by network IO, not CPU, so the CPU cap is fine.
+
+# No env-specific overrides; the production secret is injected via
+# `wrangler secret put` rather than embedded here.
