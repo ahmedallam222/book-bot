@@ -93,8 +93,25 @@ export async function getSearchCacheResults(query: string): Promise<BookResult[]
 // the same negative result).
 export async function hasRecentSearchCache(query: string): Promise<boolean> {
   try {
-    const exists = await redis.exists(searchCacheKey(query));
-    return exists === 1;
+    const key = searchCacheKey(query);
+    const ttl = await redis.ttl(key);
+    if (ttl < 0) return false;        // -2 = no key, -1 = no TTL → not cached
+    // Mirror the stale-cache TTL guard in `getSearchCacheResults`. Without
+    // this check the cache warmer (`suggestions.ts:warmRelatedCache`) sees
+    // poisoned keys (33-37 day TTLs from the historical ms-vs-seconds bug)
+    // as "recently cached" and skips re-searching them — exactly the
+    // popular queries the guard was meant to unblock would never get
+    // proactively healed.
+    if (ttl > STALE_CACHE_TTL_THRESHOLD_SEC) {
+      L.warn("engine", "hasRecentSearchCache: dropping stale-TTL key", {
+        key: key.slice(0, 80),
+        ttl,
+      });
+      redis.del(key).catch(() => {});
+      redis.incr("tel:cache:stale_ttl_dropped").catch(() => {});
+      return false;
+    }
+    return true;
   } catch { return false; }
 }
 

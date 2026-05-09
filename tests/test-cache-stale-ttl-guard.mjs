@@ -27,6 +27,18 @@
 //   T6 — Returns [] on stale, equivalent to a cache miss (the caller
 //        must run a fresh search and overwrite the key with a correct
 //        TTL, not return a degraded result).
+//   T7 — explanatory comment context preserved.
+//
+// Devin Review follow-up (PR #131 → this PR):
+//   T8  — hasRecentSearchCache also applies the same TTL guard. Without
+//         it the cache warmer (suggestions.ts:warmRelatedCache) sees
+//         poisoned keys as "recent" and skips re-searching them — the
+//         very queries the guard was meant to unblock would never get
+//         proactively healed.
+//   T9  — hasRecentSearchCache also DELs the poisoned key.
+//   T10 — hasRecentSearchCache returns false (= "not recent") on stale,
+//         equivalent semantics to the [] cache-miss return in
+//         getSearchCacheResults.
 
 import { readFileSync } from "node:fs";
 
@@ -81,6 +93,34 @@ ok(
 ok(
   "T7 — explanatory comment mentions the 312373d ms-vs-seconds bug context",
   /312373d/.test(engineSrc) && /41\.66/.test(engineSrc),
+);
+
+// T8 — hasRecentSearchCache mirrors the TTL guard. The cache warmer
+// uses this gate; without parity it skips re-warming poisoned queries.
+ok(
+  "T8 — hasRecentSearchCache reads ttl and applies STALE_CACHE_TTL_THRESHOLD_SEC guard",
+  /export\s+async\s+function\s+hasRecentSearchCache\s*\([\s\S]*?redis\.ttl\(\s*key\s*\)[\s\S]*?ttl\s*>\s*STALE_CACHE_TTL_THRESHOLD_SEC/m.test(engineSrc),
+);
+
+// T9 — hasRecentSearchCache deletes the poisoned key on the stale path.
+ok(
+  "T9 — hasRecentSearchCache deletes poisoned key on stale path",
+  /export\s+async\s+function\s+hasRecentSearchCache\s*\([\s\S]{0,1000}?if\s*\(\s*ttl\s*>\s*STALE_CACHE_TTL_THRESHOLD_SEC\s*\)[\s\S]{0,400}?redis\.del\(\s*key\s*\)/m.test(engineSrc),
+);
+
+// T10 — hasRecentSearchCache returns false on stale (cache-miss
+// semantics: warmer must proceed to searchAllSources, which will
+// overwrite with the correct TTL).
+ok(
+  "T10 — hasRecentSearchCache returns false on stale (cache-miss semantics)",
+  /export\s+async\s+function\s+hasRecentSearchCache\s*\([\s\S]{0,1000}?if\s*\(\s*ttl\s*>\s*STALE_CACHE_TTL_THRESHOLD_SEC\s*\)[\s\S]{0,500}?return\s+false\s*;/m.test(engineSrc),
+);
+
+// T11 — hasRecentSearchCache also handles the "no key" / "no TTL"
+// cases (ttl < 0) without misclassifying them as stale.
+ok(
+  "T11 — hasRecentSearchCache returns false on ttl < 0 (no key / persistent)",
+  /export\s+async\s+function\s+hasRecentSearchCache\s*\([\s\S]{0,500}?if\s*\(\s*ttl\s*<\s*0\s*\)\s*return\s+false/m.test(engineSrc),
 );
 
 console.log(`\nResults: ${pass} passed, ${fail} failed`);
