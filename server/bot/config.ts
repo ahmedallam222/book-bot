@@ -191,7 +191,9 @@ export const UNRELIABLE_DOMAINS: string[] = [
   "noor-book.com",
   "makalatt.com",
   "islamhouse.com",
-  "scholar.archive.org",
+  // 2026-05-09 (Donna): scholar.archive.org removed at user request —
+  // canonicalizeDomain folds *.archive.org into a single bucket so its
+  // failures roll up to archive.org analytics naturally.
   "dn790009.ca.archive.org",
   "dn790006.ca.archive.org",
   "arabic-book.net",
@@ -207,11 +209,11 @@ export const UNRELIABLE_DOMAINS: string[] = [
 // قبل أي HEAD/GET. مختلفة عن UNRELIABLE_DOMAINS اللي بس بيخفض الترتيب.
 // نستخدمها لـ domains معطوبة بالكامل (wayback academic ranges، إلخ).
 //
-// 2026-05-07 (Donna): scholar.archive.org تم رفعه لـ hard block — رغم
-// كونه في unreliable من قبل، لا تزال تظهر روابط منه في results عند
-// عدم وجود بدائل. الـ hard block يضمن إنه لا يُحاول معه أبداً.
+// 2026-05-09 (Donna): scholar.archive.org removed at user request.
+// The bot will now attempt scholar.archive.org URLs like any other
+// archive.org subdomain — analytics fold to the canonical archive.org
+// bucket, so consistently-bad behavior will surface in source rate.
 export const HARD_BLOCKED_DOMAINS: string[] = [
-  "scholar.archive.org",
   ...(process.env.HARD_BLOCKED_DOMAINS_EXTRA || "")
     .split(",")
     .map(d => d.trim())
