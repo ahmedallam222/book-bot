@@ -279,7 +279,20 @@ async function preValidatePdfUrl(pdfUrl: string): Promise<boolean> {
     if (buf.length < 5) return true;
 
     if (buf.slice(0, 5).toString("ascii") !== "%PDF-") {
-      L.warn("download", "preValidate: not a PDF (bad magic) — skipping", {
+      // P3 (audit 2026-05-09): per-reason telemetry so ops can distinguish
+      // "URL serves HTML disguised as PDF" (recurring with mislabelled CT)
+      // from "URL is binary but not a PDF" (epub/zip/image). Both bail
+      // here, but the headline ("191 extract_failed = 68% of validator
+      // hits") needed a way to attribute the reject to download-time
+      // vs validator-time.
+      const head = buf.slice(0, Math.min(buf.length, 16)).toString("ascii").toLowerCase();
+      const isHtml = head.includes("<!doc") || head.includes("<html") || head.includes("<?xml");
+      if (isHtml) {
+        redis.incr("tel:download:prevalidate_html_rejected").catch(() => {});
+      } else {
+        redis.incr("tel:download:prevalidate_bad_magic_rejected").catch(() => {});
+      }
+      L.warn("download", `preValidate: not a PDF (bad magic, html=${isHtml}) — skipping`, {
         url: pdfUrl.slice(0, 80),
       });
       return false;
@@ -639,6 +652,31 @@ export async function downloadAndSend(
   // ══════════════════════════════════════════════
   // محاولة 2: تحميل محلي بـ stream pipeline
   // ══════════════════════════════════════════════
+
+  // P3 (audit 2026-05-09): pre-validate the URL serves a real PDF before
+  // we stream MB into temp. Previously preValidate ran only on the
+  // direct-send Telegram path; if direct-send was skipped (domain in
+  // SKIP list, or directUnsafe), we'd stream the entire body to disk
+  // first and only then check magic bytes — which wasted bandwidth on
+  // mislabelled-CT HTML interstitials and on the 191 audit hits where
+  // the validator later rejected with `extract_failed`. By gating the
+  // local path with the same Range:bytes=0-4 probe, HTML-as-PDF and
+  // wrong-magic responses get dropped *before* download.
+  //
+  // Skipped when direct-send already preValidated this URL — no point
+  // re-checking the same head bytes.
+  const directWasPreValidated = !shouldSkipDirect(pdfUrl) && !directUnsafe;
+  if (!directWasPreValidated) {
+    const localPreValid = await preValidatePdfUrl(pdfUrl);
+    if (!localPreValid) {
+      L.warn("download", "preValidate (local path): not a PDF — skipping permanently", {
+        url: pdfUrl.slice(0, 80),
+      });
+      redis.incr("tel:download:local_prevalidate_rejected").catch(() => {});
+      return { ok: false, permanent: true };
+    }
+  }
+
   ensureTempDir();
   const tempPath = path.join(
     TEMP_DIR,
@@ -804,8 +842,25 @@ export async function downloadAndSend(
       magic = magicBuf;
     }
 
-    if (!magic.includes(Buffer.from("%PDF"))) {
-      L.dlFail(pdfUrl, "no PDF signature in file");
+    // P3 (audit 2026-05-09): require strict %PDF- prefix at byte 0,
+    // matching preValidatePdfUrl + pdfValidator.ts:934. The previous
+    // permissive `includes(%PDF)` over the first 10 bytes accepted PDFs
+    // with leading garbage (BOM / whitespace) — these passed download
+    // but later failed extraction in the validator (counted as
+    // tel:pdf:extract_failed without explanation). Strict prefix check
+    // catches them at download time with a clearer reason and saves
+    // wasted Mistral cycles.
+    const magicHead = magic.subarray(0, 5).toString("ascii");
+    if (magicHead !== "%PDF-") {
+      const isHtmlBody = /<!doc|<html|<\?xml/i.test(
+        magic.subarray(0, 10).toString("ascii"),
+      );
+      L.dlFail(pdfUrl, `bad magic at byte 0 (got "${magicHead.slice(0, 5)}", html=${isHtmlBody})`);
+      if (isHtmlBody) {
+        redis.incr("tel:download:post_stream_html_rejected").catch(() => {});
+      } else {
+        redis.incr("tel:download:post_stream_bad_magic_rejected").catch(() => {});
+      }
       safeDeleteTemp(tempPath);
       await recordUrlFailure(pdfUrl);
       return { ok: false };
