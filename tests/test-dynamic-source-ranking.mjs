@@ -156,7 +156,11 @@ const expect = (label, ok, got, want) => {
          ENGINE.includes("SOURCE_RANK_MIN_SAMPLES"),
          ENGINE.includes("SOURCE_RANK_MIN_SAMPLES"), true);
   expect("engine.ts calls getSourceStatsCached() before unifiedSearch",
-         /getSourceStatsCached\(\)[\s\S]{0,300}rankSourcesByTrust[\s\S]{0,300}unifiedSearch/.test(ENGINE),
+         // Allow arbitrary distance between the three calls — the assertion
+         // is about order ("rank before search"), not adjacency. Earlier
+         // bound (300 chars) tightened up after the welib parallel-search
+         // wiring landed and pushed unifiedSearch further down the function.
+         /getSourceStatsCached\(\)[\s\S]+rankSourcesByTrust[\s\S]+unifiedSearch/.test(ENGINE),
          true, true);
   expect("engine.ts wraps ranking in try/catch (graceful fallback)",
          /try\s*{[\s\S]{0,200}rankSourcesByTrust[\s\S]{0,200}}\s*catch/.test(ENGINE),
