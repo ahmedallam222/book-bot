@@ -56,9 +56,19 @@ export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatch> {
     return !isViewer;
   });
 
+  // ── welib URLs — let download.ts handle them ──
+  // ar.welib.st is fully behind Cloudflare; a HEAD without cf_clearance
+  // returns 403 ("Just a moment…") which the 4xx-skip path below would
+  // otherwise mark as permanently dead. The resolver bootstraps CF
+  // cookies in Playwright at download time, so we keep welib URLs in
+  // the candidate set and bypass the HEAD probe entirely.
+  const isWelibUrl = (u: string) => /(?:^|\/\/[^/]*?\.)welib\.(?:st|org)\//i.test(u);
+  const welibUrls = notViewerOnly.filter(isWelibUrl);
+  const nonWelib = notViewerOnly.filter((u) => !isWelibUrl(u));
+
   // ── HEAD check لأول 6 URLs ───────────────────
-  const toCheck = notViewerOnly.slice(0, 6);
-  const rest    = notViewerOnly.slice(6); // تجاوز الـ HEAD check — pass through
+  const toCheck = nonWelib.slice(0, 6);
+  const rest    = nonWelib.slice(6); // تجاوز الـ HEAD check — pass through
 
   const valid: string[] = [];
 
@@ -112,5 +122,10 @@ export async function findValidPdfUrls(urls: string[]): Promise<VerifyBatch> {
     })
   );
 
-  return { urls: [...valid, ...rest], stats };
+  // welib URLs are deliberately not HEAD-checked (see comment above)
+  // and don't show up in `stats.checked` / `stats.valid`. They keep
+  // their original order at the end of the candidate list so a strong
+  // HEAD-verified PDF outranks them; download.ts handles them via the
+  // welibResolver path.
+  return { urls: [...valid, ...rest, ...welibUrls], stats };
 }
