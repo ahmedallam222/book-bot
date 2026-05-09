@@ -122,9 +122,28 @@ const NON_BOOK_NOOR_PATTERNS: RegExp[] = [
   /^\/أحدث-/,
   /^\/الفئة\//,
   /^\/المستخدم\//,
+  // P2 of the 2026-05-09 audit: Firecrawl was returning these
+  // listing-style paths as candidates and they ate the per-domain
+  // candidate cap (14/15 candidates for "العادات الذرية" cache were
+  // /tag/* listing pages, leaving zero room for the actual book
+  // page). They have no .download-btn so they would also fail the
+  // resolver if we did try them.
+  /^\/review(?:\/|$)/i,             // /review/<id> — book reviews, no download
+  /^\/reviews(?:\/|$)/i,
+  /^\/en\/ebook-/i,                  // /en/ebook-<topic> — English topic listings
+  /^\/en\/category\//i,
+  /^\/en\/tag\//i,
+  /^\/en\/author\//i,
+  /^\/en\/search(?:\?|\/|$)/i,
+  /^\/مراجعة\//,                     // Arabic for "review"
+  /^\/مراجعات(?:\/|$)/,
 ];
 
-function isNonBookNoorUrl(url: string): boolean {
+// Check whether a noor-book.com URL is a non-book listing/aggregator
+// page (no .download-btn, never resolves to a PDF). Exposed for use
+// by the search-result filter in engine.ts so the candidates never
+// enter the ranker / per-domain cap.
+export function isNonBookNoorUrl(url: string): boolean {
   try {
     const path = new URL(url).pathname;
     let decoded = path;
