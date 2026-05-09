@@ -103,15 +103,24 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     // fall through to fresh search
   }
 
-  // Check if Firecrawl is paused
+  // Check if Firecrawl is paused (quota or rate-limit). When paused
+  // we still want welib's Playwright search to run — its CF-bypassed
+  // index is independent of Firecrawl's Google-backed crawl, so it's
+  // the only signal we have when FC is dark. We capture the flag
+  // here and skip just the Firecrawl leg of the parallel search
+  // below, instead of bailing out of the whole function.
+  let fcPaused = false;
   try {
     const [quota, rate] = await Promise.all([
       redis.get(FC_QUOTA_EXCEEDED_KEY),
       redis.get(FC_RATE_LIMITED_KEY),
     ]);
     if (quota || rate) {
-      L.warn("engine", "searchAllSources: Firecrawl paused (quota/rate), skipping");
-      return [];
+      fcPaused = true;
+      L.warn("engine", "searchAllSources: Firecrawl paused (quota/rate), running welib only", {
+        quota: !!quota,
+        rate:  !!rate,
+      });
     }
   } catch {}
 
@@ -144,7 +153,9 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 25_000);
   const welibMaxResults = Number(process.env.WELIB_SEARCH_MAX_RESULTS || 8);
   const [fcSettled, welibSettled] = await Promise.allSettled([
-    unifiedSearch(arabicDomains, query, true),
+    fcPaused
+      ? Promise.resolve([] as BookResult[])
+      : unifiedSearch(arabicDomains, query, true),
     welibSourceConfig
       ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
       : Promise.resolve([] as WelibSearchResult[]),

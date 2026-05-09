@@ -122,6 +122,21 @@ expect("engine.ts only injects welib results when welib.st source is enabled",
 expect("engine.ts has welibResultToBookResult helper",
   ENGINE.includes("function welibResultToBookResult"),
   true);
+expect("engine.ts: Firecrawl pause does NOT short-circuit welib (uses fcPaused flag, not early return)",
+  // Old code: `if (quota || rate) { ... return []; }`. New code:
+  // `if (quota || rate) { fcPaused = true; ... }` and welib still
+  // runs. We only assert ordering (flag set → flag consumed by
+  // Promise.allSettled → welib search), not adjacency, since other
+  // logic (dynamic source ranking) lives between them.
+  /fcPaused\s*=\s*true[\s\S]+Promise\.allSettled\([\s\S]+fcPaused[\s\S]+searchWelib\(/.test(ENGINE),
+  true);
+expect("engine.ts: when fcPaused, Firecrawl leg resolves to empty BookResult[]",
+  /fcPaused[\s\S]{0,80}\?\s*Promise\.resolve\(\s*\[\]\s*as\s*BookResult\[\]/.test(ENGINE),
+  true);
+expect("engine.ts: NO bare 'return [];' inside the Firecrawl-pause branch",
+  // Negative — the old early-return pattern must be gone.
+  /Firecrawl paused[\s\S]{0,200}return\s*\[\];/.test(ENGINE),
+  false);
 
 // ── S4: welibResultToBookResult shape ───────────────────────────
 //
@@ -154,15 +169,54 @@ expect("helper id starts with 'welib-'",
 
 console.log("\n─── S5: verify.ts skips welib HEAD probe ───");
 const VERIFY = fs.readFileSync("server/bot/verify.ts", "utf-8");
-expect("verify.ts has welib filter (regex)",
-  /welib\\?\.\(\?:st\\?\|org\)/i.test(VERIFY),
+expect("verify.ts imports isWelibHost from welibResolver (single source of truth)",
+  /import\s*\{[^}]*isWelibHost[^}]*\}\s*from\s*["']\.\/welibResolver\.js["']/.test(VERIFY),
   true);
-expect("verify.ts splits welib URLs from HEAD-check pool",
-  /isWelibUrl[\s\S]{0,200}toCheck/.test(VERIFY),
+expect("verify.ts splits welib URLs from HEAD-check pool via isWelibHost",
+  /welibUrls\s*=\s*notViewerOnly\.filter\(isWelibHost\)[\s\S]{0,200}toCheck/.test(VERIFY),
   true);
 expect("verify.ts re-appends welib URLs to result",
   /\.\.\.welibUrls/.test(VERIFY),
   true);
+expect("verify.ts no longer carries the buggy ad-hoc welib regex",
+  // The old regex `/(?:^|\/\/[^/]*?\.)welib\.(?:st|org)\//i` missed
+  // bare welib.st (no subdomain). It must be gone now — anywhere it
+  // would match is on isWelibHost from welibResolver.
+  /\/\(\?:\^\|\\\/\\\/\[\^\/\]\*\?\\\.\)welib\\\.\(\?:st\|org\)\\\//.test(VERIFY),
+  false);
+
+// ── S5b: isWelibHost contract (welibResolver.ts source) ─────────
+// Pin the welib-host detection contract so future regex regressions
+// (e.g. the bare-domain bug Devin Review flagged in PR #128) don't
+// silently sneak back in.
+
+console.log("\n─── S5b: isWelibHost contract (welibResolver.ts) ───");
+const RESOLVER = fs.readFileSync("server/bot/welibResolver.ts", "utf-8");
+expect("welibResolver.ts exports isWelibHost via URL parser (not anchored regex)",
+  /export\s+function\s+isWelibHost[\s\S]{0,200}new\s+URL\(url\)\.hostname/.test(RESOLVER),
+  true);
+
+const HOST_CASES = [
+  // Replicate the regex inline so we test the deployed behaviour.
+  ["https://ar.welib.st/md5/abc",         true],
+  ["https://welib.st/md5/abc",            true],   // bare — was the bug
+  ["https://www.welib.org/md5/abc",       true],
+  ["https://welib.org/md5/abc",           true],   // bare — was the bug
+  ["https://hindawi.org/welib.st/abc",    false],  // path looks like host
+  ["https://example.com/x?welib.st=true", false],
+  ["not a url",                           false],
+];
+const isWelibHostInline = (url) => {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /(?:^|\.)welib\.(?:st|org)$/.test(host);
+  } catch {
+    return false;
+  }
+};
+for (const [url, want] of HOST_CASES) {
+  expect(`isWelibHost(${url.slice(0, 50)})`, isWelibHostInline(url), want);
+}
 
 // ── S6: Bundle markers — searchWelib in dist/index.cjs ──────────
 
