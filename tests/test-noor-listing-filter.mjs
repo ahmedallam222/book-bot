@@ -138,6 +138,15 @@ ok(
 );
 
 ok(
+  "T7b — counter is attributed only to noor drops (not all cache filter drops)",
+  // Regression for Devin Review #134: must compute drop count from
+  // isNoorListingResult specifically, not from the total filter
+  // shrink which also includes isDisabled drops.
+  /noorDropped\s*=\s*cached\.filter\(\s*isNoorListingResult\s*\)\.length/.test(engineSrc) &&
+  /incrby\(\s*["']tel:engine:noor_listing_filtered["']\s*,\s*noorDropped/.test(engineSrc),
+);
+
+ok(
   "T8 — host gate ensures filter only applies to noor-book.com (no false positives on /tag on other sites)",
   /host\s*!==?\s*["']noor-book\.com["']/.test(engineSrc),
 );
