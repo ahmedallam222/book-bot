@@ -108,11 +108,39 @@ function touchDailyTtl(pipe: ReturnType<typeof redis.pipeline>, key: string): vo
 // `trackSourceMistralReject` already normalized. The split made
 // `getSourceStats` over-report distinct sources and skewed the
 // auto-disable signal. All write paths now go through this helper.
+//
+// Also folds known multi-host CDN families to one canonical bucket
+// (see `canonicalizeDomain`) so e.g. dn790003.ca.archive.org and
+// dn721904.ca.archive.org both record under `archive.org` instead of
+// each looking like its own broken source in the admin /sources panel.
 export function sanitizeDomainKey(domain: string): string {
-  return (domain || "")
+  const normalized = (domain || "")
     .toLowerCase()
     .replace(/^www\./, "")
     .replace(/[^a-z0-9.-]/g, "");
+  return canonicalizeDomain(normalized);
+}
+
+// Multi-host CDN families that should be tracked as a single source.
+// Order matters — check most-specific first.
+const CDN_FAMILIES: Array<{ match: RegExp; canonical: string }> = [
+  // archive.org's CDN: dn720006.ca.archive.org, ia801501.us.archive.org,
+  // dn790003.ca.archive.org, etc. All of them are just edge nodes for
+  // the same Internet Archive backend.
+  { match: /(^|\.)archive\.org$/, canonical: "archive.org" },
+  // welib mirrors (welib.st, ar.welib.st, en.welib.st) → one bucket.
+  // Note: signed-URL host welib-public.org is on a separate domain
+  // family on purpose (different operational concerns) — we do NOT
+  // fold those here.
+  { match: /(^|\.)welib\.st$/,    canonical: "welib.st" },
+];
+
+export function canonicalizeDomain(domain: string): string {
+  if (!domain) return "";
+  for (const f of CDN_FAMILIES) {
+    if (f.match.test(domain)) return f.canonical;
+  }
+  return domain;
 }
 
 // ── Search tracking ───────────────────────────
