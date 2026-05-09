@@ -288,9 +288,9 @@ async function preValidatePdfUrl(pdfUrl: string): Promise<boolean> {
       const head = buf.slice(0, Math.min(buf.length, 16)).toString("ascii").toLowerCase();
       const isHtml = head.includes("<!doc") || head.includes("<html") || head.includes("<?xml");
       if (isHtml) {
-        redis.incr("tel:download:prevalidate_html_rejected").catch(() => {});
+        redis.incr("tel:dl:prevalidate_html_rejected").catch(() => {});
       } else {
-        redis.incr("tel:download:prevalidate_bad_magic_rejected").catch(() => {});
+        redis.incr("tel:dl:prevalidate_bad_magic_rejected").catch(() => {});
       }
       L.warn("download", `preValidate: not a PDF (bad magic, html=${isHtml}) — skipping`, {
         url: pdfUrl.slice(0, 80),
@@ -672,7 +672,7 @@ export async function downloadAndSend(
       L.warn("download", "preValidate (local path): not a PDF — skipping permanently", {
         url: pdfUrl.slice(0, 80),
       });
-      redis.incr("tel:download:local_prevalidate_rejected").catch(() => {});
+      redis.incr("tel:dl:local_prevalidate_rejected").catch(() => {});
       return { ok: false, permanent: true };
     }
   }
@@ -857,9 +857,9 @@ export async function downloadAndSend(
       );
       L.dlFail(pdfUrl, `bad magic at byte 0 (got "${magicHead.slice(0, 5)}", html=${isHtmlBody})`);
       if (isHtmlBody) {
-        redis.incr("tel:download:post_stream_html_rejected").catch(() => {});
+        redis.incr("tel:dl:post_stream_html_rejected").catch(() => {});
       } else {
-        redis.incr("tel:download:post_stream_bad_magic_rejected").catch(() => {});
+        redis.incr("tel:dl:post_stream_bad_magic_rejected").catch(() => {});
       }
       safeDeleteTemp(tempPath);
       await recordUrlFailure(pdfUrl);
