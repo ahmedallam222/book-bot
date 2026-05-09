@@ -145,6 +145,15 @@ export const ARABIC_SOURCES: SourceConfig[] = [
     searchUrl: (q) =>
       `https://mktbtypdf.com/?s=${encodeURIComponent(q)}`,
   },
+  {
+    domain:    "kutubdl.site",
+    name:      "كتب DL",
+    emoji:     "🗃️",
+    priority:  15,
+    isArabic:  true,
+    searchUrl: (q) =>
+      `https://kutubdl.site/?s=${encodeURIComponent(q)}`,
+  },
 ];
 
 export const INTL_SOURCES: SourceConfig[] = [];
