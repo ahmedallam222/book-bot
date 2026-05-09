@@ -1,7 +1,7 @@
 import * as fsPromises from "fs/promises";
 import { createHash }  from "crypto";
 import { L } from "./logger.js";
-import { normalizeArabic, urlFilenameRelevance } from "./text.js";
+import { normalizeArabic, urlFilenameRelevance, isCrossLanguagePair, detectScript } from "./text.js";
 import { redis } from "./redis.js";
 import {
   MISTRAL_API_KEY,
@@ -93,6 +93,19 @@ const TEL_ACCEPTED       = "tel:pdf:accepted_match";
 const TEL_REJECTED       = "tel:pdf:rejected_mismatch";
 const TEL_MISTRAL        = "tel:pdf:mistral_used";
 const TEL_EXTRACT_FAILED = "tel:pdf:extract_failed";
+
+// Per-failure-mode counters for askMistral. Audit 2026-05-09 found
+// `tel:pdf:rejected_mismatch=276` lumping together: Mistral-NO, Mistral
+// HTTP-error, Mistral timeout, generic catch-all. With these split out
+// we can answer "is the Mistral integration healthy?" vs "is the
+// classifier mis-classifying translations?" without log-diving.
+const TEL_MISTRAL_YES        = "tel:pdf:mistral_yes";
+const TEL_MISTRAL_NO         = "tel:pdf:mistral_no";
+const TEL_MISTRAL_HTTP_ERROR = "tel:pdf:mistral_http_error";
+const TEL_MISTRAL_TIMEOUT    = "tel:pdf:mistral_timeout";
+const TEL_MISTRAL_OTHER_ERR  = "tel:pdf:mistral_other_error";
+const TEL_MISTRAL_CACHE_HIT  = "tel:pdf:mistral_cache_hit";
+const TEL_MISTRAL_CROSSLANG  = "tel:pdf:mistral_crosslang_prompt";
 
 // Mistral result cache TTL — ساعتان
 const MISTRAL_CACHE_TTL_SEC = 2 * 3600;
@@ -601,6 +614,7 @@ async function askMistral(
     const cached = await redis.get(cacheKey);
     if (cached !== null) {
       L.debug("pdfValidator", "Mistral cache hit", { book: bookName.slice(0, 40), verdict: cached });
+      redis.incr(TEL_MISTRAL_CACHE_HIT).catch(() => {});
       return cached === "1";
     }
   } catch { /* Redis miss → proceed */ }
@@ -626,6 +640,18 @@ async function askMistral(
   // يقبل التطابق بالـ slug/الترجمة/الـ transliteration.
   // قبل كده كان prompt صارم جداً يرفض حتى التطابق الحرفي (filename="آنا كارنينا" + book="آنا كارنينا" → NO)
   // بسبب "When in doubt answer NO". الجديد متعدد اللغات ويسمح بزيادات شائعة (pdf, اسم الموقع، السنة).
+  //
+  // P1 fix (audit 2026-05-09): when bookName and the strongest title
+  // signal (metaTitle if present, else promptFilename) are written in
+  // different scripts (Arabic ↔ Latin), we add an explicit cross-
+  // language hint + a few-shot translation example. Without these,
+  // Mistral was hedging on common bestsellers ("العادات الذرية" vs
+  // "Atomic habits.pdf") and returning NO — turning a 0.9-score
+  // direct-PDF candidate into a "لم أجد PDF" message for the user.
+  const titleSignal = metaTitle || promptFilename;
+  const isCrossLang = !!titleSignal && isCrossLanguagePair(bookName, titleSignal);
+  if (isCrossLang) redis.incr(TEL_MISTRAL_CROSSLANG).catch(() => {});
+
   const lines: string[] = [
     `You are verifying whether a PDF file contains the book the user requested.`,
     `Requested book: "${bookName}"`,
@@ -634,6 +660,25 @@ async function askMistral(
   else           lines.push(`(PDF metadata title is empty)`);
   if (promptFilename) lines.push(`PDF filename / URL hint: "${promptFilename}"`);
   else                lines.push(`(no filename hint)`);
+  if (isCrossLang) {
+    const reqScript = detectScript(bookName);
+    const sigScript = detectScript(titleSignal);
+    lines.push(
+      ``,
+      `IMPORTANT: The request is written in ${reqScript === "arabic" ? "Arabic" : "Latin"} script but the title signal is in ${sigScript === "arabic" ? "Arabic" : "Latin"} script. This is a TRANSLATION pair — many international bestsellers are requested in Arabic but only the original-language PDF exists. Answer YES if either side names the same book in translation.`,
+      ``,
+      `Examples of YES (translation pairs to accept):`,
+      `  - "العادات الذرية" ↔ "Atomic Habits"`,
+      `  - "كافكا على الشاطئ" ↔ "Kafka on the Shore"`,
+      `  - "السيمياء" ↔ "The Alchemist"`,
+      `  - "ساپيانز" ↔ "Sapiens A Brief History of Humankind"`,
+      `  - "1984" ↔ "1984" (numeric titles match across scripts)`,
+      ``,
+      `Examples of NO (different books, even if similar topic):`,
+      `  - "العادات السبع" ↔ "Atomic Habits"   (different titles, both self-help)`,
+      `  - "كافكا على الشاطئ" ↔ "The Trial"     (different Kafka books)`,
+    );
+  }
   lines.push(
     ``,
     `Decide YES or NO using these rules in order:`,
@@ -666,6 +711,7 @@ async function askMistral(
     if (!r.ok) {
       // FIX: fail-closed عند خطأ HTTP من Mistral
       L.warn("pdfValidator", `Mistral API HTTP ${r.status} — fail-closed`);
+      redis.incr(TEL_MISTRAL_HTTP_ERROR).catch(() => {});
       return false;
     }
 
@@ -673,14 +719,29 @@ async function askMistral(
     const ans     = (data.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
     const verdict = ans.startsWith("Y");
 
-    L.info("pdfValidator", "Mistral answered", { ans: ans.slice(0, 10), verdict, book: bookName.slice(0, 40) });
+    L.info("pdfValidator", "Mistral answered", { ans: ans.slice(0, 10), verdict, book: bookName.slice(0, 40), crosslang: isCrossLang });
+    redis.incr(verdict ? TEL_MISTRAL_YES : TEL_MISTRAL_NO).catch(() => {});
     redis.setex(cacheKey, MISTRAL_CACHE_TTL_SEC, verdict ? "1" : "0").catch(() => {});
     return verdict;
 
   } catch (e) {
     // FIX: fail-closed عند خطأ Mistral بدل fail-open
     // Mistral معطّل مؤقتاً → لا نُرسَل كتاباً ربما غلط — نرفض ونجرّب الـ URL التالي
-    L.warn("pdfValidator", `Mistral error — fail-closed: ${String(e).slice(0, 80)}`);
+    //
+    // P1 fix: split the failure-mode counter so ops can see whether
+    // we're rejecting because Mistral *said no* (rejected_mismatch
+    // already counts that) or because Mistral *itself failed* (timeout
+    // / network) — those need different remediation (better prompt vs
+    // wider timeout / retry / failover).
+    const errStr = String(e);
+    const isTimeout = /AbortError|TimeoutError|aborted|timed?\s*out/i.test(errStr) ||
+                      /AbortError|TimeoutError/.test((e as Error)?.name || "");
+    if (isTimeout) {
+      redis.incr(TEL_MISTRAL_TIMEOUT).catch(() => {});
+    } else {
+      redis.incr(TEL_MISTRAL_OTHER_ERR).catch(() => {});
+    }
+    L.warn("pdfValidator", `Mistral error — fail-closed: ${errStr.slice(0, 80)}`);
     return false;
   }
 }
