@@ -137,6 +137,12 @@ expect("engine.ts: NO bare 'return [];' inside the Firecrawl-pause branch",
   // Negative — the old early-return pattern must be gone.
   /Firecrawl paused[\s\S]{0,200}return\s*\[\];/.test(ENGINE),
   false);
+expect("engine.ts: cache TTL drops to MISS when fcPaused (welib-only is partial)",
+  // Otherwise welib-only results would persist for SEARCH_CACHE_TTL_HIT
+  // (1h) after FC's 60s rate-limit clears, leaving the bot in a
+  // partial-results state for ~59m. See PR #129 review.
+  /fcPaused\s*\?\s*SEARCH_CACHE_TTL_MISS\s*:\s*SEARCH_CACHE_TTL_HIT/.test(ENGINE),
+  true);
 
 // ── S4: welibResultToBookResult shape ───────────────────────────
 //
