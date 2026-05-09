@@ -115,8 +115,13 @@ const expected = [
   "waqfeya.net", "al-maktaba.org", "books-library.net",
   "kotobati.com", "foulabook.com", "novbook.net", "arabic-book.net",
   "ktabpdf.com", "kutub-pdf.net", "kutubm.com", "mktbtypdf.com",
-  "kutubdl.site",
 ];
+// kutubdl.site was removed 2026-05-09 (content-farm SEO domain — see
+// sources.ts comment). Make sure it is NOT in the registry anymore.
+{
+  const removedDomain = "kutubdl.site";
+  ok(`sources.ts removed kutubdl content-farm`, !SOURCES_SRC.includes(`"${removedDomain}"`));
+}
 for (const d of expected) {
   ok(`sources.ts → ${d}`, SOURCES_SRC.includes(`"${d}"`));
 }

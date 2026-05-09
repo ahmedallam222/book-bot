@@ -145,15 +145,13 @@ export const ARABIC_SOURCES: SourceConfig[] = [
     searchUrl: (q) =>
       `https://mktbtypdf.com/?s=${encodeURIComponent(q)}`,
   },
-  {
-    domain:    "kutubdl.site",
-    name:      "كتب DL",
-    emoji:     "🗃️",
-    priority:  15,
-    isArabic:  true,
-    searchUrl: (q) =>
-      `https://kutubdl.site/?s=${encodeURIComponent(q)}`,
-  },
+  // kutubdl.site removed 2026-05-09: turned out to be a content-farm
+  // SEO domain — landing pages contain only descriptive text and zero
+  // outbound PDF / drive / mediafire links. Adding it polluted Firecrawl
+  // results with false candidates that always failed (response is HTML
+  // not PDF). The bot's "no direct PDF — try landing page" fallback was
+  // exhausting attempts on these dead pages instead of falling through
+  // to working sources.
 ];
 
 export const INTL_SOURCES: SourceConfig[] = [];
