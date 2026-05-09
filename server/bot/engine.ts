@@ -10,6 +10,7 @@ import { normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from ".
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import { searchWelib, type WelibSearchResult } from "./welibResolver.js";
+import { isNonBookNoorUrl } from "./noorBookResolver.js";
 import {
   TIMEOUT_FC_SEARCH, TIMEOUT_FC_SCRAPE,
   SEARCH_CACHE_TTL_HIT, SEARCH_CACHE_TTL_MISS,
@@ -143,10 +144,36 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     } catch { return false; }
   };
 
+  // P2 (audit 2026-05-09): noor-book.com listing/review/tag URLs were
+  // historically allowed into the candidate set even though they have
+  // no .download-btn and the resolver always fails on them. They ate
+  // the per-domain cap (14/15 cached candidates for "العادات الذرية"
+  // were /tag/* listing pages). We filter them out *both* on fresh
+  // Firecrawl results AND on cache reads so legacy poisoned cache
+  // entries get cleaned passively as users hit them.
+  const isNoorListing = (url: string): boolean => {
+    if (!url) return false;
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      if (host !== "noor-book.com") return false;
+    } catch { return false; }
+    return isNonBookNoorUrl(url);
+  };
+  const isNoorListingResult = (r: BookResult): boolean =>
+    isNoorListing(r.url) || isNoorListing(r.directPdfUrl || "");
+
   // Check cache first
   const cached = await getSearchCacheResults(query);
   if (cached.length) {
-    const filtered = cached.filter((r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || ""));
+    const sizeBefore = cached.length;
+    const filtered = cached.filter(
+      (r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || "") && !isNoorListingResult(r),
+    );
+    if (filtered.length < sizeBefore) {
+      const dropped = sizeBefore - filtered.length;
+      L.info("engine", "filtered noor-book listing pages from cache", { query: query.slice(0, 60), dropped });
+      redis.incrby("tel:engine:noor_listing_filtered", dropped).catch(() => {});
+    }
     // لو الفلترة سحبت كل النتائج، اعتبرها cache miss — هنعمل بحث جديد.
     // ولو فضل بعضها، رجِّعها وهات نتائج جديدة بعدين عند الحاجة.
     if (filtered.length > 0) return filtered;
@@ -405,6 +432,22 @@ async function unifiedSearch(
     return docs
       .filter((doc) => !!(doc.url || doc.metadata?.sourceURL))
       .filter((doc) => !isSlowDomain(doc.url || doc.metadata?.sourceURL || ""))
+      // P2 (audit 2026-05-09): drop noor-book listing/review/tag pages
+      // before they enter the candidate set. They have no .download-btn
+      // and consume per-domain caps that would otherwise hold the real
+      // book page. See isNonBookNoorUrl in noorBookResolver.ts.
+      .filter((doc) => {
+        const url = doc.url || doc.metadata?.sourceURL || "";
+        let host = "";
+        try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
+        if (host !== "noor-book.com") return true;
+        if (isNonBookNoorUrl(url)) {
+          redis.incr("tel:engine:noor_listing_filtered").catch(() => {});
+          L.debug("engine", "skipped noor-book listing url", { url: url.slice(0, 100) });
+          return false;
+        }
+        return true;
+      })
       .map((doc, idx) => {
         const docUrl    = doc.url || doc.metadata?.sourceURL || "";
         const srcDomain = activeDomains.find((d) => docUrl.includes(d)) ?? null;
