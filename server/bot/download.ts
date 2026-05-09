@@ -46,7 +46,8 @@ const SKIP_DIRECT_DOMAINS = [
   "kutubm.com",
   "mktbtypdf.com",
   "kutub.info",
-  "kutubdl.site",
+  // kutubdl.site was here (added in PR #124, removed in PR #126 —
+  // turned out to be a content-farm SEO domain, not an actual library).
 
   // ══ domains إضافية من .env بدون إعادة deploy ══
   ...(process.env.SKIP_DOMAINS_EXTRA || "")
