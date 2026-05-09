@@ -9,6 +9,7 @@ import {
 import { normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from "./text.js";
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
+import { searchWelib, type WelibSearchResult } from "./welibResolver.js";
 import {
   TIMEOUT_FC_SEARCH, TIMEOUT_FC_SCRAPE,
   SEARCH_CACHE_TTL_HIT, SEARCH_CACHE_TTL_MISS,
@@ -133,9 +134,36 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     });
   }
   const arabicDomains = arabicSources.map((s) => s.domain);
+  const welibSourceConfig = arabicSources.find((s) => s.domain === "welib.st") ?? null;
 
-  const results = await unifiedSearch(arabicDomains, query, true);
-  const enriched = (await enrichWithMarkdown(results, query))
+  // Run Firecrawl + welib Playwright search in parallel. welib's
+  // search has to bypass Cloudflare (Firecrawl/Google can't see most
+  // welib pages), so we hit it directly via the existing welibResolver
+  // browser singleton. Promise.allSettled keeps either source from
+  // taking the other down.
+  const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 25_000);
+  const welibMaxResults = Number(process.env.WELIB_SEARCH_MAX_RESULTS || 8);
+  const [fcSettled, welibSettled] = await Promise.allSettled([
+    unifiedSearch(arabicDomains, query, true),
+    welibSourceConfig
+      ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
+      : Promise.resolve([] as WelibSearchResult[]),
+  ]);
+  const fcResults = fcSettled.status === "fulfilled" ? fcSettled.value : [];
+  const welibResults = welibSettled.status === "fulfilled" ? welibSettled.value : [];
+
+  const seen = new Set(fcResults.map((r) => r.url));
+  const welibAsBookResults: BookResult[] = [];
+  if (welibSourceConfig) {
+    for (const w of welibResults) {
+      if (seen.has(w.url)) continue;
+      seen.add(w.url);
+      welibAsBookResults.push(welibResultToBookResult(w, welibSourceConfig, query));
+    }
+  }
+
+  const merged = [...fcResults, ...welibAsBookResults];
+  const enriched = (await enrichWithMarkdown(merged, query))
     .sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
   // Cache the results
@@ -346,6 +374,44 @@ async function unifiedSearch(
     }
     return [];
   }
+}
+
+// ── welibResultToBookResult ────────────────────
+// A welib /md5/{hash} URL is *not* a direct PDF — it's a book-detail
+// landing page that the welib Playwright resolver later resolves to a
+// signed welib-public.org URL via a 5–60s slow_download flow. From the
+// engine's point of view we still treat the URL as `directPdfUrl` so
+// it lands in `validUrls` (instead of the 3rd-tier `downloadablePageFallbacks`)
+// and gets ranked by the existing _score logic. download.ts checks
+// `isWelibHost(pdfUrl)` and routes it to welibDownloadAndSend, so the
+// "directPdfUrl" semantic abuse never reaches the actual fetch step.
+//
+// We score welib results with the highest access_prior tier
+// (`direct_pdf`) plus the user-query / filename heuristic — so a
+// strong title match outranks a weaker hindawi result, but a weak
+// title match doesn't unseat a strong match from any other source.
+export function welibResultToBookResult(
+  w:         WelibSearchResult,
+  source:    SourceConfig,
+  userQuery: string,
+): BookResult {
+  const title = w.title || w.url;
+  const score = scoreResult(
+    { url: w.url, markdown: "", metadata: { title } },
+    w.url,            // pretend the /md5/ URL is the directPdf so accessPrior is high
+    "direct_pdf",
+    userQuery,
+  );
+  return {
+    id:           `welib-${w.md5}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    title,
+    url:          w.url,
+    directPdfUrl: w.url,
+    source,
+    access:       "direct_pdf",
+    accessReason: "welib search hit (resolved at download time)",
+    _score:       score,
+  };
 }
 
 // ── makeResult ────────────────────────────────
