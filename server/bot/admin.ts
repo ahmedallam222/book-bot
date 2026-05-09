@@ -16,6 +16,8 @@ import { announceMaintenanceEnd }                              from "./maintenan
 import { getStreakState } from "./streak.js";
 import { getUserBadges, BADGES }     from "./badges.js";
 import { getReferralState }          from "./referral.js";
+import { ARABIC_SOURCES }            from "./sources.js";
+import type { SourceStat }           from "./analytics.js";
 
 // ══════════════════════════════════════════════
 // ADMIN — لوحة تحكم المشرفين (كاملة)
@@ -669,9 +671,31 @@ export async function handleAdminCallback(
 // ── helper: لوحة المصادر مع أزرار toggle ─────
 async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void> {
   const srcStats = await getSourceStats();
-  // أعلى 13 (مرتبة بالـ total تنازلياً) + أيّ مصدر معطَّل يدوياً يظهر تلقائياً
-  // (حتى لو total = 0 لأنه أُضيف حديثاً للـ off list — getSourceStats يضمّه).
-  const top = srcStats.slice(0, 13);
+  // اعرض كل المصادر الـ canonical المُعرَّفة في `sources.ts` بدون استثناء —
+  // حتى لو ما اتجربتش لسه (welib مثلاً)، الأدمن يقدر يفعّل/يعطل من اللوحة
+  // بدل ما يضطر يـ SSH في الـ env vars. لو الـ srcStats ضمّ نطاق غير معروف
+  // (مثلاً مصدر تاني ظهر من history)، نضمّه برضه في الذيل.
+  const known = new Set(ARABIC_SOURCES.map((s) => s.domain));
+  const byDomain = new Map(srcStats.map((s) => [s.domain, s]));
+  const blank = (domain: string): SourceStat => ({
+    domain, ok: 0, fail: 0, mistralRejected: 0,
+    total: 0, totalWithRejects: 0,
+    successRate: 0, trustRate: 0, rate: "0%",
+    autoDisabled: false, hardAutoDisabled: false, trustAutoDisabled: false,
+    mistralOnlyAutoDisabled: false,
+    manuallyDisabled: false,
+  });
+  const merged: SourceStat[] = [
+    ...ARABIC_SOURCES.map((src) => byDomain.get(src.domain) ?? blank(src.domain)),
+    ...srcStats.filter((s) => !known.has(s.domain)),
+  ];
+  // اقسم لمجموعتين: نشطة (فيها استخدام أو معطّلة يدوياً) في الأعلى،
+  // الباقي (0/0/0 وغير معطّل) في الذيل بترتيب الـ priority الأصلي.
+  const active = merged.filter((s) => s.total > 0 || s.totalWithRejects > 0 || s.manuallyDisabled);
+  const idle   = merged.filter((s) => !(s.total > 0 || s.totalWithRejects > 0 || s.manuallyDisabled));
+  active.sort((a, b) => (b.ok + b.fail) - (a.ok + a.fail));
+  // top: أهم 13 سطر — نشطة أولاً ثم idle
+  const top = [...active, ...idle].slice(0, 16);
   const lines: string[] = [];
   const buttons: TelegramBot.InlineKeyboardButton[][] = [];
   for (const s of top) {
@@ -683,6 +707,7 @@ async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void>
     else if (s.trustAutoDisabled)       badge = "🟣"; // معطّل تلقائياً (Mistral trust)
     else if (s.mistralOnlyAutoDisabled) badge = "💛"; // معطّل تلقائياً (Mistral-only catastrophic)
     else if (s.autoDisabled)            badge = "🟠"; // معطّل تلقائياً (low rate)
+    else if (s.total === 0 && s.totalWithRejects === 0) badge = "⚪"; // ما اتجربتش لسه
     else if (rate >= 70)                badge = "🟢";
     else if (rate >= 40)                badge = "🟡";
     else                                badge = "🔴";
@@ -699,7 +724,7 @@ async function sendSourcesPanel(bot: TelegramBot, chatId: number): Promise<void>
   buttons.push([{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }]);
 
   const legend =
-    "\n\n_شرح:_ 🟢 جيد · 🟡 متوسط · 🔴 ضعيف · 🟠 منخفض النجاح · 🟣 ضعيف الثقة \\(Mistral\\) · ⛔ catastrophic · 🚫 يدوي" +
+    "\n\n_شرح:_ 🟢 جيد · 🟡 متوسط · 🔴 ضعيف · 🟠 منخفض النجاح · 🟣 ضعيف الثقة \\(Mistral\\) · ⛔ catastrophic · 🚫 يدوي · ⚪ ما اتجربش" +
     "\n_m: عدد رفض Mistral · trust: ok / \\(ok\\+fail\\+mistral\\)_";
 
   await bot.sendMessage(chatId,
