@@ -80,14 +80,32 @@ const cases = [
   // that's mostly Arabic IS a translation candidate against a Latin PDF).
   ["مزيج عربي English", "Atomic Habits",            true,  "Mixed-script (Arabic-dominant) ↔ Latin → cross-lang"],
   // Strict tie returns "unknown" → not cross-lang. We construct an exact
-  // 1:1 character ratio to hit the tie path.
-  ["abج",            "Atomic Habits",                false, "Strict char-count tie on left → unknown → false"],
+  // 1:1 character ratio (1 Latin + 1 Arabic) to hit the tie path.
+  // (The previous "abج" was 2 Latin + 1 Arabic = Latin-dominant, which
+  //  exercised the "same-script" branch, not the tie branch — so the
+  //  test passed for the wrong reason. Devin Review #133 follow-up.)
+  ["aج",             "Atomic Habits",                false, "Strict char-count tie on left → unknown → false"],
 ];
 
 for (const [book, sig, want, label] of cases) {
   const got = isCrossLanguagePair(book, sig);
   ok(`T3-cases — ${label}`, got === want);
 }
+
+// Explicitly assert detectScript classifies the tie input correctly. Without
+// this probe, the boolean `false` from the tie case above could come from
+// either branch (real tie OR same-script fallthrough) — see Devin Review
+// #133 follow-up. This catches future regressions where, e.g., the tie
+// comparison `l > a` is changed to `l >= a` (which would silently make
+// every tied input resolve to "latin" and skip the unknown branch).
+ok(
+  "T3b — detectScript('aج') === 'unknown' (real 1:1 tie)",
+  detectScript("aج") === "unknown",
+);
+ok(
+  "T3b — detectScript('abج') === 'latin' (Latin-dominant 2:1; not a tie)",
+  detectScript("abج") === "latin",
+);
 
 // ── Validator wiring ────────────────────────────────────────────────
 
