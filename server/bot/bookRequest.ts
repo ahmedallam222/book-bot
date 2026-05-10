@@ -9,6 +9,10 @@ import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
+import {
+  correctTransliteration,
+  TEL_TLIT_RETRY_RECOVERED,
+} from "./aiProviders/llamaTransliteration.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
@@ -517,6 +521,35 @@ async function performFullSearch(
         });
         await editMsg(token, chatId, msgId, buildProgress(2, q, `💡 جربت: _"${escMd(q)}"_`));
         armProgressWatchdog(token, chatId, msgId, 2, q);
+      }
+    }
+  }
+
+  // ── Llama transliteration retry (audit follow-up #2, 2026-05-09) ──
+  // If both the raw query and the cleanSearchQuery-stripped query came
+  // up empty, ask Llama whether the user garbled a foreign-name
+  // transliteration (e.g. "وتيدصي درايدن" → "ويندي درايدن"). On a
+  // meaningful correction we retry the search once. Cached 7 days so
+  // popular bad queries don't re-burn neurons.
+  // Module: server/bot/aiProviders/llamaTransliteration.ts
+  if (results.length === 0) {
+    const tlit = await correctTransliteration(bookName).catch(() => null);
+    if (tlit && tlit.changed) {
+      const { results: tlitResults } = await searchWithFuzzyFallback(tlit.corrected);
+      if (tlitResults.length > 0) {
+        results = tlitResults;
+        cleanedQuery = tlit.corrected;
+        redis.incr(TEL_TLIT_RETRY_RECOVERED).catch(() => {});
+        L.info("bot", `Auto-retry with Llama-corrected query succeeded`, {
+          original:  bookName.slice(0, 50),
+          corrected: tlit.corrected.slice(0, 50),
+          results:   tlitResults.length,
+        });
+        await editMsg(
+          token, chatId, msgId,
+          buildProgress(2, tlit.corrected, `💡 صححت لـ: _"${escMd(tlit.corrected)}"_`),
+        );
+        armProgressWatchdog(token, chatId, msgId, 2, tlit.corrected);
       }
     }
   }
