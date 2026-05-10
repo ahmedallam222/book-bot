@@ -3,6 +3,7 @@ import { createHash }  from "crypto";
 import { L } from "./logger.js";
 import { normalizeArabic, urlFilenameRelevance, isCrossLanguagePair, detectScript } from "./text.js";
 import { redis } from "./redis.js";
+import { askLlamaPrefilter } from "./aiProviders/llamaValidator.js";
 import {
   MISTRAL_API_KEY,
   PDF_VALIDATE_ACCEPT_THRESHOLD,
@@ -691,6 +692,28 @@ async function askMistral(
     `4) If the filename has no useful information (only digits, random IDs, empty), answer NO.`,
     `Reply with one word only: YES or NO`,
   );
+
+  // Llama-on-Cloudflare prefilter (audit follow-up, 2026-05-09).
+  // Cheap (~4–8 neurons/call on Workers AI free tier vs paid Mistral),
+  // strict (only "YES" or "NO" short-circuits), and gracefully degrading
+  // (any failure returns null and we fall through to Mistral).
+  // We skip the prefilter on cross-language pairs because Mistral's
+  // few-shot examples handle translation matches more reliably than
+  // an 8B model would. See server/bot/aiProviders/llamaValidator.ts.
+  const llamaVerdict = await askLlamaPrefilter({
+    bookName,
+    metaTitle,
+    promptFilename,
+    isCrossLang,
+  });
+  if (llamaVerdict !== null) {
+    const verdict = llamaVerdict === "yes";
+    L.info("pdfValidator", "Llama prefilter short-circuit", {
+      verdict, book: bookName.slice(0, 40),
+    });
+    redis.setex(cacheKey, MISTRAL_CACHE_TTL_SEC, verdict ? "1" : "0").catch(() => {});
+    return verdict;
+  }
 
   try {
     const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
