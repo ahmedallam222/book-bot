@@ -8,6 +8,7 @@ import { normalizeForCache, escMd, urlFilenameRelevance, cleanSearchQuery, canon
 import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
+import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
@@ -1305,7 +1306,24 @@ async function buildNoResultMessage(
       : "";
     return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
   }
-  return buildNoResults(bookName, false, apologetic);
+  // Llama suggestions (audit follow-up #3, 2026-05-09): when search
+  // genuinely came up empty, ask Llama-on-Cloudflare for 3 topic-relevant
+  // Arabic books. Empty array → silent fallback to the generic message
+  // (no behaviour change). See server/bot/aiProviders/llamaSuggestions.ts.
+  const base = buildNoResults(bookName, false, apologetic);
+  const suggestions = await getLlamaSuggestions(bookName).catch(() => []);
+  if (suggestions.length === 0) return base;
+  const block = suggestions
+    .slice(0, 3)
+    .map((s) => `◦ ${escMd(s.slice(0, 80))}`)
+    .join("\n");
+  return (
+    base +
+    `\n\n` +
+    `📚 *كتب مشابهة قد تجدها بسهولة:*\n` +
+    `${block}\n\n` +
+    `_جرّب البحث عن أحدها — قد يكون أقرب لما تريد._`
+  );
 }
 
 
