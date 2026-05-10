@@ -89,6 +89,62 @@ git stash pop || true
 
 Fail signals: `git pull` reports a non-fast-forward, `docker compose ps` reports `unhealthy`, the marker grep returns `0` (deploy used a stale layer or wrong branch), or the post-deploy logs contain `ETELEGRAM 409 Conflict` (old container did not stop).
 
+## Testing internal modules that need the bot's Redis (sidecar-container pattern)
+
+When testing a module that imports `./server/bot/redis.js` (e.g. AI providers, validators, suggestions, transliteration), running `npx tsx _harness.ts` directly on the EC2 host **fails with `ECONNREFUSED 127.0.0.1:6379`**. The bot's docker-compose Redis is on the internal `book-bot_default` network with no port binding to host.
+
+Fix: run the harness inside a sidecar `node:22-bookworm-slim` container attached to the same docker network and pointed at `redis:6379` (the docker service name).
+
+```bash
+cd /home/ubuntu/book-bot
+set -a && source .env && set +a   # load CLOUDFLARE_AI_*, etc.
+
+# 1. Write your harness at the repo root (mounted into /app inside the container).
+#    Imports work as expected: `import { foo } from "./server/bot/aiProviders/foo.js";`
+
+# 2. Run inside a sidecar container on the bot's network.
+docker run --rm \
+  --network book-bot_default \
+  -v /home/ubuntu/book-bot:/app \
+  -w /app \
+  -e REDIS_URL=redis://redis:6379 \
+  -e CLOUDFLARE_AI_ACCOUNT_ID=$CLOUDFLARE_AI_ACCOUNT_ID \
+  -e CLOUDFLARE_AI_API_TOKEN=$CLOUDFLARE_AI_API_TOKEN \
+  node:22-bookworm-slim \
+  npx tsx _harness.ts
+```
+
+Why this works:
+- `--network book-bot_default` puts the sidecar in the same docker network as `bot` and `redis`, so DNS resolves `redis` to the right container.
+- `-v /home/ubuntu/book-bot:/app` shares the source tree (and `node_modules` — already installed for tsx, ioredis, etc.) so no `npm install` is needed.
+- The bot's prod container is **untouched** — there is no risk of starting a second Telegram polling process inside it.
+
+Gotchas learned in practice:
+
+- **Counter constants for cache-hit may not exist on the module.** Some modules (e.g. `llamaValidator`) write the verdict cache in the *caller* (here `pdfValidator.ts` writes to `mv:` keys), not in the module itself. So there is no `TEL_LLAMA_CACHE_HIT` export. Before importing every counter constant, grep for `^export const TEL_` in the module and import only what's actually exported. For cache-hit assertions, fall back to a raw key string.
+- **`redis.incr(...).catch(() => {})` is fire-and-forget.** Snapshot Redis ~200 ms after the call, not immediately, otherwise counters look like `0` because the increment hasn't flushed.
+- **The harness file should be temporary.** Place it at the repo root (e.g. `_test_<feature>.ts`), run it, then delete. Do **not** commit harness files — they're not part of CI and bypass the deterministic test suite.
+- **Cache pollution is usually harmless.** A working module's cache write stores legitimate output (e.g. `tlit:llama:<hash>` → `{"corrected":"ويندي درايدن"}`). This is indistinguishable from real traffic. Skip cleanup unless your test inputs are nonsense.
+- **Counter increments persist** in prod Redis, so a passing test leaves `+1` (or `+2`) on each counter. This is normally fine — they're observability counters, not state. If you need a clean baseline, snapshot before the test and report deltas, not absolute values.
+
+Example assertions for any Llama-style fail-open module:
+
+```ts
+// L1: fresh CF call
+//   - return is one of <expected verdict types>
+//   - tel:<ns>:<feature>_used incremented by exactly 1
+//   - exactly ONE of the verdict sub-counters incremented by 1
+//   - NONE of *_http_error / *_timeout / *_other_error / *_no_key incremented
+//   - latency below the module's hard timeout
+
+// L2: identical second call
+//   - returns deep-equal value (cache hit) OR same value (deterministic re-fetch)
+//   - if module owns cache: _used did NOT increment, _cache_hit incremented by 1, latency < 200ms
+//   - if cache lives in caller: _used incremented again — document this as expected behaviour
+```
+
+Validated 2026-05-10 on the Llama-on-CF trio (PRs #140 / #141 / #142): 6/6 assertions passed end-to-end; `correctTransliteration("لي وتيدصي درايدن")` returned `"ويندي درايدن"` in 179 ms.
+
 ## Local deterministic cache/search/parser tests
 
 For backend-only cache/search/ranking/parser changes, prefer shell-only probes over Telegram UI tests when the behavior is deterministic and does not require real Firecrawl or Telegram delivery.
