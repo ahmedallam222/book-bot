@@ -15,7 +15,13 @@
 // Keys are always masked in any return value (last 4 chars only).
 
 import { redis } from "../redis.js";
-import { CEREBRAS_API_KEY, GROQ_API_KEY } from "../config.js";
+import {
+  CEREBRAS_API_KEY,
+  GROQ_API_KEY,
+  CLOUDFLARE_AI_ACCOUNT_ID,
+  CLOUDFLARE_AI_API_TOKEN,
+} from "../config.js";
+import { L } from "../logger.js";
 
 const HASH_KEY = "admin:agent:llm_providers";
 
@@ -30,7 +36,7 @@ export interface LLMProvider {
   model:    string;
   /** API key (stored encrypted-at-rest in Redis would be ideal; for now plain). */
   apiKey:   string;
-  /** Lower number = higher priority. Defaults: cerebras=1, groq-oss=2, groq-llama=3. */
+  /** Lower number = higher priority. Defaults: cloudflare=1, cerebras=2, groq-oss=3, groq-llama=4. */
   priority: number;
   /** Set to false to keep the row but skip during dispatch. */
   enabled:  boolean;
@@ -43,14 +49,39 @@ export interface LLMProvider {
 // existing CEREBRAS_API_KEY / GROQ_API_KEY env vars. The admin can
 // overwrite or extend at runtime via tools.
 
+/** Stable ID for the Cloudflare provider — referenced by the upsert
+ * migration so existing Redis-seeded installs gain Cloudflare as
+ * primary without resetting admin customisations. */
+export const CLOUDFLARE_PROVIDER_ID = "cloudflare-gpt-oss-120b";
+
+/** Build the Cloudflare provider object. Account id is interpolated
+ * into the baseUrl because Cloudflare's OpenAI-compat endpoint is
+ * scoped per-account: `/client/v4/accounts/{ACCOUNT_ID}/ai/v1`. */
+function buildCloudflareProvider(priority: number): LLMProvider {
+  return {
+    id:       CLOUDFLARE_PROVIDER_ID,
+    name:     "Cloudflare GPT-OSS 120B",
+    baseUrl:  `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_AI_ACCOUNT_ID}/ai/v1`,
+    model:    "@cf/openai/gpt-oss-120b",
+    apiKey:   CLOUDFLARE_AI_API_TOKEN,
+    priority,
+    enabled:  true,
+  };
+}
+
 export const DEFAULT_PROVIDERS: LLMProvider[] = [
+  // Cloudflare Workers AI — primary. Same gpt-oss-120b model as Cerebras
+  // but with much higher daily quota (~10k neurons free + cheap pay-as-you-go)
+  // and supports function calling on the OpenAI-compat /v1/chat/completions
+  // endpoint.
+  buildCloudflareProvider(1),
   {
     id:       "cerebras-gpt-oss-120b",
     name:     "Cerebras GPT-OSS 120B",
     baseUrl:  "https://api.cerebras.ai/v1",
     model:    "gpt-oss-120b",
     apiKey:   CEREBRAS_API_KEY,
-    priority: 1,
+    priority: 2,
     enabled:  true,
   },
   {
@@ -59,7 +90,7 @@ export const DEFAULT_PROVIDERS: LLMProvider[] = [
     baseUrl:  "https://api.groq.com/openai/v1",
     model:    "openai/gpt-oss-120b",
     apiKey:   GROQ_API_KEY,
-    priority: 2,
+    priority: 3,
     enabled:  true,
   },
   {
@@ -68,7 +99,7 @@ export const DEFAULT_PROVIDERS: LLMProvider[] = [
     baseUrl:  "https://api.groq.com/openai/v1",
     model:    "llama-3.3-70b-versatile",
     apiKey:   GROQ_API_KEY,
-    priority: 3,
+    priority: 4,
     enabled:  true,
   },
 ];
@@ -160,4 +191,42 @@ export async function seedDefaultsIfEmpty(): Promise<{ seeded: number }> {
     }
   }
   return { seeded };
+}
+
+/**
+ * Idempotent migration: ensures the Cloudflare provider exists in Redis
+ * at priority 1 (or below the lowest existing priority, whichever is
+ * smaller) so prod installs that were seeded before Cloudflare was a
+ * default still gain it as primary on the next boot.
+ *
+ * Does NOT touch any existing Cloudflare row — if the admin already
+ * configured one (any priority/key), this is a no-op so admin
+ * customisations stick.
+ *
+ * Returns:
+ *   added=true   — row was inserted (Cloudflare keys present, row was missing)
+ *   skipped="no_keys"     — CF_ACCOUNT_ID or CF_API_TOKEN missing
+ *   skipped="already_set" — admin already has a Cloudflare row
+ */
+export async function ensureCloudflarePrimary(): Promise<
+  | { added: true;  priority: number }
+  | { added: false; reason: "no_keys" | "already_set" }
+> {
+  if (!CLOUDFLARE_AI_ACCOUNT_ID || !CLOUDFLARE_AI_API_TOKEN) {
+    return { added: false, reason: "no_keys" };
+  }
+  const existing = await getProvider(CLOUDFLARE_PROVIDER_ID).catch(() => null);
+  if (existing) return { added: false, reason: "already_set" };
+
+  // Pick priority = min(1, lowestExistingPriority - 1) so we always land
+  // ahead of whatever the admin currently has, even if they manually
+  // re-prioritised cerebras to 0.
+  const all = await loadAllProvidersRaw().catch(() => [] as LLMProvider[]);
+  const minExisting = all.reduce((m, p) => Math.min(m, p.priority), Number.POSITIVE_INFINITY);
+  const priority = Number.isFinite(minExisting) ? Math.min(1, minExisting - 1) : 1;
+
+  const provider = buildCloudflareProvider(priority);
+  await setProvider(provider);
+  L.info("adminAgent", `Cloudflare provider upserted at priority ${priority}`);
+  return { added: true, priority };
 }
