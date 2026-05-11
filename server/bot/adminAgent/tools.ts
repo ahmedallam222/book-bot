@@ -198,11 +198,49 @@ const TOOL_GET_WEEKLY_STATS: Tool = {
 
 const TOOL_GET_TOTAL_STATS: Tool = {
   name:        "get_total_stats",
-  description: "الإحصاءات الإجمالية للبوت من بدايته.",
+  description:
+    "الإحصاءات الإجمالية للبوت من بدايته (Redis counters). " +
+    "ملاحظة: حقل `users` هنا = المستخدمون الذين قاموا بالبحث (= distinctSearchers)، " +
+    "وليس كل من ضغط /start. للعدد الكامل للمستخدمين في قاعدة البيانات استخدم `get_user_count`.",
   parameters:  { type: "object", properties: {} },
   isWrite:     false,
   async run() {
     return await getTotalStats();
+  },
+};
+
+const TOOL_GET_USER_COUNT: Tool = {
+  name:        "get_user_count",
+  description:
+    "عدد مستخدمي البوت الفعلي. يرجع: " +
+    "`total_users_db` (كل من له صف في جدول users، يشمل من ضغط /start ولم يبحث) + " +
+    "`distinct_searchers` (من بحث فعلاً، من Redis stats:total) + " +
+    "`premium_users` (المستخدمون الفعّالون كـ premium). " +
+    "استخدم هذا للسؤال 'كم مستخدم في البوت؟' بدل get_total_stats.",
+  parameters:  { type: "object", properties: {} },
+  isWrite:     false,
+  async run() {
+    const [dbRes, totalStats, premiumN] = await Promise.all([
+      // limit=1, offset=0 → returns total without loading rows
+      storage.getAllUsersWithDetails(1, 0).catch(() => ({ users: [], total: 0 })),
+      getTotalStats().catch(() => ({} as Record<string, number>)),
+      premiumCount().catch(() => 0),
+    ]);
+    const totalDb = dbRes.total ?? 0;
+    const distinct =
+      (totalStats.distinctSearchers as number | undefined) ??
+      (totalStats.users as number | undefined) ??
+      0;
+    return {
+      total_users_db:     totalDb,
+      distinct_searchers: distinct,
+      premium_users:      premiumN,
+      // Human-readable summary so the LLM doesn't have to compute it.
+      summary_ar:
+        `إجمالي المستخدمين في قاعدة البيانات: ${totalDb}، ` +
+        `منهم ${distinct} مستخدم قام بالبحث فعلاً، و${premiumN} مستخدم premium نشط. ` +
+        `الفرق بين total_users_db و distinct_searchers يمثّل المستخدمين الذين ضغطوا /start ولم يبحثوا.`,
+    };
   },
 };
 
@@ -900,6 +938,7 @@ export const TOOLS: Tool[] = [
   TOOL_GET_TODAY_STATS,
   TOOL_GET_WEEKLY_STATS,
   TOOL_GET_TOTAL_STATS,
+  TOOL_GET_USER_COUNT,
   TOOL_GET_FUNNEL_STATS,
   TOOL_GET_TOP_BOOKS,
   TOOL_GET_SOURCE_HEALTH,
