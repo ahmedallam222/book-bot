@@ -8,6 +8,7 @@ import { processBookRequest }         from "./bookRequest.js";
 import { cleanOldTempFiles }          from "./tempFiles.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
 import { startFailureRetryWorker }    from "./failureRetry.js";
+import { startAdminAgent }            from "./adminAgent/index.js";
 import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import { listPremiumUsers }           from "./userSettings.js";
@@ -163,6 +164,12 @@ export async function startBot(): Promise<void> {
   // تشغيل عامل إعادة المحاولة — يفحص الفشل المخزّن ويعيد تجربته
   // بعد إصلاحات البحث/التحميل
   startFailureRetryWorker(_bot, BOT_TOKEN);
+
+  // تشغيل وكيل الإدارة (Admin Agent) — bot منفصل بـ ADMIN_BOT_TOKEN.
+  // لو الـ env var مش موجود يـ skip بدون error.
+  startAdminAgent().catch((e) =>
+    L.error("bot", "startAdminAgent failed", { err: String(e).slice(0, 120) })
+  );
 }
 
 // ── Worker loop ───────────────────────────────
