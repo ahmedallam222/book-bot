@@ -1,0 +1,70 @@
+{
+  "_meta": {
+    "purpose": "Seed list of Arabic book/novel Telegram channels for the book-bot fallback userbot.",
+    "created": "2026-05-09",
+    "notes": [
+      "All entries are public channels (joinable without admin approval).",
+      "Tier 1 = large general libraries (50k+ subs), Tier 2 = 10-50k specialized, Tier 3 = smaller niche.",
+      "Priority: Tier 1 first (broadest coverage), Tier 2 to fill gaps, Tier 3 for adversarial books.",
+      "Userbot must throttle joins: 1 channel / 60-90s to avoid TG flood-wait.",
+      "After initial join run, an auto-discovery cron expands the list weekly."
+    ]
+  },
+  "tier_1_large_libraries": [
+    { "username": "nourbook",       "title": "مكتبة نور | Noor Book",         "subs": 709937, "category": "general", "verified": true },
+    { "username": "lenaqra",        "title": "لنقرأ معا روايات و كتب",        "subs": 479800, "category": "general", "verified": true },
+    { "username": "BoOkJuiCe",      "title": "عصير الكتب - PDF",              "subs": 119434, "category": "general", "verified": true },
+    { "username": "books_nour",     "title": "كتب وروايات pdf مكتبة سواح",    "subs": 107552, "category": "general", "verified": true },
+    { "username": "pdfnew",         "title": "المكتبة الذهبية",                "subs":  50822, "category": "islamic", "verified": true },
+    { "username": "sahm_book",      "title": "مكتبة سهم - Sahm-Book.com",     "subs":  49928, "category": "general", "verified": true }
+  ],
+  "tier_2_specialized": [
+    { "username": "storykaligi",    "title": "روايات وقصص مميزة",              "subs": 39527,  "category": "novels",  "verified": true },
+    { "username": "waqfeya_pdf",    "title": "المكتبة الوقفية pdf",            "subs": 32001,  "category": "islamic", "verified": true },
+    { "username": "pdf_novels",     "title": "مكتبة روايات PDF حصرية",         "subs": 30201,  "category": "novels",  "verified": true },
+    { "username": "dawarats",       "title": "مكتبة القمر",                     "subs": 25199,  "category": "novels",  "verified": true },
+    { "username": "bokawycom",      "title": "بوكاوي | كتب PDF مجانا",         "subs": 11858,  "category": "general", "verified": true }
+  ],
+  "tier_3_to_discover": {
+    "_strategy": "Auto-join via contacts.search with these Arabic keywords after manual tier_1/2 setup is verified.",
+    "search_keywords": [
+      "كتب pdf",
+      "روايات pdf",
+      "مكتبة عربية",
+      "كتب اسلامية",
+      "كتب علمية pdf",
+      "روايات عربية",
+      "روايات عالمية مترجمة",
+      "كتب فلسفة",
+      "كتب تاريخ pdf",
+      "كتب تنمية بشرية",
+      "كتب اقتصاد",
+      "كتب ادب pdf",
+      "تحميل كتب",
+      "كتاب pdf",
+      "books pdf arabic",
+      "روايات رومانسية",
+      "كتب طبية pdf",
+      "كتب هندسية",
+      "كتب قانون pdf",
+      "كتب اطفال pdf",
+      "كتب سياسية",
+      "كتب صوتية",
+      "audiobook عربي",
+      "ملخصات كتب",
+      "موسوعة المعارف"
+    ],
+    "estimated_coverage": "After auto-discovery + rate-limited joining over 2-3 weeks, expect ~150-250 channels in total."
+  },
+  "channels_to_avoid": {
+    "_reasoning": "Patterns that produce low-quality results or risk for the userbot.",
+    "patterns": [
+      "Channels with last-post-date > 6 months ago (dead channels)",
+      "Channels that post only audiobook MP3s (we want PDFs)",
+      "Channels that re-upload everything from one specific website (duplication)",
+      "Channels with < 1000 subs unless verified as high-quality niche",
+      "Channels labelled 'private group' (cannot be joined publicly)",
+      "Channels with promotion-heavy captions (high noise-to-signal)"
+    ]
+  }
+}
