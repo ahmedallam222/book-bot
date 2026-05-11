@@ -7,6 +7,44 @@
 
 ---
 
+## [Unreleased] — Admin agent: Cloudflare Workers AI as primary LLM provider
+
+### 🔧 Operations
+
+#### Promote Cloudflare to primary in the admin agent dispatcher
+- **Why**: Prod admin agent kept failing with `All LLM providers failed:
+  cerebras-…: HTTP 404 | groq-…: HTTP 429` — Cerebras dropped the model
+  name we were asking for and Groq's free tier rate-limits every few
+  requests. Cloudflare Workers AI hosts the same `gpt-oss-120b` model
+  behind an OpenAI-compatible endpoint *with function calling*, has a
+  much larger daily quota (10k neurons free + cheap PAYG), and the
+  account credentials are already provisioned in production for the
+  summary flow (`CLOUDFLARE_AI_ACCOUNT_ID` / `CLOUDFLARE_AI_API_TOKEN`).
+- **What changed** (`server/bot/adminAgent/llmProviders.ts`):
+  - New `cloudflare-gpt-oss-120b` entry added to `DEFAULT_PROVIDERS` at
+    priority **1** (model `@cf/openai/gpt-oss-120b`, baseUrl
+    `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1`).
+  - Cerebras → priority **2**, Groq gpt-oss → **3**, Groq Llama → **4**
+    (kept as graceful fallback chain).
+  - New idempotent migration `ensureCloudflarePrimary()` upserts the
+    Cloudflare row into Redis on boot **only when** keys are present
+    AND the admin hasn't already configured one (so existing
+    customisations stick). Picks priority `min(1, lowestExisting−1)` so
+    it always lands ahead of whatever was there before.
+  - Wired into `startAdminAgent` startup right after
+    `seedDefaultsIfEmpty`, with try/catch so a Redis blip can't prevent
+    the bot from coming up.
+- **Risk**: Low. The Cloudflare entry is opt-in via env vars (no keys →
+  migration logs `no_keys` and skips). All three previous providers
+  stay in the chain so a Cloudflare outage drops back to Cerebras and
+  then Groq automatically.
+- **Coverage**: `tests/test-cloudflare-primary-provider.mjs` — 25
+  deterministic probes covering source markers, index.ts wiring,
+  bundle inclusion, and a runtime DEFAULT_PROVIDERS shape check that
+  asserts the priority ordering + URL interpolation.
+
+---
+
 ## [32.2.0] — Audit fixes: leaderboard cache-hit gate + summary badge wiring — 2026-05-07
 
 ### 🐞 Bug fixes (discovered in deep audit)
