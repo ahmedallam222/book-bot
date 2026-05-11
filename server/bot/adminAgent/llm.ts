@@ -72,9 +72,19 @@ export interface LLMResponse {
 
 // ── Public dispatch ──────────────────────────────────────────────
 
+export interface RunLLMOpts {
+  /** When true, dispatch WITHOUT `tools` / `tool_choice` so the model
+   * is forced to emit a plain text answer. Used by the admin agent
+   * after exhausting its tool-call loop budget to guarantee the user
+   * always gets a final reply (Llama models occasionally keep
+   * re-issuing the same tool call instead of summarising the result). */
+  forceText?: boolean;
+}
+
 export async function runLLM(
   messages: LLMMessage[],
   tools: LLMToolDef[],
+  opts: RunLLMOpts = {},
 ): Promise<LLMResponse> {
   const all = await loadProviders();
   if (all.length === 0) {
@@ -89,12 +99,13 @@ export async function runLLM(
   // Normalize content once per call (cheap; same array gets dispatched
   // to multiple providers on fallback).
   const normalized = normalizeMessages(messages);
+  const effectiveTools = opts.forceText ? [] : tools;
 
   const errors: string[] = [];
   for (const p of ordered) {
     const t0 = Date.now();
     try {
-      const res = await callWithRetry(p, normalized, tools);
+      const res = await callWithRetry(p, normalized, effectiveTools);
       const ms  = Date.now() - t0;
       markUsed(p.id).catch(() => { /* best-effort */ });
       recordSuccess(p.id, ms).catch(() => { /* best-effort */ });
