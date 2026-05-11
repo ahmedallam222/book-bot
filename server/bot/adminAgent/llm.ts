@@ -1,13 +1,21 @@
 // ══════════════════════════════════════════════════════════
 // Admin Agent — LLM dispatch with tool calling
 // ══════════════════════════════════════════════════════════
-// Calls Cerebras (OpenAI-compatible) Llama 3.3 70B with function-
-// calling. Falls back to Groq Llama 3.3 70B if Cerebras fails.
-// Both providers speak the OpenAI Chat Completions tools protocol,
-// so we can share a single request/response shape.
+// Calls OpenAI-compatible Chat Completions endpoints with function-
+// calling. Provider list is loaded **dynamically** from Redis via
+// llmProviders.ts so the admin can hot-swap API keys at runtime via
+// the admin bot (`set_llm_provider`, `remove_llm_provider`).
+//
+// Default chain (when Redis is empty): Cerebras gpt-oss-120b → Groq
+// gpt-oss-120b → Groq Llama 3.3 70B-versatile. All three are
+// OpenAI-compatible and support `tools` + `tool_choice`.
+//
+// Why gpt-oss-120b: in our admin tests it produces ~3-5× richer
+// multi-tool chains than Llama 3.3 70B — and it actually computes
+// derived rates instead of replying "غير متاح".
 
 import { L } from "../logger.js";
-import { CEREBRAS_API_KEY, GROQ_API_KEY } from "../config.js";
+import { loadProviders, markUsed, type LLMProvider } from "./llmProviders.js";
 
 const TIMEOUT_MS = 30_000;
 
@@ -44,50 +52,32 @@ export interface LLMResponse {
   ms: number;
 }
 
-interface LLMConfig {
-  name:     string;
-  baseUrl:  string;
-  model:    string;
-  apiKey:   string;
-}
-
-const PROVIDERS: LLMConfig[] = [
-  {
-    name:    "cerebras-llama-3.3-70b",
-    baseUrl: "https://api.cerebras.ai/v1",
-    model:   "llama-3.3-70b",
-    apiKey:  CEREBRAS_API_KEY,
-  },
-  {
-    name:    "groq-llama-3.3-70b",
-    baseUrl: "https://api.groq.com/openai/v1",
-    model:   "llama-3.3-70b-versatile",
-    apiKey:  GROQ_API_KEY,
-  },
-];
-
 export async function runLLM(
   messages: LLMMessage[],
   tools: LLMToolDef[],
 ): Promise<LLMResponse> {
+  const providers = await loadProviders();
+  if (providers.length === 0) {
+    throw new Error("No LLM providers configured (set CEREBRAS_API_KEY/GROQ_API_KEY or use set_llm_provider)");
+  }
   const errors: string[] = [];
-  for (const p of PROVIDERS) {
-    if (!p.apiKey) continue;
+  for (const p of providers) {
     const t0 = Date.now();
     try {
       const res = await callOpenAICompat(p, messages, tools);
-      return { ...res, providerUsed: p.name, ms: Date.now() - t0 };
+      markUsed(p.id).catch(() => { /* best-effort */ });
+      return { ...res, providerUsed: p.id, ms: Date.now() - t0 };
     } catch (e) {
       const msg = String(e instanceof Error ? e.message : e).slice(0, 200);
-      L.warn("adminAgent", `${p.name} failed`, { err: msg, ms: Date.now() - t0 });
-      errors.push(`${p.name}: ${msg}`);
+      L.warn("adminAgent", `${p.id} failed`, { err: msg, ms: Date.now() - t0 });
+      errors.push(`${p.id}: ${msg}`);
     }
   }
-  throw new Error(`All LLM providers failed: ${errors.join(" | ") || "none configured"}`);
+  throw new Error(`All LLM providers failed: ${errors.join(" | ")}`);
 }
 
 async function callOpenAICompat(
-  cfg: LLMConfig,
+  cfg: LLMProvider,
   messages: LLMMessage[],
   tools: LLMToolDef[],
 ): Promise<{ content: string | null; toolCalls: LLMToolCall[] }> {
@@ -95,8 +85,8 @@ async function callOpenAICompat(
   const body: Record<string, unknown> = {
     model:       cfg.model,
     messages,
-    temperature: 0.2,
-    max_tokens:  1024,
+    temperature: 0.3,
+    max_tokens:  2048,
   };
   // Only attach tools when there are any — empty arrays make some
   // providers reject the request.

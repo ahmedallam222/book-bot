@@ -19,12 +19,13 @@ import { SYSTEM_PROMPT, CONFIRM_PHRASES_RE, CANCEL_PHRASES_RE } from "./prompt.j
 import { runLLM, type LLMMessage, type LLMToolCall } from "./llm.js";
 import { getToolDefinitions, findTool, type ToolRunCtx } from "./tools.js";
 import { loadConversation, saveConversation, clearConversation } from "./conversation.js";
+import { seedDefaultsIfEmpty } from "./llmProviders.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
 
-const MAX_LLM_LOOPS   = 8; // guard against infinite tool loops
-const MAX_TOOL_OUTPUT  = 2500; // chars — keep context tight
+const MAX_LLM_LOOPS   = 12;   // guard against infinite tool loops (bumped from 8 in PR-A2)
+const MAX_TOOL_OUTPUT  = 4000; // chars — keep context tight (bumped from 2500 for quick_overview)
 
 // ── pending writes (one per admin) ────────────────────────
 interface PendingWrite {
@@ -62,6 +63,16 @@ export async function startAdminAgent(): Promise<void> {
   }
 
   const bot = new TelegramBot(ADMIN_BOT_TOKEN, { polling: true });
+
+  // Seed the dynamic LLM provider registry from env vars on first boot.
+  // After this, the admin can manage providers via add/update/remove
+  // tools from Telegram — env vars become a fallback for the table.
+  try {
+    const r = await seedDefaultsIfEmpty();
+    if (r.seeded > 0) L.info("adminAgent", `Seeded ${r.seeded} default LLM providers from env`);
+  } catch (e) {
+    L.warn("adminAgent", `seedDefaultsIfEmpty failed: ${String(e).slice(0, 80)}`);
+  }
 
   try {
     const me = await bot.getMe();
