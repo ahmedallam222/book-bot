@@ -7,7 +7,117 @@
 
 ---
 
-## [Unreleased] — Admin agent: Cloudflare Workers AI as primary LLM provider
+## [Unreleased] — Admin agent: CF model fix + retry/breaker/telemetry
+
+### 🐛 Bug fix — Cloudflare HTTP 400 on multi-turn tool conversations
+
+#### Switch CF model away from `@cf/openai/gpt-oss-120b`
+- **Why**: Right after PR #148 deployed, the admin agent started
+  returning `All LLM providers failed: cloudflare-gpt-oss-120b: HTTP
+  400: AiError: Bad input … 'array' not in 'string'` to every admin
+  message. The `@cf/openai/gpt-oss-120b` model on Cloudflare's compat
+  endpoint has a stricter validator than the other CF models and
+  rejects valid OpenAI-spec payloads where assistant messages carry
+  `tool_calls` (`content: null`) or where any message uses array-typed
+  multimodal content.
+- **What changed** (`server/bot/adminAgent/llmProviders.ts`):
+  - New `cloudflare-llama-3.3-70b` entry replaces the old
+    `cloudflare-gpt-oss-120b` row at priority **1**. Model is
+    `@cf/meta/llama-3.3-70b-instruct-fp8-fast` — fast (fp8 quantized),
+    cheaper per neuron, well-tested OpenAI compat path with full
+    function-calling support.
+  - `ensureCloudflarePrimary()` gains an **id-migration** branch and a
+    **model-migration** branch. On next boot it rewrites the old row
+    under the new id, preserving any admin-overridden `apiKey` and the
+    `priority` they set; the legacy row is then deleted. No admin
+    re-config required on prod.
+
+#### Coerce non-string message content to string before dispatch
+- **Why**: Same root cause. OpenAI's spec allows `content: string |
+  array | null`, but Cloudflare's compat endpoint accepts only string.
+- **What changed** (`server/bot/adminAgent/llm.ts`):
+  - New `normalizeMessages()` runs once per dispatch and:
+    - Coerces array/object content → `JSON.stringify(content)`.
+    - For assistant messages carrying `tool_calls`, replaces `null`
+      content with `""` (CF rejects null even when `tool_calls` is
+      present).
+    - Leaves plain string content unchanged (zero overhead for the
+      common case).
+
+### ✨ Feature — LLM dispatch resilience layer
+
+#### Soft circuit breaker + per-provider telemetry
+- **Why**: When Cloudflare exhausts its free daily neurons quota (or
+  goes 5xx for an hour during an incident) we were re-trying it on
+  every admin message before falling through to Cerebras/Groq, paying
+  the full ~30s timeout each time. We needed to *temporarily* demote a
+  failing provider without taking it permanently out of the chain.
+- **What changed**:
+  - New module `server/bot/adminAgent/llmTelemetry.ts` records, per
+    provider, in Redis:
+    - `tel:llm:{id}:ok` / `tel:llm:{id}:err` counters
+    - Failure breakdown (`err_429`, `err_5xx`, `err_timeout`)
+    - Sliding window of the last 200 latencies (`tel:llm:{id}:lat_ms`)
+      → p50/p95 surfaced via the stats tool
+    - Last error message with 1h TTL (`tel:llm:{id}:last_err`)
+    - Streak counter; resets on every success
+  - When the streak reaches **3 failures within 5 min**, the provider
+    gets a `demote_until` marker valid for **10 min**. The dispatcher
+    reads these markers and sinks demoted providers to the end of the
+    chain (still tried as last resort, never kicked out).
+  - Markers self-clear when their TTL elapses, so recovery is
+    automatic on the next call.
+
+#### Single retry on transient failures
+- **What**: `server/bot/adminAgent/llm.ts:callWithRetry()` retries a
+  failed request **once** with a 500ms backoff when the failure is
+  classified transient (HTTP 5xx, HTTP 429, abort/timeout, network
+  error). Non-transient failures (HTTP 400, 401, 403) fall through to
+  the next provider immediately — no point retrying a malformed
+  request or an invalid key.
+
+#### Two new admin tools
+- `llm_provider_stats` (read) — returns `ok/err/successRate/p50/p95/
+  last_err/streak/demote_until` per provider, sorted with the most
+  flaky on top. Lets the admin answer "is Cloudflare slow today?" /
+  "why did fallback to Cerebras happen?" in one message.
+- `reset_llm_provider_stats` (write, confirm-flow) — wipes all
+  telemetry for one provider AND clears any breaker marker. Use after
+  the admin has fixed the underlying issue (rotated API key, raised
+  upstream quota, etc.) so the chain immediately re-prefers that
+  provider without waiting out the 10-min cooldown.
+
+### 🧪 Test coverage
+- `tests/test-admin-agent-llm-resilience.mjs` — 41 deterministic
+  probes across 5 sections:
+  - R1: dispatcher wiring (telemetry calls, breaker reorder, retry).
+  - R2: content normalization (string passthrough + assistant+tool_calls
+    null→"" + array/object → JSON.stringify).
+  - R3: telemetry module shape (Redis pipeline, breaker thresholds,
+    classifier).
+  - R4: tools.ts registers + exposes `llm_provider_stats` +
+    `reset_llm_provider_stats`.
+  - R5: runtime checks of `normalizeMessages` + `classifyFailure` +
+    `isTransient` against real inputs.
+- `tests/test-cloudflare-primary-provider.mjs` — updated for the new
+  provider id + model + migration branches; runtime assertions verify
+  `DEFAULT_PROVIDERS[0]` is the new Llama row at priority 1.
+
+### ⚠️ Operational notes
+- **Migration is automatic on next boot.** No admin action required.
+  Logs will show `Cloudflare provider id migrated:
+  cloudflare-gpt-oss-120b → cloudflare-llama-3.3-70b (model
+  @cf/openai/gpt-oss-120b → @cf/meta/llama-3.3-70b-instruct-fp8-fast)`.
+- **Telemetry keys are best-effort.** Redis blips never block dispatch
+  — every telemetry write is fire-and-forget.
+- **Breaker is conservative.** 3 failures / 5 min / 10 min cooldown is
+  tuned for the admin agent (low-volume, latency-sensitive). For other
+  callers, tune `STREAK_THRESHOLD` / `DEMOTE_DURATION_MS` in
+  `llmTelemetry.ts`.
+
+---
+
+## Released-but-bundled-here — Admin agent: Cloudflare Workers AI as primary LLM provider
 
 ### 🔧 Operations
 

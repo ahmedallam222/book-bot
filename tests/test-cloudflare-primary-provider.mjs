@@ -38,15 +38,23 @@ console.log("C1 — static markers (llmProviders.ts)");
 ok("imports CLOUDFLARE_AI_ACCOUNT_ID + TOKEN from config",
    /CLOUDFLARE_AI_ACCOUNT_ID/.test(provSrc) && /CLOUDFLARE_AI_API_TOKEN/.test(provSrc));
 ok("exports CLOUDFLARE_PROVIDER_ID constant",
-   /export\s+const\s+CLOUDFLARE_PROVIDER_ID\s*=\s*"cloudflare-gpt-oss-120b"/.test(provSrc));
+   /export\s+const\s+CLOUDFLARE_PROVIDER_ID\s*=\s*"cloudflare-llama-3.3-70b"/.test(provSrc));
 ok("exports ensureCloudflarePrimary function",
    /export\s+async\s+function\s+ensureCloudflarePrimary/.test(provSrc));
 ok("DEFAULT_PROVIDERS first entry is cloudflare (buildCloudflareProvider call)",
    /DEFAULT_PROVIDERS:[\s\S]*?=\s*\[\s*[/\s\S]*?buildCloudflareProvider\(1\)/.test(provSrc));
 ok("baseUrl uses Cloudflare OpenAI-compat path `/ai/v1`",
    /accounts\/\$\{CLOUDFLARE_AI_ACCOUNT_ID\}\/ai\/v1/.test(provSrc));
-ok("model is the OpenAI gpt-oss-120b variant on Cloudflare",
-   /"@cf\/openai\/gpt-oss-120b"/.test(provSrc));
+ok("model is @cf/meta/llama-3.3-70b-instruct-fp8-fast",
+   /"@cf\/meta\/llama-3\.3-70b-instruct-fp8-fast"/.test(provSrc));
+ok("legacy model gpt-oss-120b listed for migration",
+   /CLOUDFLARE_LEGACY_MODELS[\s\S]*?@cf\/openai\/gpt-oss-120b/.test(provSrc));
+ok("legacy id cloudflare-gpt-oss-120b listed for migration",
+   /CLOUDFLARE_LEGACY_IDS[\s\S]*?cloudflare-gpt-oss-120b/.test(provSrc));
+ok("migration handles model_migrated branch",
+   /reason:\s*"model_migrated"/.test(provSrc));
+ok("migration handles id_migrated branch",
+   /reason:\s*"id_migrated"/.test(provSrc));
 ok("cerebras priority bumped to 2",
    /id:\s*"cerebras-gpt-oss-120b"[\s\S]{0,300}?priority:\s*2/.test(provSrc));
 ok("groq-gpt-oss priority bumped to 3",
@@ -72,10 +80,11 @@ if (!fs.existsSync(distPath)) {
   console.log("  (skipped — dist/index.cjs not built; run `npm run build` first)");
 } else {
   const dist = fs.readFileSync(distPath, "utf8");
-  ok("bundle includes cloudflare-gpt-oss-120b id",     dist.includes("cloudflare-gpt-oss-120b"));
-  ok("bundle includes @cf/openai/gpt-oss-120b model",  dist.includes("@cf/openai/gpt-oss-120b"));
-  ok("bundle includes ensureCloudflarePrimary symbol", /ensureCloudflarePrimary/.test(dist));
-  ok("bundle keeps Cerebras fallback id",              dist.includes("cerebras-gpt-oss-120b"));
+  ok("bundle includes cloudflare-llama-3.3-70b id",     dist.includes("cloudflare-llama-3.3-70b"));
+  ok("bundle includes llama-3.3-70b-instruct-fp8-fast model", dist.includes("@cf/meta/llama-3.3-70b-instruct-fp8-fast"));
+  ok("bundle includes ensureCloudflarePrimary symbol",  /ensureCloudflarePrimary/.test(dist));
+  ok("bundle keeps Cerebras fallback id",               dist.includes("cerebras-gpt-oss-120b"));
+  ok("bundle keeps legacy id for migration",            dist.includes("cloudflare-gpt-oss-120b"));
 }
 
 // ─── C4 — runtime check: DEFAULT_PROVIDERS shape ──────────────────
@@ -97,8 +106,8 @@ ok("Cloudflare enabled === true", cf?.enabled === true);
 ok("Cloudflare baseUrl interpolates account id",
    cf?.baseUrl === "https://api.cloudflare.com/client/v4/accounts/test-account-id/ai/v1",
    cf?.baseUrl);
-ok("Cloudflare model is @cf/openai/gpt-oss-120b",
-   cf?.model === "@cf/openai/gpt-oss-120b", cf?.model);
+ok("Cloudflare model is @cf/meta/llama-3.3-70b-instruct-fp8-fast",
+   cf?.model === "@cf/meta/llama-3.3-70b-instruct-fp8-fast", cf?.model);
 
 const cerebras = DEFAULT_PROVIDERS.find(p => p.id === "cerebras-gpt-oss-120b");
 ok("Cerebras present at priority 2", cerebras?.priority === 2);
