@@ -19,7 +19,7 @@ import { SYSTEM_PROMPT, CONFIRM_PHRASES_RE, CANCEL_PHRASES_RE } from "./prompt.j
 import { runLLM, type LLMMessage, type LLMToolCall } from "./llm.js";
 import { getToolDefinitions, findTool, type ToolRunCtx } from "./tools.js";
 import { loadConversation, saveConversation, clearConversation } from "./conversation.js";
-import { seedDefaultsIfEmpty } from "./llmProviders.js";
+import { seedDefaultsIfEmpty, ensureCloudflarePrimary } from "./llmProviders.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
@@ -72,6 +72,17 @@ export async function startAdminAgent(): Promise<void> {
     if (r.seeded > 0) L.info("adminAgent", `Seeded ${r.seeded} default LLM providers from env`);
   } catch (e) {
     L.warn("adminAgent", `seedDefaultsIfEmpty failed: ${String(e).slice(0, 80)}`);
+  }
+
+  // Idempotent: upsert Cloudflare provider as primary if keys are
+  // present and admin hasn't manually configured one. Lets prod
+  // installs that were seeded before Cloudflare was a default still
+  // pick it up on next boot.
+  try {
+    const cf = await ensureCloudflarePrimary();
+    if (cf.added) L.info("adminAgent", `Cloudflare provider added at priority ${cf.priority}`);
+  } catch (e) {
+    L.warn("adminAgent", `ensureCloudflarePrimary failed: ${String(e).slice(0, 80)}`);
   }
 
   try {
