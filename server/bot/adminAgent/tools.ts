@@ -31,6 +31,7 @@ import {
   loadAllProvidersRaw, setProvider, removeProvider, getProvider,
   publicView, type LLMProvider,
 } from "./llmProviders.js";
+import { getProviderStats, resetProviderTelemetry } from "./llmTelemetry.js";
 
 // ──────────────────────────────────────────────────────────
 export interface ToolRunCtx {
@@ -811,6 +812,55 @@ const TOOL_REMOVE_LLM_PROVIDER: Tool = {
   },
 };
 
+const TOOL_LLM_PROVIDER_STATS: Tool = {
+  name:        "llm_provider_stats",
+  description: "إحصائيات أداء LLM providers (نجاح/فشل/زمن استجابة p50/p95/last_err) من الـ telemetry. يساعد على معرفة هل Cloudflare بطيء/يفشل اليوم. مع id واحد يرجع تفاصيل، بدون id يرجع كل الـ providers.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      id: { type: "string", description: "(optional) Provider ID لتفصيل واحد. أو سيب فاضي لكل الـ providers." },
+    },
+  },
+  isWrite: false,
+  async run(args) {
+    const id = asStr(args.id);
+    if (id) {
+      if (!PROVIDER_ID_RE.test(id)) throw new Error("invalid id");
+      return await getProviderStats(id);
+    }
+    const all = await loadAllProvidersRaw();
+    const stats = await Promise.all(all.map(p => getProviderStats(p.id)));
+    return {
+      count: stats.length,
+      providers: stats.sort((a, b) => {
+        // Stable order: by err count desc so flaky providers float to top.
+        const ea = a.err, eb = b.err;
+        if (ea !== eb) return eb - ea;
+        return a.id.localeCompare(b.id);
+      }),
+    };
+  },
+};
+
+const TOOL_RESET_LLM_STATS: Tool = {
+  name:        "reset_llm_provider_stats",
+  description: "صفّر الـ telemetry counters لـ provider معين (يمسح breaker لو كان متوقف). استخدمها بعد ما تصلح المشكلة عند الـ provider.",
+  parameters:  {
+    type:       "object",
+    properties: { id: { type: "string", description: "Provider ID" } },
+    required:   ["id"],
+  },
+  isWrite: true,
+  async run(args) {
+    const id = asStr(args.id);
+    if (!PROVIDER_ID_RE.test(id)) throw new Error("invalid id");
+    const p = await getProvider(id);
+    if (!p) throw new Error(`provider not found: ${id}`);
+    await resetProviderTelemetry(id);
+    return { ok: true, action: "telemetry_reset", id };
+  },
+};
+
 const TOOL_SET_LLM_PRIORITY: Tool = {
   name:        "set_llm_priority",
   description: "غيّر priority لـ provider معيّن (1=الأول، أعلى=fallback).",
@@ -861,7 +911,8 @@ export const TOOLS: Tool[] = [
   TOOL_GET_RECENT_LOGS,
   TOOL_GET_MAINTENANCE_STATUS,
   TOOL_LIST_LLM_PROVIDERS,
-  // write (14)
+  TOOL_LLM_PROVIDER_STATS,
+  // write (15)
   TOOL_SET_PREMIUM,
   TOOL_GRANT_PREMIUM_30D,
   TOOL_REVOKE_PREMIUM,
@@ -876,6 +927,7 @@ export const TOOLS: Tool[] = [
   TOOL_UPDATE_LLM_PROVIDER,
   TOOL_REMOVE_LLM_PROVIDER,
   TOOL_SET_LLM_PRIORITY,
+  TOOL_RESET_LLM_STATS,
 ];
 
 export function getToolDefinitions(): Array<{
