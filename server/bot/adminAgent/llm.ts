@@ -4,20 +4,38 @@
 // Calls OpenAI-compatible Chat Completions endpoints with function-
 // calling. Provider list is loaded **dynamically** from Redis via
 // llmProviders.ts so the admin can hot-swap API keys at runtime via
-// the admin bot (`set_llm_provider`, `remove_llm_provider`).
+// the admin bot (`add_llm_provider`, `update_llm_provider`,
+// `remove_llm_provider`, `set_llm_priority`).
 //
-// Default chain (when Redis is empty): Cerebras gpt-oss-120b → Groq
-// gpt-oss-120b → Groq Llama 3.3 70B-versatile. All three are
-// OpenAI-compatible and support `tools` + `tool_choice`.
+// Resilience (added 2026-05-11):
+//   - Single retry on transient failures (HTTP 5xx / 429 / network)
+//     with a short backoff before falling through to the next provider.
+//   - Per-provider telemetry counters (ok / err / latency p50,p95) in
+//     Redis, surfaced via the `llm_provider_stats` tool.
+//   - Soft circuit breaker: providers that fail 3 times within 5 min
+//     get demoted to the end of the chain for 10 min, then re-tried
+//     automatically. This stops a quota-exhausted provider (e.g.
+//     Cloudflare hitting its daily neurons cap) from being hammered
+//     before every fallback.
 //
-// Why gpt-oss-120b: in our admin tests it produces ~3-5× richer
-// multi-tool chains than Llama 3.3 70B — and it actually computes
-// derived rates instead of replying "غير متاح".
+// Message hygiene: the OpenAI spec allows `content` to be a string OR
+// an array of typed parts. Cloudflare's compat endpoint accepts only
+// strings, so we coerce non-string content to a string just before
+// dispatch — defensive against any caller that hands us an object
+// (or any future tool that returns multimodal content).
 
 import { L } from "../logger.js";
 import { loadProviders, markUsed, type LLMProvider } from "./llmProviders.js";
+import {
+  recordSuccess,
+  recordFailure,
+  isDemoted,
+  classifyFailure,
+  isTransient,
+} from "./llmTelemetry.js";
 
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS      = 30_000;
+const RETRY_BACKOFF_MS = 500;
 
 // ── OpenAI tool-calling types (subset we use) ──────────────
 export interface LLMMessage {
@@ -52,29 +70,126 @@ export interface LLMResponse {
   ms: number;
 }
 
+// ── Public dispatch ──────────────────────────────────────────────
+
 export async function runLLM(
   messages: LLMMessage[],
   tools: LLMToolDef[],
 ): Promise<LLMResponse> {
-  const providers = await loadProviders();
-  if (providers.length === 0) {
-    throw new Error("No LLM providers configured (set CEREBRAS_API_KEY/GROQ_API_KEY or use set_llm_provider)");
+  const all = await loadProviders();
+  if (all.length === 0) {
+    throw new Error("No LLM providers configured (set CEREBRAS_API_KEY/GROQ_API_KEY or use add_llm_provider)");
   }
+
+  // Reorder so demoted providers sink to the end of the chain. We don't
+  // remove them entirely — last-resort use is still better than failing
+  // the whole call if every other provider is also down.
+  const ordered = await reorderForBreaker(all);
+
+  // Normalize content once per call (cheap; same array gets dispatched
+  // to multiple providers on fallback).
+  const normalized = normalizeMessages(messages);
+
   const errors: string[] = [];
-  for (const p of providers) {
+  for (const p of ordered) {
     const t0 = Date.now();
     try {
-      const res = await callOpenAICompat(p, messages, tools);
+      const res = await callWithRetry(p, normalized, tools);
+      const ms  = Date.now() - t0;
       markUsed(p.id).catch(() => { /* best-effort */ });
-      return { ...res, providerUsed: p.id, ms: Date.now() - t0 };
+      recordSuccess(p.id, ms).catch(() => { /* best-effort */ });
+      return { ...res, providerUsed: p.id, ms };
     } catch (e) {
+      const ms  = Date.now() - t0;
       const msg = String(e instanceof Error ? e.message : e).slice(0, 200);
-      L.warn("adminAgent", `${p.id} failed`, { err: msg, ms: Date.now() - t0 });
+      const kind = (e as { __kind?: ReturnType<typeof classifyFailure> }).__kind
+        ?? classifyFailure(e);
+      L.warn("adminAgent", `${p.id} failed`, { err: msg, ms, kind });
+      recordFailure(p.id, kind, msg, ms).catch(() => { /* best-effort */ });
       errors.push(`${p.id}: ${msg}`);
     }
   }
   throw new Error(`All LLM providers failed: ${errors.join(" | ")}`);
 }
+
+// ── Retry wrapper ────────────────────────────────────────────────
+
+async function callWithRetry(
+  cfg: LLMProvider,
+  messages: LLMMessage[],
+  tools: LLMToolDef[],
+): Promise<{ content: string | null; toolCalls: LLMToolCall[] }> {
+  try {
+    return await callOpenAICompat(cfg, messages, tools);
+  } catch (e) {
+    const status = (e as { __httpStatus?: number }).__httpStatus;
+    const kind   = classifyFailure(e, status);
+    if (!isTransient(kind)) {
+      // Tag the error with the classification so the dispatcher can
+      // record telemetry without re-classifying.
+      (e as { __kind?: typeof kind }).__kind = kind;
+      throw e;
+    }
+    // Transient → wait briefly and retry once.
+    await sleep(RETRY_BACKOFF_MS);
+    try {
+      return await callOpenAICompat(cfg, messages, tools);
+    } catch (e2) {
+      const status2 = (e2 as { __httpStatus?: number }).__httpStatus;
+      const kind2   = classifyFailure(e2, status2);
+      (e2 as { __kind?: typeof kind2 }).__kind = kind2;
+      throw e2;
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// ── Breaker order ────────────────────────────────────────────────
+
+/** Push currently-demoted providers to the end of the chain while
+ * keeping their relative priorities. */
+async function reorderForBreaker(providers: LLMProvider[]): Promise<LLMProvider[]> {
+  const flags = await Promise.all(providers.map(p => isDemoted(p.id).catch(() => false)));
+  const healthy: LLMProvider[] = [];
+  const demoted: LLMProvider[] = [];
+  providers.forEach((p, i) => (flags[i] ? demoted : healthy).push(p));
+  return [...healthy, ...demoted];
+}
+
+// ── Message normalization ────────────────────────────────────────
+
+/** OpenAI accepts `content: string | array | null`. Cloudflare's
+ * compat endpoint only accepts string. Coerce non-string non-null
+ * values to a JSON string so messages survive every provider.
+ *
+ * Special-case: assistant messages that carry `tool_calls` should
+ * keep an empty string instead of `null` to satisfy Cloudflare's
+ * stricter validator. */
+function normalizeMessages(messages: LLMMessage[]): LLMMessage[] {
+  return messages.map(m => {
+    const isAssistantToolCall =
+      m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+
+    if (m.content == null) {
+      // Convert null/undefined → "" for assistant tool_calls; preserve
+      // null for cases that explicitly want it (OpenAI spec compliant).
+      return { ...m, content: isAssistantToolCall ? "" : (m.content ?? null) };
+    }
+    if (typeof m.content === "string") return m;
+
+    // Array / object → stringify so strict validators (Cloudflare) accept it.
+    try {
+      return { ...m, content: JSON.stringify(m.content) };
+    } catch {
+      return { ...m, content: String(m.content) };
+    }
+  });
+}
+
+// ── Single HTTP call ─────────────────────────────────────────────
 
 async function callOpenAICompat(
   cfg: LLMProvider,
@@ -95,7 +210,7 @@ async function callOpenAICompat(
     body.tool_choice = "auto";
   }
 
-  const ctrl = new AbortController();
+  const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
     const r = await fetch(url, {
@@ -109,7 +224,10 @@ async function callOpenAICompat(
     });
     if (!r.ok) {
       const txt = await r.text().catch(() => "");
-      throw new Error(`HTTP ${r.status}: ${txt.slice(0, 300)}`);
+      const err = new Error(`HTTP ${r.status}: ${txt.slice(0, 300)}`) as
+        Error & { __httpStatus?: number };
+      err.__httpStatus = r.status;
+      throw err;
     }
     const j = await r.json() as {
       choices?: Array<{
@@ -129,3 +247,7 @@ async function callOpenAICompat(
     clearTimeout(timer);
   }
 }
+
+// ── Test-only exports ────────────────────────────────────────────
+// Internal helpers exposed for unit tests. Not part of the runtime API.
+export const __test = { normalizeMessages, reorderForBreaker };
