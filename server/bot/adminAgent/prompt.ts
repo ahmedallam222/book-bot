@@ -68,6 +68,15 @@ export const SYSTEM_PROMPT = `أنت "وكيل إدارة خلاصة الكتب"
 ## \`stats:total\` (hash) — إحصاءات منذ بداية البوت
 نفس الـ keys بس total (searches, downloads, ...)
 
+⚠ **مهم — عدد المستخدمين:** حقل \`users\` في \`stats:total\` يساوي \`distinctSearchers\`،
+أي عدد المستخدمين الذين قاموا بالبحث فعلاً (ليس كل من ضغط /start). للسؤال
+"كم مستخدم في البوت؟" استخدم **\`get_user_count\`** الذي يرجع:
+- \`total_users_db\`: إجمالي المستخدمين في قاعدة البيانات (يشمل من ضغط /start ولم يبحث)
+- \`distinct_searchers\`: من بحث فعلاً
+- \`premium_users\`: مستخدمو الـ premium النشطون
+لا تتعاد على نفس الأداة لو نتيجتها لا تعجب الـ admin — جرّب أداة مختلفة أو
+اشرح للـ admin أن الرقمين مختلفان ولماذا.
+
 ## \`tel:*\` counters (counters)
 - \`tel:tg:searched\` — عدد marches الـ Telegram fallback leg
 - \`tel:tg:found\` — كم مرة رجع نتيجة
