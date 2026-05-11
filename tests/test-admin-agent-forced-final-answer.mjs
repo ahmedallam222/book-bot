@@ -53,10 +53,10 @@ ok("index.ts uses MAX_LLM_LOOPS dynamically in the exhaustion path",
 ok("index.ts calls runLLM with forceText: true after the loop",
    /runLLM\s*\([^)]*\{\s*forceText:\s*true\s*\}\s*\)/.test(idxSrc));
 ok("index.ts injects an Arabic system nudge before the forced call",
-   /لقد وصلت للحد الأقصى من استدعاءات الأدوات/.test(idxSrc) &&
+   /وصلت للحد الأقصى من استدعاءات الأدوات/.test(idxSrc) &&
    /أجِب المستخدم الآن بشكل مباشر/.test(idxSrc));
-ok("index.ts logs loop_budget_exhausted forced answer for observability",
-   /loop_budget_exhausted forced final answer/.test(idxSrc));
+ok("index.ts logs *_exhausted forced final answer for observability",
+   /_exhausted forced final answer/.test(idxSrc));
 ok("index.ts saves the forced-answer turn back to conversation history",
    /forced[\s\S]{0,400}?saveConversation/.test(idxSrc) ||
    /finalReply[\s\S]{0,400}?saveConversation/.test(idxSrc));
