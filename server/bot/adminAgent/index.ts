@@ -23,6 +23,7 @@ import { seedDefaultsIfEmpty, ensureCloudflarePrimary } from "./llmProviders.js"
 import {
   createBurstGuard, inspectCall, recordExecution, recordRefusal,
   refusalToolContent, callSignature, isOverTokenBudget,
+  MAX_REFUSALS_BEFORE_BAIL,
 } from "./loopGuards.js";
 
 // ── config ────────────────────────────────────────────────
@@ -236,7 +237,7 @@ async function handleMessage(
   //   the conversation, abort the loop and trigger the forced-
   //   final-answer rather than letting context overflow.
   const burstGuard = createBurstGuard();
-  let abortedReason: "loop_budget" | "token_budget" | null = null;
+  let abortedReason: "loop_budget" | "token_budget" | "refusal_storm" | null = null;
 
   // ── tool loop ───────────────────────────────
   let loops = 0;
@@ -363,6 +364,20 @@ async function handleMessage(
       }
     }
 
+    // ── Refusal-storm bail-out ──
+    // If the model has ignored ≥ MAX_REFUSALS_BEFORE_BAIL refusal
+    // messages already this turn, it isn't going to read another
+    // one. Stop wasting iterations on refused-then-retried calls
+    // and jump to the forced-final-answer path.
+    if (burstGuard.refusedCount >= MAX_REFUSALS_BEFORE_BAIL) {
+      abortedReason = "refusal_storm";
+      L.warn(
+        "adminAgent",
+        `refusal storm at iter ${loops} (refused=${burstGuard.refusedCount}); bailing to forced-final-answer`,
+      );
+      break;
+    }
+
     // Send typing action for next loop
     await bot.sendChatAction(chatId, "typing");
   }
@@ -373,16 +388,22 @@ async function handleMessage(
   //     tools across all 24 iterations).
   //   - `abortedReason === "token_budget"` (we broke out early
   //     because the conversation grew too large).
+  //   - `abortedReason === "refusal_storm"` (the model ignored
+  //     ≥ MAX_REFUSALS_BEFORE_BAIL of our refusal messages this
+  //     turn).
   //
   // Either way, do ONE final LLM call WITHOUT tools and with an
   // explicit Arabic system nudge to summarise. This guarantees the
   // user always sees a real answer instead of a generic apology.
-  const reason: "loop_budget" | "token_budget" =
+  const reason: "loop_budget" | "token_budget" | "refusal_storm" =
     abortedReason ?? "loop_budget";
   const reasonAr =
     reason === "token_budget"
       ? `تجاوزت سعة المحادثة (${burstGuard.refusedCount} استدعاء مكرّر مرفوض، loops=${loops}).`
-      : `وصلت للحد الأقصى من استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة، ${burstGuard.refusedCount} استدعاء مكرّر مرفوض).`;
+      : reason === "refusal_storm"
+        ? `كرّرت نفس استدعاء الأداة ${burstGuard.refusedCount} مرة بنفس المعطيات. ` +
+          "غالباً الأداة المختارة ليست هي الصحيحة للسؤال — جرّب أداة مختلفة أو راجع تعريفات الأدوات."
+        : `وصلت للحد الأقصى من استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة، ${burstGuard.refusedCount} استدعاء مكرّر مرفوض).`;
   try {
     const finalMessages: LLMMessage[] = [
       ...messages,
