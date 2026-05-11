@@ -20,11 +20,21 @@ import { runLLM, type LLMMessage, type LLMToolCall } from "./llm.js";
 import { getToolDefinitions, findTool, type ToolRunCtx } from "./tools.js";
 import { loadConversation, saveConversation, clearConversation } from "./conversation.js";
 import { seedDefaultsIfEmpty, ensureCloudflarePrimary } from "./llmProviders.js";
+import {
+  createBurstGuard, inspectCall, recordExecution, recordRefusal,
+  refusalToolContent, callSignature, isOverTokenBudget,
+} from "./loopGuards.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
 
-const MAX_LLM_LOOPS   = 12;   // guard against infinite tool loops (bumped from 8 in PR-A2)
+// MAX_LLM_LOOPS: hard ceiling on tool-call iterations per admin
+// message. Bumped from 12 → 24 alongside the loopGuards (duplicate
+// detector + token-budget guard) which short-circuit pathological
+// loops far earlier; the higher ceiling is now only there to let
+// legitimate long admin workflows (audit chains, multi-tool reports)
+// run to completion.
+const MAX_LLM_LOOPS   = 24;
 const MAX_TOOL_OUTPUT  = 4000; // chars — keep context tight (bumped from 2500 for quick_overview)
 
 // ── pending writes (one per admin) ────────────────────────
@@ -218,10 +228,29 @@ async function handleMessage(
 
   const toolDefs = getToolDefinitions();
 
+  // ── per-turn loop guards ────────────────────
+  // - burstGuard: catches the most common pathology (model gets
+  //   stuck re-issuing the SAME tool call) at iteration 3, way
+  //   before MAX_LLM_LOOPS would fire.
+  // - token budget: if a chain of tools dumps too much data into
+  //   the conversation, abort the loop and trigger the forced-
+  //   final-answer rather than letting context overflow.
+  const burstGuard = createBurstGuard();
+  let abortedReason: "loop_budget" | "token_budget" | null = null;
+
   // ── tool loop ───────────────────────────────
   let loops = 0;
   while (loops < MAX_LLM_LOOPS) {
     loops++;
+
+    if (isOverTokenBudget(messages)) {
+      abortedReason = "token_budget";
+      L.warn(
+        "adminAgent",
+        `token budget exceeded at iter ${loops}; bailing to forced-final-answer`,
+      );
+      break;
+    }
     let res;
     try {
       res = await runLLM(messages, toolDefs);
@@ -295,15 +324,37 @@ async function handleMessage(
         return; // Wait for confirm/cancel
       }
 
+      // ── duplicate-call guard (read tools only) ──
+      // Write tools never hit this branch — they go through the
+      // confirm flow and require explicit user opt-in, so they
+      // can't be looped by the model.
+      const sig = callSignature(tool.name, args);
+      const decision = inspectCall(burstGuard, sig);
+      if (!decision.allow) {
+        recordRefusal(burstGuard, sig);
+        L.info(
+          "adminAgent",
+          `duplicate tool call refused: ${tool.name} (${decision.reason}, count=${decision.count})`,
+        );
+        messages.push({
+          role:         "tool",
+          tool_call_id: tc.id,
+          content:      refusalToolContent(tool.name, decision),
+        });
+        continue;
+      }
+
       // ── read tool → execute immediately ──
       try {
         const result = await tool.run(args, ctx);
+        recordExecution(burstGuard, sig);
         messages.push({
           role:         "tool",
           tool_call_id: tc.id,
           content:      truncate(JSON.stringify(result)),
         });
       } catch (e) {
+        recordExecution(burstGuard, sig);
         messages.push({
           role:         "tool",
           tool_call_id: tc.id,
@@ -316,20 +367,29 @@ async function handleMessage(
     await bot.sendChatAction(chatId, "typing");
   }
 
-  // ── Loop budget exhausted → force a final text answer ───────
-  // Some models (notably Llama 3.3 70B) occasionally keep re-issuing
-  // the same tool call instead of summarising the result they already
-  // received. Rather than punting the user with "try a simpler
-  // question", do one last LLM call WITHOUT tools and with an
-  // explicit nudge to summarise. This guarantees the user always
-  // sees a real answer.
+  // ── Loop terminated without a final text answer → force one ─
+  // Reaches here when either:
+  //   - The while-loop hit MAX_LLM_LOOPS (model kept asking for
+  //     tools across all 24 iterations).
+  //   - `abortedReason === "token_budget"` (we broke out early
+  //     because the conversation grew too large).
+  //
+  // Either way, do ONE final LLM call WITHOUT tools and with an
+  // explicit Arabic system nudge to summarise. This guarantees the
+  // user always sees a real answer instead of a generic apology.
+  const reason: "loop_budget" | "token_budget" =
+    abortedReason ?? "loop_budget";
+  const reasonAr =
+    reason === "token_budget"
+      ? `تجاوزت سعة المحادثة (${burstGuard.refusedCount} استدعاء مكرّر مرفوض، loops=${loops}).`
+      : `وصلت للحد الأقصى من استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة، ${burstGuard.refusedCount} استدعاء مكرّر مرفوض).`;
   try {
     const finalMessages: LLMMessage[] = [
       ...messages,
       {
         role: "system",
         content:
-          `لقد وصلت للحد الأقصى من استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة). ` +
+          `${reasonAr} ` +
           "بناءً على ما لديك من نتائج الأدوات أعلاه، أجِب المستخدم الآن بشكل مباشر ومختصر بدون أي استدعاءات أدوات إضافية. " +
           "لو ما لديك ما يكفي من معلومات، اعتذر بأدب واقترح صياغة بديلة للسؤال.",
       },
@@ -337,7 +397,7 @@ async function handleMessage(
     const finalRes = await runLLM(finalMessages, toolDefs, { forceText: true });
     const finalReply =
       finalRes.content ||
-      `⚠ وصلت لحد استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة) ولم يتسنَّ تلخيص الناتج. جرّب سؤالاً أبسط.`;
+      `⚠ ${reasonAr} لم يتسنَّ تلخيص الناتج. جرّب سؤالاً أبسط.`;
     try {
       await bot.sendMessage(chatId, finalReply, { parse_mode: "Markdown" });
     } catch {
@@ -348,15 +408,12 @@ async function handleMessage(
     await saveConversation(uid, history);
     L.info(
       "adminAgent",
-      `loop_budget_exhausted forced final answer via ${finalRes.providerUsed} in ${finalRes.ms}ms`,
+      `${reason}_exhausted forced final answer via ${finalRes.providerUsed} in ${finalRes.ms}ms (refused=${burstGuard.refusedCount}, loops=${loops})`,
     );
   } catch (e) {
     const errMsg = String(e instanceof Error ? e.message : e).slice(0, 200);
-    L.warn("adminAgent", "loop_budget forced-text fallback failed", { err: errMsg });
-    await bot.sendMessage(
-      chatId,
-      `⚠ وصلت لحد استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة). جرّب سؤالاً أبسط.`,
-    );
+    L.warn("adminAgent", "forced-text fallback failed", { err: errMsg, reason });
+    await bot.sendMessage(chatId, `⚠ ${reasonAr} جرّب سؤالاً أبسط.`);
   }
 }
 
