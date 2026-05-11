@@ -52,7 +52,22 @@ export interface LLMProvider {
 /** Stable ID for the Cloudflare provider — referenced by the upsert
  * migration so existing Redis-seeded installs gain Cloudflare as
  * primary without resetting admin customisations. */
-export const CLOUDFLARE_PROVIDER_ID = "cloudflare-gpt-oss-120b";
+export const CLOUDFLARE_PROVIDER_ID = "cloudflare-llama-3.3-70b";
+
+/** Current Cloudflare model id. Llama 3.3 70B FP8 fast: fast (fp8
+ * quantization), supports function calling on the OpenAI-compat
+ * endpoint, and unlike `@cf/openai/gpt-oss-120b` does not require
+ * Workers-AI Run / Responses format (that endpoint's validator
+ * rejects assistant messages with tool_calls, causing HTTP 400 for
+ * any multi-turn tool conversation). */
+export const CLOUDFLARE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+export const CLOUDFLARE_NAME  = "Cloudflare Llama 3.3 70B FP8";
+
+/** Legacy provider/model identifiers that were tried earlier — the
+ * migration auto-rewrites these so prod installs don't get stuck on
+ * the broken row after upgrade. */
+const CLOUDFLARE_LEGACY_IDS    = ["cloudflare-gpt-oss-120b"];
+const CLOUDFLARE_LEGACY_MODELS = ["@cf/openai/gpt-oss-120b"];
 
 /** Build the Cloudflare provider object. Account id is interpolated
  * into the baseUrl because Cloudflare's OpenAI-compat endpoint is
@@ -60,9 +75,9 @@ export const CLOUDFLARE_PROVIDER_ID = "cloudflare-gpt-oss-120b";
 function buildCloudflareProvider(priority: number): LLMProvider {
   return {
     id:       CLOUDFLARE_PROVIDER_ID,
-    name:     "Cloudflare GPT-OSS 120B",
+    name:     CLOUDFLARE_NAME,
     baseUrl:  `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_AI_ACCOUNT_ID}/ai/v1`,
-    model:    "@cf/openai/gpt-oss-120b",
+    model:    CLOUDFLARE_MODEL,
     apiKey:   CLOUDFLARE_AI_API_TOKEN,
     priority,
     enabled:  true,
@@ -209,15 +224,65 @@ export async function seedDefaultsIfEmpty(): Promise<{ seeded: number }> {
  *   skipped="already_set" — admin already has a Cloudflare row
  */
 export async function ensureCloudflarePrimary(): Promise<
-  | { added: true;  priority: number }
-  | { added: false; reason: "no_keys" | "already_set" }
+  | { added:   true;  priority: number }
+  | { added:   false; reason: "no_keys" }
+  | { added:   false; reason: "already_set" }
+  | { added:   false; reason: "model_migrated"; from: string; to: string }
+  | { added:   false; reason: "id_migrated";    fromId: string; toId: string }
 > {
   if (!CLOUDFLARE_AI_ACCOUNT_ID || !CLOUDFLARE_AI_API_TOKEN) {
     return { added: false, reason: "no_keys" };
   }
-  const existing = await getProvider(CLOUDFLARE_PROVIDER_ID).catch(() => null);
-  if (existing) return { added: false, reason: "already_set" };
 
+  // ── (1) Legacy-ID migration ────────────────────────────────────
+  // Old installs (PR #148) used CLOUDFLARE_PROVIDER_ID =
+  // "cloudflare-gpt-oss-120b". We renamed it because the model
+  // changed — rewrite under the new ID, preserving priority and
+  // any admin-overridden apiKey, then drop the old row.
+  for (const legacyId of CLOUDFLARE_LEGACY_IDS) {
+    if (legacyId === CLOUDFLARE_PROVIDER_ID) continue;
+    const legacyRow = await getProvider(legacyId).catch(() => null);
+    if (legacyRow) {
+      const migrated: LLMProvider = {
+        ...legacyRow,
+        id:    CLOUDFLARE_PROVIDER_ID,
+        name:  CLOUDFLARE_NAME,
+        model: CLOUDFLARE_MODEL,
+        // Keep admin-overridden apiKey if it differs from the env var.
+        apiKey: legacyRow.apiKey || CLOUDFLARE_AI_API_TOKEN,
+      };
+      await setProvider(migrated);
+      await removeProvider(legacyId);
+      L.info(
+        "adminAgent",
+        `Cloudflare provider id migrated: ${legacyId} → ${CLOUDFLARE_PROVIDER_ID} (model ${legacyRow.model} → ${CLOUDFLARE_MODEL})`,
+      );
+      return { added: false, reason: "id_migrated", fromId: legacyId, toId: CLOUDFLARE_PROVIDER_ID };
+    }
+  }
+
+  // ── (2) Model migration ────────────────────────────────────────
+  // Same-ID row exists but model is one we know is broken on CF's
+  // compat endpoint — auto-update it. Keep priority and apiKey.
+  const existing = await getProvider(CLOUDFLARE_PROVIDER_ID).catch(() => null);
+  if (existing) {
+    if (CLOUDFLARE_LEGACY_MODELS.includes(existing.model)) {
+      const migrated: LLMProvider = {
+        ...existing,
+        name:  CLOUDFLARE_NAME,
+        model: CLOUDFLARE_MODEL,
+      };
+      await setProvider(migrated);
+      L.info(
+        "adminAgent",
+        `Cloudflare model migrated: ${existing.model} → ${CLOUDFLARE_MODEL}`,
+      );
+      return { added: false, reason: "model_migrated", from: existing.model, to: CLOUDFLARE_MODEL };
+    }
+    return { added: false, reason: "already_set" };
+  }
+
+  // ── (3) Fresh insert ───────────────────────────────────────────
   // Pick priority = min(1, lowestExistingPriority - 1) so we always land
   // ahead of whatever the admin currently has, even if they manually
   // re-prioritised cerebras to 0.
