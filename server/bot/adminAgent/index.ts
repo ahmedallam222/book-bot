@@ -316,8 +316,48 @@ async function handleMessage(
     await bot.sendChatAction(chatId, "typing");
   }
 
-  // Safety: if we exhausted the loop budget
-  await bot.sendMessage(chatId, "⚠ وصلت لحد الـ tool calls (8 دورات). جرّب سؤال أبسط.");
+  // ── Loop budget exhausted → force a final text answer ───────
+  // Some models (notably Llama 3.3 70B) occasionally keep re-issuing
+  // the same tool call instead of summarising the result they already
+  // received. Rather than punting the user with "try a simpler
+  // question", do one last LLM call WITHOUT tools and with an
+  // explicit nudge to summarise. This guarantees the user always
+  // sees a real answer.
+  try {
+    const finalMessages: LLMMessage[] = [
+      ...messages,
+      {
+        role: "system",
+        content:
+          `لقد وصلت للحد الأقصى من استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة). ` +
+          "بناءً على ما لديك من نتائج الأدوات أعلاه، أجِب المستخدم الآن بشكل مباشر ومختصر بدون أي استدعاءات أدوات إضافية. " +
+          "لو ما لديك ما يكفي من معلومات، اعتذر بأدب واقترح صياغة بديلة للسؤال.",
+      },
+    ];
+    const finalRes = await runLLM(finalMessages, toolDefs, { forceText: true });
+    const finalReply =
+      finalRes.content ||
+      `⚠ وصلت لحد استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة) ولم يتسنَّ تلخيص الناتج. جرّب سؤالاً أبسط.`;
+    try {
+      await bot.sendMessage(chatId, finalReply, { parse_mode: "Markdown" });
+    } catch {
+      await bot.sendMessage(chatId, finalReply);
+    }
+    history.push({ role: "user", content: userText });
+    history.push({ role: "assistant", content: finalReply });
+    await saveConversation(uid, history);
+    L.info(
+      "adminAgent",
+      `loop_budget_exhausted forced final answer via ${finalRes.providerUsed} in ${finalRes.ms}ms`,
+    );
+  } catch (e) {
+    const errMsg = String(e instanceof Error ? e.message : e).slice(0, 200);
+    L.warn("adminAgent", "loop_budget forced-text fallback failed", { err: errMsg });
+    await bot.sendMessage(
+      chatId,
+      `⚠ وصلت لحد استدعاءات الأدوات (${MAX_LLM_LOOPS} دورة). جرّب سؤالاً أبسط.`,
+    );
+  }
 }
 
 // ── graceful shutdown ─────────────────────────────────────
