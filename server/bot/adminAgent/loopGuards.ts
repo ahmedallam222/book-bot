@@ -43,6 +43,14 @@ export const DUPLICATE_HARD_CAP = 6;
  * the final completion + tool definitions. */
 export const TOKEN_BUDGET_CHARS = 200_000;
 
+/** When the burst guard has refused this many tool calls in a single
+ * turn, the model is clearly ignoring the refusal messages and
+ * retrying anyway. Bail out of the loop and go straight to the
+ * forced-final-answer path. Without this, prod observed cases where
+ * the model burned all 24 iterations on refused-then-retried calls
+ * to the same wrong tool. */
+export const MAX_REFUSALS_BEFORE_BAIL = 4;
+
 /** Build a stable signature for a tool call. Sorts JSON keys so
  * `{a:1,b:2}` and `{b:2,a:1}` hash to the same string. */
 export function callSignature(toolName: string, args: Record<string, unknown>): string {
