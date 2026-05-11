@@ -73,3 +73,6 @@ uploads/
 downloads/
 *.pdf
 !test-fixtures/*.pdf
+
+# Telegram-channels join script runtime output
+config/telegram-channels.joined.json

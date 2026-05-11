@@ -10,6 +10,11 @@ import { normalizeForCache, canonicalizeForCache, urlFilenameRelevance } from ".
 import { L } from "./logger.js";
 import type { BookResult, SourceConfig } from "./types.js";
 import { searchWelib, type WelibSearchResult } from "./welibResolver.js";
+import {
+  searchTelegramChannels,
+  type TelegramSearchResult,
+  TG_FALLBACK_ENABLED,
+} from "./telegramFallback.js";
 import { isNonBookNoorUrl } from "./noorBookResolver.js";
 import {
   TIMEOUT_FC_SEARCH, TIMEOUT_FC_SCRAPE,
@@ -233,16 +238,27 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // taking the other down.
   const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 25_000);
   const welibMaxResults = Number(process.env.WELIB_SEARCH_MAX_RESULTS || 8);
-  const [fcSettled, welibSettled] = await Promise.allSettled([
+
+  // Telegram-channels fallback is a 3rd parallel leg. The userbot is a
+  // member of ~30 Arabic book channels and `messages.searchGlobal`
+  // returns up to ~30 PDFs across all of them (and many other public
+  // channels Telegram surfaces in global results) in one MTProto RPC,
+  // typically in <500ms. When credentials aren't set the call short-
+  // circuits to `[]` so this leg is free on dev boxes.
+  const [fcSettled, welibSettled, tgSettled] = await Promise.allSettled([
     fcPaused
       ? Promise.resolve([] as BookResult[])
       : unifiedSearch(arabicDomains, query, true),
     welibSourceConfig
       ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
       : Promise.resolve([] as WelibSearchResult[]),
+    TG_FALLBACK_ENABLED
+      ? searchTelegramChannels(query)
+      : Promise.resolve([] as TelegramSearchResult[]),
   ]);
   const fcResults = fcSettled.status === "fulfilled" ? fcSettled.value : [];
   const welibResults = welibSettled.status === "fulfilled" ? welibSettled.value : [];
+  const tgResults = tgSettled.status === "fulfilled" ? tgSettled.value : [];
 
   const seen = new Set(fcResults.map((r) => r.url));
   const welibAsBookResults: BookResult[] = [];
@@ -254,7 +270,14 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     }
   }
 
-  const merged = [...fcResults, ...welibAsBookResults];
+  const tgAsBookResults: BookResult[] = [];
+  for (const t of tgResults) {
+    if (seen.has(t.url)) continue;
+    seen.add(t.url);
+    tgAsBookResults.push(telegramResultToBookResult(t, query));
+  }
+
+  const merged = [...fcResults, ...welibAsBookResults, ...tgAsBookResults];
   const enriched = (await enrichWithMarkdown(merged, query))
     .sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
@@ -491,6 +514,52 @@ async function unifiedSearch(
     }
     return [];
   }
+}
+
+// ── TELEGRAM_SOURCE / telegramResultToBookResult ──
+//
+// Telegram is a synthetic "source" — it doesn't have a public-web
+// surface that Firecrawl can crawl, so we model it as a SourceConfig
+// purely for analytics/telemetry parity. Every Telegram BookResult
+// flows through the same downstream pipeline as a welib hit:
+// pdfValidator → Llama prefilter → Mistral fallback → sendDocument.
+// The URL we attach is the synthetic `tg://msg/{channelId}/{msgId}`
+// (or `https://t.me/{username}/{msgId}` for public channels) — the
+// download path checks `isTelegramUrl(pdfUrl)` and routes to
+// telegramDownloadAndSend, which pulls the file via the gramjs client.
+
+const TELEGRAM_SOURCE: SourceConfig = {
+  domain:    "telegram.org",
+  name:      "تيليجرام",
+  emoji:     "✈️",
+  priority:  6,
+  isArabic:  true,
+  searchUrl: (q) => `https://t.me/s/?q=${encodeURIComponent(q)}`,
+};
+
+export function telegramResultToBookResult(
+  t:         TelegramSearchResult,
+  userQuery: string,
+): BookResult {
+  const title = t.fileName.replace(/\.pdf$/i, "").trim() ||
+                t.caption.split("\n")[0]?.slice(0, 80) ||
+                t.channelTitle;
+  const score = scoreResult(
+    { url: t.url, markdown: "", metadata: { title } },
+    t.url,
+    "direct_pdf",
+    userQuery,
+  );
+  return {
+    id:           `tg-${t.channelId}-${t.msgId}-${Date.now()}`,
+    title,
+    url:          t.url,
+    directPdfUrl: t.url,
+    source:       TELEGRAM_SOURCE,
+    access:       "direct_pdf",
+    accessReason: `telegram search hit (${t.channelTitle.slice(0, 40)})`,
+    _score:       score,
+  };
 }
 
 // ── welibResultToBookResult ────────────────────
