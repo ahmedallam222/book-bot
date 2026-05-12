@@ -50,8 +50,9 @@ ok("index.ts no longer hard-codes 8 in the user-facing exhaustion message",
    !/تول calls \(8/.test(idxSrc) && !/الـ tool calls \(8 دورات\)/.test(idxSrc));
 ok("index.ts uses MAX_LLM_LOOPS dynamically in the exhaustion path",
    /\$\{MAX_LLM_LOOPS\}/.test(idxSrc));
-ok("index.ts calls runLLM with forceText: true after the loop",
-   /runLLM\s*\([^)]*\{\s*forceText:\s*true\s*\}\s*\)/.test(idxSrc));
+ok("index.ts calls forced text-only LLM (runLLM forceText or streamFinalResponse) after the loop",
+   /runLLM\s*\([^)]*\{\s*forceText:\s*true\s*\}\s*\)/.test(idxSrc) ||
+   /streamFinalResponse\s*\(/.test(idxSrc));
 ok("index.ts injects an Arabic system nudge before the forced call",
    /وصلت للحد الأقصى من استدعاءات الأدوات/.test(idxSrc) &&
    /أجِب المستخدم الآن بشكل مباشر/.test(idxSrc));
