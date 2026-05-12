@@ -36,6 +36,9 @@ import {
   saveKnowledge, recallKnowledge, deleteKnowledge, knowledgeCount,
 } from "./memory.js";
 import { triggerHealthCheck, getProactiveLog } from "./proactive.js";
+import { exec as execCb } from "node:child_process";
+import { promisify } from "node:util";
+const execAsync = promisify(execCb);
 
 // ──────────────────────────────────────────────────────────
 export interface ToolRunCtx {
@@ -1174,6 +1177,490 @@ const TOOL_DIAGNOSE: Tool = {
 };
 
 // ══════════════════════════════════════════════════════════
+// PHASE 4: CODE EXECUTION — shell command tool
+// ══════════════════════════════════════════════════════════
+
+// Whitelist of allowed command prefixes. Everything else is rejected.
+const ALLOWED_COMMANDS: ReadonlyArray<{ prefix: string; description: string }> = [
+  { prefix: "docker compose logs",    description: "view container logs" },
+  { prefix: "docker compose ps",      description: "list containers" },
+  { prefix: "docker stats --no-stream", description: "container resource usage" },
+  { prefix: "df -h",                  description: "disk space" },
+  { prefix: "free -m",                description: "memory usage" },
+  { prefix: "uptime",                 description: "system uptime" },
+  { prefix: "cat /proc/loadavg",      description: "load average" },
+  { prefix: "redis-cli info",         description: "Redis server info" },
+  { prefix: "redis-cli dbsize",       description: "Redis DB size" },
+  { prefix: "redis-cli slowlog",      description: "Redis slow queries" },
+  { prefix: "wc -l",                  description: "line count" },
+  { prefix: "du -sh",                 description: "directory size" },
+  { prefix: "ls -la",                 description: "list files" },
+  { prefix: "tail ",                  description: "view end of file" },
+  { prefix: "head ",                  description: "view start of file" },
+  { prefix: "grep ",                  description: "search in files" },
+  { prefix: "curl -s",                description: "HTTP request" },
+  { prefix: "curl --silent",          description: "HTTP request" },
+  { prefix: "ps aux",                 description: "running processes" },
+  { prefix: "netstat -tlnp",          description: "listening ports" },
+  { prefix: "ss -tlnp",              description: "listening ports" },
+];
+
+const EXEC_TIMEOUT_MS = 15_000;
+const EXEC_MAX_OUTPUT = 3000; // chars
+
+const TOOL_EXEC_COMMAND: Tool = {
+  name:        "exec_command",
+  description: "نفّذ أمر shell على السيرفر (whitelisted فقط). مفيد لـ: logs, disk, memory, processes, Redis info.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      command: {
+        type: "string",
+        description: "الأمر المراد تنفيذه (مثلاً 'df -h', 'docker compose logs bot --tail 50', 'free -m')",
+      },
+    },
+    required: ["command"],
+  },
+  isWrite: true, // requires confirmation for safety
+  async run(args) {
+    const cmd = asStr(args.command).trim();
+    if (!cmd) throw new Error("command is empty");
+
+    // Security: check against whitelist
+    const allowed = ALLOWED_COMMANDS.find(a => cmd.startsWith(a.prefix));
+    if (!allowed) {
+      return {
+        error: "الأمر مش مسموح",
+        allowed_prefixes: ALLOWED_COMMANDS.map(a => `${a.prefix}  (${a.description})`),
+        tip: "استخدم أحد الأوامر المسموح بيها فقط.",
+      };
+    }
+
+    // Block dangerous patterns even in allowed commands
+    if (/[;&|`$]/.test(cmd) || cmd.includes("$(") || cmd.includes(">>")) {
+      throw new Error("الأمر يحتوي على أحرف غير مسموح بيها (;, &, |, `, $, >>)");
+    }
+
+    try {
+      const { stdout, stderr } = await execAsync(cmd, {
+        timeout: EXEC_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024, // 1MB
+        cwd: "/home/ubuntu/book-bot",
+      });
+      const output = (stdout || "").slice(0, EXEC_MAX_OUTPUT);
+      const errors = (stderr || "").slice(0, 500);
+      return {
+        command: cmd,
+        output: output || "(no output)",
+        ...(errors ? { stderr: errors } : {}),
+        truncated: (stdout || "").length > EXEC_MAX_OUTPUT,
+      };
+    } catch (e) {
+      const err = e as { killed?: boolean; code?: number; stderr?: string; message?: string };
+      if (err.killed) {
+        return { command: cmd, error: `timeout after ${EXEC_TIMEOUT_MS / 1000}s` };
+      }
+      return {
+        command: cmd,
+        exit_code: err.code,
+        error: (err.stderr || err.message || "unknown error").slice(0, 500),
+      };
+    }
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 4: REPORT GENERATION — formatted analytics report
+// ══════════════════════════════════════════════════════════
+
+const TOOL_GENERATE_REPORT: Tool = {
+  name:        "generate_report",
+  description: "اعمل تقرير شامل عن أداء البوت (يومي/أسبوعي/مخصص). بيجمع كل الـ stats في تقرير منسق.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      period: {
+        type: "string",
+        enum: ["today", "weekly", "full"],
+        description: "الفترة: today (اليوم), weekly (الأسبوع), full (كل الإحصاءات)",
+      },
+      include_sources: { type: "boolean", description: "ضمّن تفاصيل المصادر (default: true)" },
+      include_traces:  { type: "boolean", description: "ضمّن آخر الـ traces (default: false)" },
+    },
+    required: ["period"],
+  },
+  isWrite: false,
+  async run(args) {
+    const period    = asStr(args.period, "today");
+    const incSrc    = asBool(args.include_sources, true);
+    const incTraces = asBool(args.include_traces, false);
+
+    // Gather all data in parallel
+    const [daily, weekly, total, sources, queue, traces, funnel, topBooks] = await Promise.all([
+      getDailyStats().catch(() => null),
+      getWeeklyStats().catch(() => null),
+      getTotalStats().catch(() => null),
+      getSourceStats().catch(() => []),
+      getQueueStats().catch(() => null),
+      incTraces ? getRecentTraces(10).catch(() => []) : Promise.resolve([]),
+      getFunnelStats().catch(() => null),
+      getTopBooks(5).catch(() => []),
+    ]);
+
+    const pct = (n: number, d: number) => d > 0 ? `${Math.round((n / d) * 1000) / 10}%` : "N/A";
+
+    const report: Record<string, unknown> = {
+      generated_at: new Date().toISOString(),
+      period,
+    };
+
+    // Period-specific stats
+    if (period === "today" || period === "full") {
+      const d = daily as Record<string, number> | null;
+      if (d) {
+        report.today = {
+          requests:     d.requests ?? 0,
+          found:        d.found ?? 0,
+          success_rate: pct(d.found ?? 0, d.requests ?? 0),
+          downloads:    d.downloads ?? 0,
+          cache_hits:   d.cache_hits ?? 0,
+          searches:     d.searches ?? 0,
+        };
+      }
+    }
+
+    if (period === "weekly" || period === "full") {
+      report.weekly = weekly;
+    }
+
+    if (period === "full") {
+      const t = total as Record<string, number> | null;
+      if (t) {
+        report.total = {
+          requests:     t.requests ?? 0,
+          found:        t.found ?? 0,
+          success_rate: pct(t.found ?? 0, t.requests ?? 0),
+          users:        t.users ?? 0,
+        };
+      }
+    }
+
+    // Queue status
+    if (queue) report.queue = queue;
+
+    // Funnel
+    if (funnel) report.funnel = funnel;
+
+    // Top books
+    if (topBooks && (topBooks as unknown[]).length > 0) {
+      report.top_books = topBooks;
+    }
+
+    // Sources breakdown
+    if (incSrc && Array.isArray(sources)) {
+      const healthy = (sources as Array<{ ok: number; fail: number; autoDisabled: boolean }>)
+        .filter(s => !s.autoDisabled && s.ok + s.fail >= 1);
+      const failing = healthy
+        .filter(s => s.fail / (s.ok + s.fail) > 0.3)
+        .sort((a, b) => b.fail / (b.ok + b.fail) - a.fail / (a.ok + a.fail));
+      report.sources = {
+        total: (sources as unknown[]).length,
+        healthy: healthy.length - failing.length,
+        failing: failing.length,
+        problem_sources: failing.slice(0, 5).map((s: Record<string, unknown>) => ({
+          domain: s.domain, ok: s.ok, fail: s.fail, rate: s.successRate,
+        })),
+      };
+    }
+
+    // Traces
+    if (incTraces && Array.isArray(traces) && traces.length > 0) {
+      report.recent_traces = (traces as Array<{ book: string; outcome?: string; durationMs?: number }>)
+        .slice(0, 10)
+        .map(t => ({
+          book: t.book,
+          outcome: t.outcome ?? "unknown",
+          duration: t.durationMs ? `${Math.round(t.durationMs / 100) / 10}s` : "?",
+        }));
+    }
+
+    return report;
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 5: WEB SEARCH — internet lookup (Manus-style)
+// ══════════════════════════════════════════════════════════
+
+const TOOL_WEB_SEARCH: Tool = {
+  name:        "web_search",
+  description: "ابحث في الإنترنت عن معلومة أو حل مشكلة. بيستخدم DuckDuckGo API.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      query:  { type: "string", description: "استعلام البحث (بالعربي أو الإنجليزي)" },
+      max_results: { type: "integer", description: "أقصى عدد نتائج (default: 3, max: 5)" },
+    },
+    required: ["query"],
+  },
+  isWrite: false,
+  async run(args) {
+    const query      = asStr(args.query).trim();
+    const maxResults = Math.min(asNum(args.max_results, 3), 5);
+    if (!query) throw new Error("query is empty");
+
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`;
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10_000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json() as {
+        Abstract?: string;
+        AbstractSource?: string;
+        AbstractURL?: string;
+        RelatedTopics?: Array<{ Text?: string; FirstURL?: string }>;
+      };
+
+      const results: Array<{ title: string; url: string; snippet: string }> = [];
+
+      // Main abstract
+      if (data.Abstract) {
+        results.push({
+          title: data.AbstractSource || "Result",
+          url: data.AbstractURL || "",
+          snippet: data.Abstract.slice(0, 300),
+        });
+      }
+
+      // Related topics
+      if (data.RelatedTopics) {
+        for (const topic of data.RelatedTopics) {
+          if (results.length >= maxResults) break;
+          if (topic.Text && topic.FirstURL) {
+            results.push({
+              title: topic.Text.slice(0, 100),
+              url: topic.FirstURL,
+              snippet: topic.Text.slice(0, 200),
+            });
+          }
+        }
+      }
+
+      return {
+        query,
+        results_count: results.length,
+        results: results.length > 0 ? results : [{ title: "لا نتائج", url: "", snippet: "جرّب صياغة مختلفة للبحث." }],
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 5: SCHEDULED TASKS — recurring automated actions
+// ══════════════════════════════════════════════════════════
+
+// Scheduled tasks stored in Redis hash `admin:agent:schedules`
+const SCHEDULES_KEY  = "admin:agent:schedules";
+const MAX_SCHEDULES  = 10;
+
+interface ScheduledTask {
+  id:          string;
+  name:        string;
+  toolName:    string;
+  args:        Record<string, unknown>;
+  cronHuman:   string;     // human-readable schedule
+  intervalMs:  number;     // actual interval in ms
+  enabled:     boolean;
+  lastRun:     number | null;
+  nextRun:     number;
+  createdAt:   number;
+}
+
+const TOOL_LIST_SCHEDULES: Tool = {
+  name:        "list_schedules",
+  description: "عرض كل الـ scheduled tasks المجدولة.",
+  parameters:  { type: "object", properties: {} },
+  isWrite: false,
+  async run() {
+    const raw = await redis.hgetall(SCHEDULES_KEY);
+    if (!raw || Object.keys(raw).length === 0) {
+      return { schedules: [], note: "لا توجد مهام مجدولة حالياً." };
+    }
+    const schedules = Object.values(raw)
+      .map(v => { try { return JSON.parse(v) as ScheduledTask; } catch { return null; } })
+      .filter((s): s is ScheduledTask => s !== null)
+      .sort((a, b) => a.nextRun - b.nextRun);
+    return { count: schedules.length, schedules };
+  },
+};
+
+const TOOL_ADD_SCHEDULE: Tool = {
+  name:        "add_schedule",
+  description: "أضف مهمة مجدولة تتنفذ تلقائياً (مثلاً: تقرير يومي، health check كل 30 دقيقة).",
+  parameters:  {
+    type:       "object",
+    properties: {
+      name:       { type: "string", description: "اسم المهمة (مثلاً 'daily_report')" },
+      tool_name:  { type: "string", description: "اسم الأداة المراد تنفيذها" },
+      tool_args:  { type: "object", description: "arguments الأداة (JSON)" },
+      interval:   { type: "string", enum: ["15m", "30m", "1h", "2h", "6h", "12h", "24h"], description: "التكرار" },
+    },
+    required: ["name", "tool_name", "interval"],
+  },
+  isWrite: true,
+  async run(args) {
+    const name     = asStr(args.name).trim();
+    const toolName = asStr(args.tool_name).trim();
+    const toolArgs = (args.tool_args && typeof args.tool_args === "object" ? args.tool_args : {}) as Record<string, unknown>;
+    const interval = asStr(args.interval);
+
+    if (!name) throw new Error("name is required");
+    if (!findTool(toolName)) throw new Error(`tool '${toolName}' not found`);
+
+    // Check for write tools — scheduled write tools are not allowed
+    const targetTool = findTool(toolName);
+    if (targetTool?.isWrite) throw new Error("لا يمكن جدولة write tools (تحتاج تأكيد يدوي)");
+
+    const intervalMap: Record<string, number> = {
+      "15m": 15 * 60_000,
+      "30m": 30 * 60_000,
+      "1h":  60 * 60_000,
+      "2h":  2 * 60 * 60_000,
+      "6h":  6 * 60 * 60_000,
+      "12h": 12 * 60 * 60_000,
+      "24h": 24 * 60 * 60_000,
+    };
+    const intervalMs = intervalMap[interval];
+    if (!intervalMs) throw new Error(`interval must be one of: ${Object.keys(intervalMap).join(", ")}`);
+
+    // Check limit
+    const existing = await redis.hlen(SCHEDULES_KEY);
+    if (existing >= MAX_SCHEDULES) throw new Error(`الحد الأقصى ${MAX_SCHEDULES} مهام مجدولة`);
+
+    const id = `sched_${Date.now()}`;
+    const task: ScheduledTask = {
+      id,
+      name,
+      toolName,
+      args: toolArgs,
+      cronHuman: `every ${interval}`,
+      intervalMs,
+      enabled: true,
+      lastRun: null,
+      nextRun: Date.now() + intervalMs,
+      createdAt: Date.now(),
+    };
+
+    await redis.hset(SCHEDULES_KEY, id, JSON.stringify(task));
+    return { ok: true, task };
+  },
+};
+
+const TOOL_REMOVE_SCHEDULE: Tool = {
+  name:        "remove_schedule",
+  description: "احذف مهمة مجدولة.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      id: { type: "string", description: "معرّف المهمة (مثلاً 'sched_1234567890')" },
+    },
+    required: ["id"],
+  },
+  isWrite: true,
+  async run(args) {
+    const id = asStr(args.id).trim();
+    const removed = await redis.hdel(SCHEDULES_KEY, id);
+    if (removed === 0) throw new Error(`schedule '${id}' not found`);
+    return { ok: true, removed: id };
+  },
+};
+
+const TOOL_TOGGLE_SCHEDULE: Tool = {
+  name:        "toggle_schedule",
+  description: "فعّل أو عطّل مهمة مجدولة.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      id:      { type: "string", description: "معرّف المهمة" },
+      enabled: { type: "boolean", description: "true لتفعيل، false لتعطيل" },
+    },
+    required: ["id", "enabled"],
+  },
+  isWrite: true,
+  async run(args) {
+    const id      = asStr(args.id).trim();
+    const enabled = asBool(args.enabled);
+    const raw = await redis.hget(SCHEDULES_KEY, id);
+    if (!raw) throw new Error(`schedule '${id}' not found`);
+    const task = JSON.parse(raw) as ScheduledTask;
+    task.enabled = enabled;
+    if (enabled) task.nextRun = Date.now() + task.intervalMs;
+    await redis.hset(SCHEDULES_KEY, id, JSON.stringify(task));
+    return { ok: true, task };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 5: SCHEDULE RUNNER — runs scheduled tools
+// ══════════════════════════════════════════════════════════
+
+let _scheduleTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startScheduleRunner(): void {
+  if (_scheduleTimer) return;
+  // Check for due tasks every 60 seconds
+  _scheduleTimer = setInterval(async () => {
+    try {
+      const raw = await redis.hgetall(SCHEDULES_KEY);
+      if (!raw) return;
+      const now = Date.now();
+      for (const [id, json] of Object.entries(raw)) {
+        try {
+          const task = JSON.parse(json) as ScheduledTask;
+          if (!task.enabled || task.nextRun > now) continue;
+          const tool = findTool(task.toolName);
+          if (!tool || tool.isWrite) continue;
+
+          // Execute the tool
+          const result = await tool.run(task.args, { userId: "scheduler" });
+
+          // Store last run result in Redis (brief)
+          const resultStr = JSON.stringify(result).slice(0, 500);
+          await redis.set(
+            `admin:agent:schedule_result:${id}`,
+            resultStr,
+            "EX", 86400 * 7, // 7 day TTL
+          );
+
+          // Update schedule
+          task.lastRun = now;
+          task.nextRun = now + task.intervalMs;
+          await redis.hset(SCHEDULES_KEY, id, JSON.stringify(task));
+        } catch (e) {
+          // Log but don't crash the runner
+          const msg = e instanceof Error ? e.message : String(e);
+          await redis.set(
+            `admin:agent:schedule_error:${id}`,
+            msg.slice(0, 200),
+            "EX", 86400,
+          );
+        }
+      }
+    } catch { /* ignore top-level errors */ }
+  }, 60_000);
+}
+
+export function stopScheduleRunner(): void {
+  if (_scheduleTimer) {
+    clearInterval(_scheduleTimer);
+    _scheduleTimer = null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
 // REGISTRY
 // ══════════════════════════════════════════════════════════
 
@@ -1189,6 +1676,15 @@ export const TOOLS: Tool[] = [
   TOOL_GET_PROACTIVE_LOG,
   // ── diagnostic (1) ──
   TOOL_DIAGNOSE,
+  // ── Phase 4: code execution + reports (2) ──
+  TOOL_EXEC_COMMAND,
+  TOOL_GENERATE_REPORT,
+  // ── Phase 5: web search + scheduling (4) ──
+  TOOL_WEB_SEARCH,
+  TOOL_LIST_SCHEDULES,
+  TOOL_ADD_SCHEDULE,
+  TOOL_REMOVE_SCHEDULE,
+  TOOL_TOGGLE_SCHEDULE,
   // ── read (20) ──
   TOOL_QUICK_OVERVIEW,           // ← prefer this one for general questions
   TOOL_GET_COUNTERS,
