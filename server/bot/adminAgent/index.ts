@@ -25,6 +25,8 @@ import {
   refusalToolContent, callSignature, isOverTokenBudget,
   MAX_REFUSALS_BEFORE_BAIL,
 } from "./loopGuards.js";
+import { buildMemoryContext } from "./memory.js";
+import { startProactiveMonitoring, stopProactiveMonitoring } from "./proactive.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
@@ -102,6 +104,9 @@ export async function startAdminAgent(): Promise<void> {
   } catch (e) {
     L.error("adminAgent", `getMe failed: ${String(e).slice(0, 80)}`);
   }
+
+  // ── Phase 3: Start proactive monitoring ──
+  startProactiveMonitoring(bot);
 
   // ── /start ──────────────────────────────────
   bot.onText(/^\/start$/, async (msg) => {
@@ -219,10 +224,11 @@ async function handleMessage(
 
   await bot.sendChatAction(chatId, "typing");
 
-  // ── build messages array ────────────────────
+  // ── build messages array (with memory context) ──
   const history = await loadConversation(uid);
+  const memoryCtx = await buildMemoryContext(uid);
   const messages: LLMMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: SYSTEM_PROMPT + memoryCtx },
     ...history,
     { role: "user", content: userText },
   ];
@@ -440,5 +446,5 @@ async function handleMessage(
 
 // ── graceful shutdown ─────────────────────────────────────
 export async function stopAdminAgent(): Promise<void> {
-  // No-op in this MVP; the process's SIGTERM handler covers it.
+  stopProactiveMonitoring();
 }
