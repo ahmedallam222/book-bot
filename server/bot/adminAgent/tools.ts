@@ -1735,7 +1735,8 @@ const TOOL_FETCH_URL: Tool = {
 // ══════════════════════════════════════════════════════════
 
 // Safety: restrict to project directory and certain paths
-const ALLOWED_FILE_ROOTS = ["/home/ubuntu/book-bot", "/home/ubuntu/book-bot/logs"];
+// Includes both host path and Docker container path (/app)
+const ALLOWED_FILE_ROOTS = ["/home/ubuntu/book-bot", "/home/ubuntu/book-bot/logs", "/app", "/app/logs"];
 const MAX_FILE_READ  = 8000;
 const MAX_FILE_WRITE = 4000;
 
