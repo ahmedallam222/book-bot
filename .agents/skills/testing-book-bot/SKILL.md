@@ -7,7 +7,7 @@ description: Test the Telegram book-bot production runtime, source quality, and 
 
 ## When to use
 
-Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, smart cached-PDF behavior, or admin-toggle/event-driven features such as maintenance-mode announcements.
+Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, smart cached-PDF behavior, admin-toggle/event-driven features such as maintenance-mode announcements, or admin agent tools (exec_command, generate_report, web_search, scheduled tasks).
 
 ## Devin Secrets Needed
 
@@ -77,201 +77,160 @@ docker compose build bot
 docker compose up -d bot
 sleep 30
 docker compose ps bot              # expect: Up <time> (healthy)
-
-# 5. Confirm the deploy actually shipped the new code by greping a unique
-#    marker introduced by the PR inside the bundled output. Choose a token
-#    that did not exist before (a new identifier, comment, or string literal).
-docker compose exec -T bot grep -c '<NEW_MARKER>' /app/dist/index.cjs
-
-# 6. Restore the env backup.
-git stash pop || true
 ```
 
-Fail signals: `git pull` reports a non-fast-forward, `docker compose ps` reports `unhealthy`, the marker grep returns `0` (deploy used a stale layer or wrong branch), or the post-deploy logs contain `ETELEGRAM 409 Conflict` (old container did not stop).
-
-## Testing internal modules that need the bot's Redis (sidecar-container pattern)
-
-When testing a module that imports `./server/bot/redis.js` (e.g. AI providers, validators, suggestions, transliteration), running `npx tsx _harness.ts` directly on the EC2 host **fails with `ECONNREFUSED 127.0.0.1:6379`**. The bot's docker-compose Redis is on the internal `book-bot_default` network with no port binding to host.
-
-Fix: run the harness inside a sidecar `node:22-bookworm-slim` container attached to the same docker network and pointed at `redis:6379` (the docker service name).
+Alternative (faster when code is already on server, e.g. after `git merge` on server):
 
 ```bash
 cd /home/ubuntu/book-bot
-set -a && source .env && set +a   # load CLOUDFLARE_AI_*, etc.
-
-# 1. Write your harness at the repo root (mounted into /app inside the container).
-#    Imports work as expected: `import { foo } from "./server/bot/aiProviders/foo.js";`
-
-# 2. Run inside a sidecar container on the bot's network.
-docker run --rm \
-  --network book-bot_default \
-  -v /home/ubuntu/book-bot:/app \
-  -w /app \
-  -e REDIS_URL=redis://redis:6379 \
-  -e CLOUDFLARE_AI_ACCOUNT_ID=$CLOUDFLARE_AI_ACCOUNT_ID \
-  -e CLOUDFLARE_AI_API_TOKEN=$CLOUDFLARE_AI_API_TOKEN \
-  node:22-bookworm-slim \
-  npx tsx _harness.ts
+npm run build          # produces dist/index.cjs
+docker compose restart bot
+sleep 3
+docker compose logs bot --tail 10   # verify startup
 ```
 
-Why this works:
-- `--network book-bot_default` puts the sidecar in the same docker network as `bot` and `redis`, so DNS resolves `redis` to the right container.
-- `-v /home/ubuntu/book-bot:/app` shares the source tree (and `node_modules` — already installed for tsx, ioredis, etc.) so no `npm install` is needed.
-- The bot's prod container is **untouched** — there is no risk of starting a second Telegram polling process inside it.
-
-Gotchas learned in practice:
-
-- **Counter constants for cache-hit may not exist on the module.** Some modules (e.g. `llamaValidator`) write the verdict cache in the *caller* (here `pdfValidator.ts` writes to `mv:` keys), not in the module itself. So there is no `TEL_LLAMA_CACHE_HIT` export. Before importing every counter constant, grep for `^export const TEL_` in the module and import only what's actually exported. For cache-hit assertions, fall back to a raw key string.
-- **`redis.incr(...).catch(() => {})` is fire-and-forget.** Snapshot Redis ~200 ms after the call, not immediately, otherwise counters look like `0` because the increment hasn't flushed.
-- **The harness file should be temporary.** Place it at the repo root (e.g. `_test_<feature>.ts`), run it, then delete. Do **not** commit harness files — they're not part of CI and bypass the deterministic test suite.
-- **Cache pollution is usually harmless.** A working module's cache write stores legitimate output (e.g. `tlit:llama:<hash>` → `{"corrected":"ويندي درايدن"}`). This is indistinguishable from real traffic. Skip cleanup unless your test inputs are nonsense.
-- **Counter increments persist** in prod Redis, so a passing test leaves `+1` (or `+2`) on each counter. This is normally fine — they're observability counters, not state. If you need a clean baseline, snapshot before the test and report deltas, not absolute values.
-
-Example assertions for any Llama-style fail-open module:
-
-```ts
-// L1: fresh CF call
-//   - return is one of <expected verdict types>
-//   - tel:<ns>:<feature>_used incremented by exactly 1
-//   - exactly ONE of the verdict sub-counters incremented by 1
-//   - NONE of *_http_error / *_timeout / *_other_error / *_no_key incremented
-//   - latency below the module's hard timeout
-
-// L2: identical second call
-//   - returns deep-equal value (cache hit) OR same value (deterministic re-fetch)
-//   - if module owns cache: _used did NOT increment, _cache_hit incremented by 1, latency < 200ms
-//   - if cache lives in caller: _used incremented again — document this as expected behaviour
-```
-
-Validated 2026-05-10 on the Llama-on-CF trio (PRs #140 / #141 / #142): 6/6 assertions passed end-to-end; `correctTransliteration("لي وتيدصي درايدن")` returned `"ويندي درايدن"` in 179 ms.
-
-## Local deterministic cache/search/parser tests
-
-For backend-only cache/search/ranking/parser changes, prefer shell-only probes over Telegram UI tests when the behavior is deterministic and does not require real Firecrawl or Telegram delivery.
-
-Useful checks:
+After deploy, verify new code is in the bundle:
 
 ```bash
-# Verify smart cache key behavior without secrets.
-npx tsx -e 'import { canonicalizeForCache } from "./server/bot/text.ts"; const cases=["أرض زيكولا","ارض زيكولا","تحميل كتاب أرض زيكولا pdf","رواية أرض زيكولا نسخة pdf"]; for (const c of cases) console.log(c,"=>",canonicalizeForCache(c));'
-
-# Always verify TypeScript and bundled output.
-npm run typecheck
-npm run build
+# Grep for marker strings from the PR
+grep -o 'exec_command\|generate_report\|web_search\|list_schedules' dist/index.cjs | sort | uniq -c
 ```
 
-Expected for smart cached-PDF query matching: Arabic spelling variants and generic request wrappers such as `تحميل كتاب ... pdf` should resolve to the same canonical cache key. If storage cache behavior changes, also verify reads remain backward-compatible with legacy `book_query_normalized` rows.
+## Testing admin agent tools (Phase 4+5)
 
-## Testing the AI summary engine offline (no Telegram needed)
+### Pattern: sidecar Node.js for tool testing
 
-The summary feature (PR #19) ships a 9-provider AI failover stack. Before deploying engine-level changes (new providers, prompt edits, cache TTL changes, quota tweaks), run an adversarial harness against a local Redis with the real provider HTTP APIs. This validates the engine without sending a single Telegram message.
-
-### Setup
+Admin agent tools run inside the bot process. To test their logic without triggering a Telegram conversation, use the sidecar container pattern — run Node.js snippets inside the bot container that replicate the tool's logic against the same Redis:
 
 ```bash
-# Start a throwaway Redis (port 6379).
-docker run -d --name test-redis-summary -p 6379:6379 redis:7-alpine
-
-# Register only the AI keys you have (the registry skips unconfigured providers).
-export REDIS_URL=redis://127.0.0.1:6379
-# GEMINI_API_KEY, GROQ_API_KEY, etc. should already be in your env from the secrets store.
+ssh -i $HOME/.ssh/devin_aws_ubuntu_key ubuntu@<production-host>
+cd /home/ubuntu/book-bot && docker compose exec -T bot node - <<'NODE'
+const Redis = require("ioredis");
+const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379");
+// ... your test logic here ...
+await redis.quit();
+NODE
 ```
 
-### Pattern: tsx harness importing the engine directly
+### Testing exec_command whitelist + security
 
-Write a small `_test_summary.ts` at the repo root that imports `getBookSummary`, `checkAndConsumeUsage`, `kbAfterSuccess`, `normalizeForCache`, and `SUMMARY_DAILY_LIMIT_FREE`. Run with `npx tsx _test_summary.ts`. Cover at least these six cases — each is designed so a broken implementation produces visibly different output:
+The `exec_command` tool uses prefix-based whitelisting (21 prefixes) and a regex to block dangerous patterns (`;`, `&`, `|`, `` ` ``, `$`, `>>`).
 
-1. **PDF tier success** — send a known Hindawi PDF URL (e.g. `https://downloads.hindawi.org/books/61851406.pdf` for كليلة ودمنة). Assert `source==='pdf'`, `providerName.startsWith('gemini-')`, summary 600–3500 chars, ≥100 Arabic chars (`/[\u0600-\u06FF]/g`), `bookType !== 'unknown'`, latency < 60s, and that the Redis cache key `summary:v1:<normalizeForCache(book)>` exists after the call.
-2. **Novel spoiler-protection** — request `آنا كارنينا` with no PDF (forces text-tier through Wikipedia context). Assert `bookType==='novel'`, `spoilerLevel ∈ {critical, moderate}`, summary does NOT contain `/تنتحر|انتحار|قطار|ألقت\s*بنفسها/`, `source ∈ {context, wikipedia_only}`. Verify the keyboard would render `📖 *ملخص الرواية* — _بدون أي حرق_` for `spoilerLevel='critical'` or `📖 *ملخص الرواية*` for moderate.
-3. **Cache hit** — call `getBookSummary` twice for the same book. L2 must be < 200ms (typically 0–1ms), L2/L1 < 0.05, summaries deeply equal, providerName equal, Redis TTL between 2.5M–2.592M seconds (~30 days).
-4. **Failover** — set `ai:breaker:gemini-2.5-flash`, `ai:breaker:gemini-2.0-flash`, and `ai:breaker:gemini-flash-lite-latest` to `1` with TTL 600 in Redis, then call. Assert providerName is NOT a `gemini-*` and is one of the text-tier set (groq, cerebras, sambanova, openrouter, github-models, mistral, cloudflare, wikipedia-fallback). Always clean up the breaker keys afterward.
-5. **Keyboard wiring** — call `kbAfterSuccess(book, sessionId)` and assert `inline_keyboard[0].length === 1`, text matches exactly `📘  ملخص الكتاب` (note the double-space — deliberate), callback_data matches `/^sum:[0-9a-f]{12}$/`, and `Buffer.byteLength(callback_data, 'utf8') <= 64`.
-6. **Quota cap** — with a fresh user id, call `checkAndConsumeUsage(uid, false)` `limit + 1` times. The first `limit` must return `blocked=false` with the counter incrementing 1..limit. The `limit + 1`th must return `blocked=true` with the Redis counter rolled back to `limit` (NOT `limit + 1`). One more call with `premium=true` must return `blocked=false` without changing the counter.
+To test:
+1. **Whitelisted command**: Run `df -h` via `child_process.exec` — should return filesystem output
+2. **Non-whitelisted**: Check that `rm -rf /tmp` does NOT match any prefix → returns `"الأمر مش مسموح"` + `allowed_prefixes` array
+3. **Injection attempt**: `df -h; rm -rf /` — passes whitelist but regex catches semicolon → throws `"أحرف غير مسموح بيها"`
 
-### Gemini-API gotchas (May 2026)
+Key gotcha: The tool runs inside the Docker container with `cwd: "/home/ubuntu/book-bot"`. Inside the container, paths are relative to `/app`.
 
-- **`gemini-2.5-flash` requires `thinkingConfig: { thinkingBudget: 0 }`.** With the default thinking budget, Gemini 2.5 Flash spends ~95% of `maxOutputTokens` on internal reasoning (`thoughtsTokenCount` in `usageMetadata`), leaving only a few tokens for the actual response. The JSON arrives truncated mid-string and the response parser falls back to `bookType: 'unknown'` — which silently breaks novel spoiler-protection. Always set `thinkingBudget: 0` for non-reasoning tasks like JSON extraction. Also set `maxOutputTokens >= 2048` for safety margin.
-- **`gemini-1.5-flash` was retired from `v1beta`** and now returns `HTTP 404`. Use `gemini-flash-lite-latest` (alias for the latest stable lite Flash) as the deepest Gemini fallback.
-- **`gemini-2.0-flash` may return `RESOURCE_EXHAUSTED` with `limit: 0`** on some accounts — this is a Google billing-tier signal, not a code bug. Don't waste time debugging.
-- **List available models** with `curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"` to verify model names before assuming.
+### Testing generate_report
 
-## Safe runtime test checklist
+Replicate the report tool by reading the same Redis keys:
+- Daily stats: `stats:YYYYMMDD` hash
+- Queue: `llen queue:high`, `llen queue:normal`, `llen dlq`
+- Sources: source health stats from the storage layer
 
-1. Confirm only one actual Node process is running. The container normally has a `tini` wrapper plus one `node` child:
+Expected output shape: `{ generated_at, period, today: { requests, found, success_rate, downloads, cache_hits, searches }, queue: { highQueue, normalQueue, dlqSize } }`
+
+### Testing web_search
+
+The tool uses DuckDuckGo Instant Answer API (`https://api.duckduckgo.com/?q=...&format=json`). Test from inside the container to verify outbound HTTPS works:
 
 ```bash
-cd /home/ubuntu/book-bot
-docker compose exec -T bot sh -lc 'ps -o comm= | grep -c "^node$" || true; ps -o pid,ppid,comm,args'
+docker compose exec -T bot node -e "fetch('https://api.duckduckgo.com/?q=test&format=json').then(r=>r.json()).then(d=>console.log('OK',Object.keys(d).length)).catch(e=>console.log('FAIL',e.message))"
 ```
 
-Expected: count is `1`, and the process table shows `node dist/index.cjs` under `/sbin/tini -- node dist/index.cjs`.
+Expected result structure: `{ query, results_count, results: [{ title, url, snippet }] }`
 
-2. Confirm container/server health:
+### Testing scheduled tasks (CRUD)
+
+Schedules are stored in Redis hash `admin:agent:schedules`. Test the full lifecycle:
+
+1. **Add**: `redis.hset("admin:agent:schedules", id, JSON.stringify(task))` with a read tool (e.g. `get_today_stats`)
+2. **List**: `redis.hgetall("admin:agent:schedules")` — verify task appears
+3. **Toggle**: Parse, set `enabled: false`, write back
+4. **Remove**: `redis.hdel("admin:agent:schedules", id)` — verify returns 1
+5. **Verify removal**: `redis.hget` returns null
+
+**Safety gate test**: Attempting to schedule a write tool (e.g. `clear_cache`) should be rejected with `"لا يمكن جدولة write tools"`.
+
+### Schedule runner observability limitation
+
+The schedule runner uses `setInterval(callback, 60_000)` with a silent top-level `catch {}`. This makes it **impossible to observe from outside the process** whether the timer is actually firing.
+
+The runner logic itself (Redis read → findTool → execute → store result) works correctly when executed manually in a sidecar. But verifying the actual background timer requires either:
+- Adding `L.info("scheduleRunner", "tick")` logging inside the callback
+- Checking `admin:agent:schedule_result:<id>` keys after waiting >60s
+
+If the result key doesn't appear after 90s with a past-due task, the runner may not be executing. This is a known observability gap.
+
+## Testing admin agent sidecar container pattern
+
+For testing tools that interact with Redis (knowledge base, scheduled tasks, etc.), always use the sidecar pattern:
 
 ```bash
-cd /home/ubuntu/book-bot
-docker compose ps bot
-docker compose exec -T bot node -e 'const http=require("http");http.get("http://127.0.0.1:5000/api/health",r=>{let b="";r.on("data",c=>b+=c);r.on("end",()=>{console.log(r.statusCode,b);process.exit(r.statusCode===200&&JSON.parse(b).ok===true?0:1)})}).on("error",e=>{console.error(e.message);process.exit(1)})'
+docker compose exec -T bot node - <<'NODE'
+const Redis = require("ioredis");
+const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379");
+
+async function test() {
+  // Test knowledge base
+  await redis.hset("admin:agent:kb", "test_key", JSON.stringify({ value: "test", updatedAt: Date.now() }));
+  const result = await redis.hget("admin:agent:kb", "test_key");
+  console.log("KB write/read:", result ? "OK" : "FAIL");
+  await redis.hdel("admin:agent:kb", "test_key");
+
+  // Always clean up test data
+  await redis.quit();
+}
+test();
+NODE
 ```
 
-Expected: Docker status is `healthy`; `/api/health` returns HTTP 200 with `ok: true`.
+Key Redis keys for admin agent:
+- `admin:agent:kb` — knowledge base (hash)
+- `admin:agent:schedules` — scheduled tasks (hash)
+- `admin:agent:proactive_log` — health check history (list)
+- `admin:agent:schedule_result:<id>` — runner execution results (string, 7d TTL)
+- `admin:agent:schedule_error:<id>` — runner execution errors (string, 1d TTL)
 
-3. Verify Arabic UX/source-health strings from deployed source without importing the app. Strip Arabic tashkeel/combining marks before exact phrase checks because production copy may include diacritics such as `تحميلًا`/`مضمونًا`.
+## Sidecar gotchas
 
-Expected phrases include:
+- Counter constants like `EXEC_TIMEOUT_MS`, `EXEC_MAX_OUTPUT`, `MAX_SCHEDULES` are hardcoded in the bundle. In sidecar tests, replicate the same values (15000ms, 3000 chars, 10 max).
+- The bot container uses `ioredis` (not `redis`). Import with `require("ioredis")`.
+- `redis.incr` is fire-and-forget in some contexts — add a 200ms delay after writes before reading back.
+- The bot container does NOT have `curl` — use `wget` or Node.js `http`/`fetch` for HTTP.
 
-- `لا يوجد PDF مباشر صالح للإرسال`
-- `PDF فشل`
-- `تحميل محتمل`
-- `مدفوع/قراءة فقط`
-- `هذه نتائج معاينة وليست تحميلا مضمونا` after normalization
-- `⛔`
-- `معطل تلقائيا` after normalization
-- `autoDisabled`
-- `stats:source:`
+## Testing AI summary flow
 
-4. Verify source auto-disable through the running admin API with an isolated Redis key, then clean it up:
+Six deterministic test cases for the AI summary pipeline:
 
-```bash
-cd /home/ubuntu/book-bot
-TEST_DOMAIN='devin-test-source.invalid'
-docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" >/dev/null
-docker compose exec -T redis redis-cli hset "stats:source:${TEST_DOMAIN}" ok 0 fail 8 >/dev/null
-docker compose exec -T bot sh -lc 'node -e "const http=require(\"http\");const domain=\"devin-test-source.invalid\";const secret=process.env.DASHBOARD_SECRET;http.get({hostname:\"127.0.0.1\",port:5000,path:\"/api/admin/stats/sources\",headers:{Authorization:\"Bearer \"+secret}},res=>{let body=\"\";res.on(\"data\",c=>body+=c);res.on(\"end\",()=>{const parsed=JSON.parse(body);const row=parsed.data.find(s=>s.domain===domain);console.log(res.statusCode, JSON.stringify(row));process.exit(res.statusCode===200&&parsed.ok===true&&row&&row.ok===0&&row.fail===8&&row.rate===\"0%\"&&row.autoDisabled===true?0:1)})}).on(\"error\",e=>{console.error(e.message);process.exit(1)})"'
-docker compose exec -T redis redis-cli del "stats:source:${TEST_DOMAIN}" >/dev/null
-docker compose exec -T redis redis-cli exists "stats:source:${TEST_DOMAIN}"
-```
+1. **PDF-tier success path** — Gemini 2.5-flash via v1beta, `thinkingBudget: 0` (required), 3-paragraph Arabic summary
+2. **Novel spoiler-protection gate** — Novel titles should include spoiler warning in summary
+3. **Cache hit** — Second request for same title should return cached result (check `tel:cache:hit` counter)
+4. **Failover** — When Gemini is down, falls back to next provider in chain
+5. **Keyboard wiring** — "تحميل" and "ملخص" inline buttons should be present in response
+6. **Quota cap** — After daily quota exhausted, returns quota-exceeded message
 
-Expected: API returns the isolated row with `ok: 0`, `fail: 8`, `rate: "0%"`, `autoDisabled: true`; cleanup `EXISTS` returns `0`.
+Gemini gotchas:
+- Use `thinkingBudget: 0` for 2.5-flash (otherwise it hangs)
+- `1.5-flash` is retired from `v1beta` — use `v1` endpoint for it
+- Test accounts may not have Gemini quota — check provider stats first
 
-5. Check recent logs after testing:
+## Testing maintenance toggle and announcements
 
-```bash
-cd /home/ubuntu/book-bot
-START_TS=$(date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-docker compose logs --since="$START_TS" bot 2>&1 | grep -E 'uncaughtException|Firecrawl HTTP 401|Invalid token|409 Conflict' || true
-```
-
-Expected: no matches after test recovery. Historical 409 lines may exist if a previous session accidentally started a second polling process; final state should still show one actual Node process and no recent 409s.
-
-## Testing event-driven announcements (e.g. maintenance toggle)
-
-For features that listen to admin actions (Telegram inline button, dashboard `PUT`) and dispatch side-effects through process events (e.g. `bot:maintenance_ended` → `announceMaintenanceEnd(bot)`), the cheapest end-to-end verification path is to drive the dashboard PUT with the `DASHBOARD_SECRET` and watch logs + Redis state. No Telegram admin session needed.
-
-### Pattern: dashboard PUT triggers async event
+Toggle maintenance mode via dashboard API and verify the announcement side-effect:
 
 ```bash
-cd /home/ubuntu/book-bot
-TOKEN=$(sudo docker compose exec -T bot printenv DASHBOARD_SECRET | tr -d '\r\n')
+# Read the dashboard secret
+TOKEN=$(docker compose exec -T bot printenv DASHBOARD_SECRET)
 
-# Toggle ON
+# Enable maintenance
 curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"active":true}'
 
-sleep 2
-
-# Toggle OFF — this is the transition that fires the announcement
+# Disable maintenance (triggers announcement)
 curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"active":false}'
@@ -336,3 +295,5 @@ sudo docker compose exec -T bot printenv MY_NEW_ENV_VAR   # verify it loaded
 ## Reporting limitations
 
 If no logged-in Telegram Web/test-chat session is available, explicitly mark literal chat UI testing as untested. Ask Ahmed to send messages while logs are monitored, or provide a test Telegram session, if full chat UI proof is required. For event-driven side-effect features (announcements, alerts), a single visual confirmation from the user is usually enough — the dashboard-PUT pattern above proves the dispatch logic without involving Telegram.
+
+For the schedule runner, mark background execution testing as inconclusive if the `setInterval` callback cannot be observed. The runner logic can be verified via manual simulation in a sidecar container.
