@@ -47,6 +47,7 @@
 - [Bot commands](#-bot-commands)
 - [Premium tier](#-premium-tier)
 - [Admin dashboard](#-admin-dashboard)
+- [Admin AI agent](#-admin-ai-agent)
 - [REST API](#-rest-api)
 - [Security](#-security)
 - [Project structure](#-project-structure)
@@ -110,6 +111,7 @@ What makes it different from a generic Google search bot:
 | 🔧 **Maintenance mode** | One-click maintenance toggle. Auto-announces service-back to known groups when cleared. |
 | 🚨 **Auto-alerts** | Admin gets a Telegram DM when DLQ spikes, success rate drops, Firecrawl quota is near, or rate-limited. |
 | 📈 **Daily digest** | Auto-generated 24h report (active users, success rate, top books, per-source numbers) sent to admins each morning. |
+| 🤖 **Admin AI agent** | Second Telegram bot (`ADMIN_BOT_TOKEN`) you chat with in natural Arabic. ReAct loop over **59 tools** (stats, queue, sources, premium, broadcasts, code execution, web search, scheduled tasks, reports) with 9-provider LLM failover, write-confirm flow, conversation memory, proactive monitoring, and telemetry-driven circuit breaker. |
 
 ---
 
@@ -424,6 +426,7 @@ REDIS_URL=redis://redis:6379
 
 # ─── Admin & dashboard ──────────────────────────────
 ADMIN_IDS=123456789,987654321                  # comma-separated Telegram IDs
+ADMIN_BOT_TOKEN=                               # @BotFather token for the admin-agent bot (optional; empty = disabled)
 DASHBOARD_TOKEN=<long-random-string>           # bearer auth for /dashboard
 
 # ─── Operational tuning ─────────────────────────────
@@ -529,6 +532,54 @@ What you can do from it:
 
 ---
 
+## 🤖 Admin AI agent
+
+A **second Telegram bot** you talk to in plain Arabic — "كم مستخدم نشط النهارده؟", "عطّل مصدر hindawi.org", "اعمل تقرير أسبوعي" — that drives the same admin surface as the dashboard, but as a conversation.
+
+It is **disabled by default**. Set `ADMIN_BOT_TOKEN` to a separate `@BotFather` token (do **not** reuse `BOT_TOKEN` — Telegram only allows one polling connection per token) and the agent boots in-process on the next start. Only users whose IDs are in `ADMIN_IDS` can interact with it.
+
+### What it can do
+
+| Capability | Examples |
+|---|---|
+| 📊 **Read state** | Funnel, today/week/total stats, top books, per-source health, recent telemetry traces, queue + DLQ depth, PDF-validation breakdown, LLM-provider stats. |
+| 👥 **User ops** | `get_user`, `set_premium`, `revoke_premium`, `cancel_user_jobs`, `get_premium_info`, daily-limit overrides. |
+| 🔌 **Source ops** | `pause_source` / `unpause_source`, blacklist stats, source-health audit. |
+| 📢 **Broadcasts** | Plain Markdown to all / premium / active-7d, rate-limited at 30 msg/sec. |
+| 🔧 **Maintenance** | Toggle maintenance mode (auto-announces resume to known groups). |
+| 🧠 **Memory** | `save_knowledge` / `recall_knowledge` / `delete_knowledge` — long-term per-admin notes the agent surfaces proactively in the next conversation. |
+| ⏰ **Scheduling** | `add_schedule` / `list_schedules` / `toggle_schedule` / `remove_schedule` — cron-like recurring tasks (daily digest, weekly report, source-health audit). |
+| 📝 **Reports** | `generate_report` builds full Markdown reports (daily, weekly, premium audit, source health) on demand. |
+| 🔬 **Code & web** | `exec_command` (sandboxed shell), `web_search` (You.com), `fetch_url`, `read_file` / `write_file` / `list_dir` over the bot project + dist tree. |
+| 🧪 **A/B testing** | `create_ab_test` / `score_ab_variant` / `list_ab_tests` for prompt + UX experiments. |
+| 🧰 **Self-ops** | `list_llm_providers`, `add_llm_provider`, `update_llm_provider`, `set_llm_priority`, `llm_provider_stats`, `reset_llm_provider_stats` — manage the agent's own LLM chain at runtime. |
+
+### Safety model
+
+- Every **write** tool (`set_premium`, `broadcast`, `pause_source`, `toggle_maintenance`, `exec_command`, `clear_cache`, `clear_dlq`, …) is staged as a **pending write** and the agent asks for an Arabic confirmation phrase (`تأكيد`, `نفّذ`, `ok`) before running it. The unconfirmed write is dropped after a short TTL.
+- The agent is fenced by an **ADMIN_IDS allowlist**, a per-conversation token budget, a **duplicate-call detector** that aborts pathological tool loops, and a hard ceiling of 24 LLM iterations per message.
+- An **observability layer** (`server/bot/adminAgent/llmTelemetry.ts`) records per-provider success / error rates, p50/p95 latency, and a sliding-window streak counter. A soft circuit breaker temporarily demotes any provider that fails 3× within 5 minutes for 10 minutes — markers self-clear on TTL, so recovery is automatic.
+
+### LLM provider chain
+
+The agent runs on top of an OpenAI-compatible adapter with **9 providers** that failover in priority order. The default chain is:
+
+```
+1. cloudflare-llama-3.3-70b   (@cf/meta/llama-3.3-70b-instruct-fp8-fast — primary)
+2. cerebras-llama-3.3-70b
+3. groq-llama-3.3-70b
+4. github-models-gpt-4o
+5. openrouter-mixtral
+6. sambanova-llama-3.1-405b
+7. mistral-large
+8. gemini-1.5-pro
+9. you-com-llama-3.1-70b
+```
+
+All providers are configured via env vars (`CLOUDFLARE_AI_TOKEN`, `CEREBRAS_API_KEY`, …) and can be reordered / disabled at runtime via the agent's own `set_llm_priority` and `update_llm_provider` tools — **no redeploy needed**.
+
+---
+
 ## 🔌 REST API
 
 A minimal authenticated REST API for ops + integrations. All routes require `Authorization: Bearer <DASHBOARD_TOKEN>`.
@@ -618,6 +669,18 @@ book-bot/
 │       ├── weekly.ts                 ← weekly digest (top books + funnel)
 │       ├── dailyDigest.ts            ← daily admin DM
 │       ├── config.ts                 ← all constants + hard-blocked list
+│       │
+│       ├── adminAgent/               ← admin AI agent (separate Telegram bot)
+│       │   ├── index.ts              ← polling bootstrap, MAX_LLM_LOOPS, pending-write flow
+│       │   ├── prompt.ts             ← Arabic system prompt + confirm/cancel phrases
+│       │   ├── tools.ts              ← 59 tools (read + write + code + schedule)
+│       │   ├── llm.ts                ← dispatcher, retry, normalize, forceText mode
+│       │   ├── llmProviders.ts       ← 9-provider chain + CF-primary boot migration
+│       │   ├── llmTelemetry.ts       ← per-provider ok/err/latency + breaker
+│       │   ├── loopGuards.ts         ← duplicate-call detector + token budget
+│       │   ├── memory.ts             ← long-term per-admin knowledge surfacing
+│       │   ├── proactive.ts          ← monitoring loop → unsolicited admin DMs
+│       │   └── conversation.ts       ← per-admin history persistence
 │       │
 │       └── aiProviders/              ← 10 swappable AI adapters
 │           ├── registry.ts           ← failover order + selection
@@ -905,6 +968,7 @@ Issues for newcomers are labelled `good first issue`. Before you start a large f
 - [x] **Engagement: streak + 10 badges + tiered referrals** (v32.0)
 - [x] **Real weekly leaderboard with canonical-key normalization** (v32.1)
 - [x] **Hard-blocked domains list** (v32.0)
+- [x] **Admin AI agent** — second Telegram bot with ReAct loop, 59 tools, 9-provider LLM failover, write-confirm flow, memory, scheduling, reports, code execution, web search, per-provider telemetry breaker
 
 **Planned:**
 - [ ] Webhook mode (currently long-poll only)
