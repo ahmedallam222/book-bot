@@ -259,6 +259,136 @@ async function callOpenAICompat(
   }
 }
 
+// ── Streaming HTTP call (text-only, no tool calling) ─────────────
+
+const STREAM_TIMEOUT_MS = 60_000; // longer timeout for streaming
+
+async function* callOpenAICompatStream(
+  cfg: LLMProvider,
+  messages: LLMMessage[],
+): AsyncGenerator<string> {
+  const url = `${cfg.baseUrl}/chat/completions`;
+  const body: Record<string, unknown> = {
+    model:       cfg.model,
+    messages,
+    temperature: 0.3,
+    max_tokens:  2048,
+    stream:      true,
+  };
+  // No tools — streaming is only used for final text responses.
+
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), STREAM_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, {
+      method:  "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${cfg.apiKey}`,
+      },
+      body:   JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      const err = new Error(`HTTP ${r.status}: ${txt.slice(0, 300)}`) as
+        Error & { __httpStatus?: number };
+      err.__httpStatus = r.status;
+      throw err;
+    }
+    if (!r.body) throw new Error("no response body for streaming");
+
+    const reader  = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") return;
+        try {
+          const j = JSON.parse(payload) as {
+            choices?: Array<{ delta?: { content?: string | null } }>;
+          };
+          const chunk = j.choices?.[0]?.delta?.content;
+          if (chunk) yield chunk;
+        } catch { /* skip malformed SSE lines */ }
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── Public streaming dispatch ────────────────────────────────────
+
+export interface StreamLLMResult {
+  fullText:     string;
+  providerUsed: string;
+  ms:           number;
+}
+
+/**
+ * Stream a text-only LLM response (no tools). Calls `onChunk` for
+ * each text fragment as it arrives from the provider.
+ *
+ * Falls back to non-streaming `runLLM` if the provider doesn't
+ * support streaming (e.g. returns a non-SSE body).
+ */
+export async function runLLMStream(
+  messages: LLMMessage[],
+  onChunk: (text: string) => void,
+): Promise<StreamLLMResult> {
+  const all = await loadProviders();
+  if (all.length === 0) {
+    throw new Error("No LLM providers configured");
+  }
+  const ordered    = await reorderForBreaker(all);
+  const normalized = normalizeMessages(messages);
+
+  const errors: string[] = [];
+  for (const p of ordered) {
+    const t0 = Date.now();
+    try {
+      let fullText = "";
+      for await (const chunk of callOpenAICompatStream(p, normalized)) {
+        fullText += chunk;
+        onChunk(chunk);
+      }
+      const ms = Date.now() - t0;
+      markUsed(p.id).catch(() => {});
+      recordSuccess(p.id, ms).catch(() => {});
+      return { fullText: fullText || "(لا رد)", providerUsed: p.id, ms };
+    } catch (e) {
+      const ms  = Date.now() - t0;
+      const msg = String(e instanceof Error ? e.message : e).slice(0, 200);
+      const kind = (e as { __kind?: ReturnType<typeof classifyFailure> }).__kind
+        ?? classifyFailure(e);
+      L.warn("adminAgent", `stream ${p.id} failed`, { err: msg, ms, kind });
+      recordFailure(p.id, kind, msg, ms).catch(() => {});
+      errors.push(`${p.id}: ${msg}`);
+    }
+  }
+
+  // All streaming attempts failed — fall back to non-streaming
+  L.warn("adminAgent", "all streaming providers failed, falling back to non-streaming");
+  const fallback = await runLLM(messages, [], { forceText: true });
+  if (fallback.content) onChunk(fallback.content);
+  return {
+    fullText:     fallback.content || "(لا رد)",
+    providerUsed: fallback.providerUsed + " (non-stream fallback)",
+    ms:           fallback.ms,
+  };
+}
+
 // ── Test-only exports ────────────────────────────────────────────
 // Internal helpers exposed for unit tests. Not part of the runtime API.
 export const __test = { normalizeMessages, reorderForBreaker };
