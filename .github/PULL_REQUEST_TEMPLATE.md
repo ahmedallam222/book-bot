@@ -23,7 +23,7 @@ Closes #
 <!-- How did you test this change? Which tests did you run? -->
 - [ ] `npm run typecheck`
 - [ ] `npm run build`
-- [ ] `npm test` (45 deterministic tests)
+- [ ] `npm test` (64 deterministic tests)
 - [ ] اختبار يدوي على البوت (إذا كان تغييراً يمسّ المستخدم) / Manual bot test (if user-facing)
 
 ## لقطات شاشة / Screenshots
