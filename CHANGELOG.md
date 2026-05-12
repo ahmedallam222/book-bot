@@ -7,6 +7,98 @@
 
 ---
 
+## [Unreleased] — Admin AI agent: post-CF improvements (PRs #150 → #160)
+
+The section below documents the long tail of admin-agent PRs that
+landed on `main` between the CF-resilience release and today but
+never made it into the changelog. Each bullet is the PR title +
+why-it-matters; full prose is in each PR's body.
+
+### 🧠 PR #153 — Autonomous ReAct upgrade (memory, monitoring, diagnostics)
+- Promotes the admin agent from a flat tool-loop to a true ReAct
+  agent: structured `think` tool, multi-turn planning, per-admin
+  long-term `memory.ts` (`save_knowledge` / `recall_knowledge` /
+  `delete_knowledge`), proactive monitoring loop (`proactive.ts`)
+  that DMs the admin on DLQ spikes / source dips / quota warnings
+  without being asked, and a `diagnose` self-introspection tool.
+
+### 🛰️ PR #157 — Phase 4+5: code execution, reports, web search, scheduling
+- Adds four heavyweight tool families on top of the read/write
+  surface:
+  - `exec_command` — sandboxed shell with whitelist + timeout.
+  - `generate_report` — full Markdown reports (daily, weekly,
+    premium audit, source health) on demand.
+  - `web_search` — You.com adapter for live external lookups.
+  - `add_schedule` / `list_schedules` / `toggle_schedule` /
+    `remove_schedule` — cron-like recurring tasks driven by an
+    in-process scheduler (`startScheduleRunner` in `tools.ts`).
+
+### ⚡ PR #156 — Real-time streaming output
+- `runLLMStream()` in `llm.ts` streams the assistant's final answer
+  to Telegram via `editMessageText` chunks instead of waiting for
+  the full completion. Cuts perceived latency on long answers from
+  10–30s → 1–2s to first visible token.
+
+### 🛠 PR #159 — Twelve cross-cutting improvements
+- Bundles a dozen smaller upgrades across tools, planning, memory,
+  failure recovery, notifications, and an `create_ab_test` /
+  `score_ab_variant` / `list_ab_tests` mini-A/B framework.
+  See PR #159 body for the per-improvement breakdown.
+
+### 🧷 PR #160 — File-tool path whitelist for Docker
+- `read_file` / `write_file` / `list_dir` now accept the Docker
+  container's runtime paths (`/app`, `/app/dist`) in addition to
+  the host repo paths, so the agent can introspect its own bundle
+  in production.
+
+### 🛡️ PR #151 — Tool-loop pathology guard + ceiling bump
+- `loopGuards.ts` now catches duplicate-call storms at the root
+  (signature-based detector with token budget), and `MAX_LLM_LOOPS`
+  rises 12 → 24 because the guards short-circuit the pathological
+  loops far earlier — the higher ceiling only lets legitimate
+  long admin workflows (audit chains, multi-tool reports) complete.
+
+### ✍️ PR #150 — Forced final text answer on loop exhaustion
+- When the LLM blows through `MAX_LLM_LOOPS` of tool calls without
+  producing a final text answer, the dispatcher now does a final
+  text-only call with `runLLM(..., { forceText: true })` and an
+  Arabic system nudge to "summarise what you know so far". No more
+  silent "agent gave up" timeouts.
+
+### 🧮 PR #152 — `get_user_count` tool + refusal-storm early-break
+- New `get_user_count` tool answers the most common admin question
+  ("كم مستخدم؟") in one tool call. The dispatcher also bails out
+  early when the LLM emits ≥ `MAX_REFUSALS_BEFORE_BAIL` refusals in
+  a row (`loopGuards.ts:recordRefusal`), preventing the polite-
+  refusal spiral that used to burn the whole 24-iter budget.
+
+### 🧪 PR #154 — Restore no-retry prompt rule for CI test
+- Tiny CI-only fix: the prompt assertion in
+  `test-admin-agent-prompt.mjs` required a specific Arabic
+  no-retry instruction that PR #153 had reworded. Restored.
+
+### 🧪 Test coverage (post-CF)
+- `tests/test-admin-agent-forced-final-answer.mjs` — 13 probes.
+- `tests/test-admin-agent-loop-hardening.mjs` — covers duplicate
+  detector, token budget, `MAX_LLM_LOOPS=24`.
+- `tests/test-admin-agent-user-count.mjs` — `get_user_count` tool
+  registration + refusal-storm early-break.
+- `tests/test-admin-agent-wiring.mjs` — top-level smoke test that
+  the agent boot path wires memory / scheduler / proactive monitor.
+- All ~64 test files in `tests/` pass in CI (`npm test`).
+
+### 📝 Docs
+- `README.md` now has a dedicated "🤖 Admin AI agent" section
+  alongside the dashboard, listing capabilities, safety model, and
+  the 9-provider LLM chain.
+- `.env.example` documents `ADMIN_BOT_TOKEN` (was previously
+  required by `adminAgent/index.ts` but missing from the example).
+- "Done" roadmap in README adds the admin AI agent entry.
+- Project-structure tree in README adds the `adminAgent/` directory
+  with one-line annotations per module.
+
+---
+
 ## [Unreleased] — Admin agent: CF model fix + retry/breaker/telemetry
 
 ### 🐛 Bug fix — Cloudflare HTTP 400 on multi-turn tool conversations
@@ -413,7 +505,7 @@ users/day مع 13 طلب فقط — funnel ضعيف، المشكلة retention. 
 
 ---
 
-## [Unreleased] — UX Vibes Pass
+## [31.11.0] — UX Vibes Pass — 2026-05-06
 
 ### ✨ تجربة المستخدم — رسائل وتأثيرات متنوّعة
 
