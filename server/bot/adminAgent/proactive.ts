@@ -96,9 +96,18 @@ async function dispatchAlerts(alerts: ProactiveAlert[]): Promise<number> {
   const adminIds = Array.from(ADMIN_IDS);
   if (adminIds.length === 0) return 0;
 
+  // Import notification prefs check (lazy to avoid circular deps)
+  let checkSeverity: ((s: string) => Promise<boolean>) | null = null;
+  try {
+    const { shouldAlertBySeverity } = await import("./tools.js");
+    checkSeverity = shouldAlertBySeverity;
+  } catch { /* fallback: send all */ }
+
   let sent = 0;
   for (const alert of alerts) {
     if (!(await shouldSendAlert(alert.type))) continue;
+    // Check notification preferences — skip if severity below threshold
+    if (checkSeverity && !(await checkSeverity(alert.severity))) continue;
     const emoji =
       alert.severity === "critical" ? "🚨"
         : alert.severity === "warning" ? "⚠️"

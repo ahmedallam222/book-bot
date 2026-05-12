@@ -576,24 +576,40 @@ async function handleMessage(
         await status.showToolCall(tool.name);
       }
 
-      // ── read tool → execute immediately ──
+      // ── read tool → execute with retry (improvement #7) ──
+      let toolResult: unknown = null;
+      let toolError: string | null = null;
       try {
-        const result = await tool.run(args, ctx);
-        recordExecution(burstGuard, sig);
+        toolResult = await tool.run(args, ctx);
+      } catch (e1) {
+        // Retry once after a short delay (error recovery)
+        const err1 = String(e1 instanceof Error ? e1.message : e1).slice(0, 200);
+        L.info("adminAgent", `tool ${tool.name} failed, retrying`, { err: err1 });
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          toolResult = await tool.run(args, ctx);
+        } catch (e2) {
+          toolError = String(e2 instanceof Error ? e2.message : e2).slice(0, 300);
+        }
+      }
+      recordExecution(burstGuard, sig);
+      if (toolError) {
         messages.push({
           role:         "tool",
           tool_call_id: tc.id,
-          content:      truncate(JSON.stringify(result)),
-        });
-        if (tool.name !== "think") await status.showToolResult(tool.name, true);
-      } catch (e) {
-        recordExecution(burstGuard, sig);
-        messages.push({
-          role:         "tool",
-          tool_call_id: tc.id,
-          content:      JSON.stringify({ error: String(e instanceof Error ? e.message : e).slice(0, 300) }),
+          content:      JSON.stringify({
+            error: toolError,
+            hint:  "الأداة فشلت بعد محاولتين. جرّب أداة بديلة أو صيغة مختلفة.",
+          }),
         });
         if (tool.name !== "think") await status.showToolResult(tool.name, false);
+      } else {
+        messages.push({
+          role:         "tool",
+          tool_call_id: tc.id,
+          content:      truncate(JSON.stringify(toolResult)),
+        });
+        if (tool.name !== "think") await status.showToolResult(tool.name, true);
       }
     }
 
