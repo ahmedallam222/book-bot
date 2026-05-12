@@ -27,6 +27,7 @@ import {
 } from "./loopGuards.js";
 import { buildMemoryContext } from "./memory.js";
 import { startProactiveMonitoring, stopProactiveMonitoring } from "./proactive.js";
+import { startScheduleRunner, stopScheduleRunner } from "./tools.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
@@ -327,6 +328,9 @@ export async function startAdminAgent(): Promise<void> {
 
   // ── Phase 3: Start proactive monitoring ──
   startProactiveMonitoring(bot);
+
+  // ── Phase 5: Start schedule runner ──
+  startScheduleRunner();
 
   // ── /start ──────────────────────────────────
   bot.onText(/^\/start$/, async (msg) => {
@@ -654,4 +658,5 @@ async function handleMessage(
 // ── graceful shutdown ─────────────────────────────────────
 export async function stopAdminAgent(): Promise<void> {
   stopProactiveMonitoring();
+  stopScheduleRunner();
 }
