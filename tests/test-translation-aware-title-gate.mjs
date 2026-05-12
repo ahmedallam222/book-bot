@@ -83,7 +83,7 @@ const cases = [
   // 1:1 character ratio (1 Latin + 1 Arabic) to hit the tie path.
   // (The previous "abج" was 2 Latin + 1 Arabic = Latin-dominant, which
   //  exercised the "same-script" branch, not the tie branch — so the
-  //  test passed for the wrong reason. Devin Review #133 follow-up.)
+  //  test passed for the wrong reason. code review #133 follow-up.)
   ["aج",             "Atomic Habits",                false, "Strict char-count tie on left → unknown → false"],
 ];
 
@@ -94,7 +94,7 @@ for (const [book, sig, want, label] of cases) {
 
 // Explicitly assert detectScript classifies the tie input correctly. Without
 // this probe, the boolean `false` from the tie case above could come from
-// either branch (real tie OR same-script fallthrough) — see Devin Review
+// either branch (real tie OR same-script fallthrough) — see code review
 // #133 follow-up. This catches future regressions where, e.g., the tie
 // comparison `l > a` is changed to `l >= a` (which would silently make
 // every tied input resolve to "latin" and skip the unknown branch).

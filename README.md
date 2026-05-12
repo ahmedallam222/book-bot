@@ -1027,7 +1027,6 @@ This project stands on the shoulders of:
 - [Google Gemini](https://ai.google.dev) for high-quality Arabic summary generation.
 - [node-telegram-bot-api](https://github.com/yagop/node-telegram-bot-api) maintainers — by far the most stable JS Telegram lib.
 - [Drizzle ORM](https://orm.drizzle.team) for typed migrations that don't drift.
-- [Devin](https://devin.ai) — the AI engineer that helped land 100+ PRs over the project's life.
 
 ---
 

@@ -706,7 +706,7 @@ async function performFullSearch(
   if (validUrls.length > 1) {
     // Kept inside the multi-URL guard so single-/zero-candidate
     // requests don't pay for `redis.keys("stats:source:*")` +
-    // N×HGETALL (Devin Review #32 caught this when the init was
+    // N×HGETALL (code review on #32 caught this when the init was
     // briefly hoisted).
     // نستخدم trustRate (ok / (ok+fail+mistralRejected)) بدل successRate
     // البسيط (ok / (ok+fail)). الفرق: لو مصدر بيرجع PDFs بنجاح بس Mistral

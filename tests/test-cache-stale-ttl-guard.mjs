@@ -29,7 +29,7 @@
 //        TTL, not return a degraded result).
 //   T7 — explanatory comment context preserved.
 //
-// Devin Review follow-up (PR #131 → this PR):
+// code review follow-up (PR #131 → this PR):
 //   T8  — hasRecentSearchCache also applies the same TTL guard. Without
 //         it the cache warmer (suggestions.ts:warmRelatedCache) sees
 //         poisoned keys as "recent" and skips re-searching them — the

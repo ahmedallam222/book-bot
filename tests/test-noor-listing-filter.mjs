@@ -139,7 +139,7 @@ ok(
 
 ok(
   "T7b — counter is attributed only to noor drops (not all cache filter drops)",
-  // Regression for Devin Review #134: must compute drop count from
+  // Regression for code review #134: must compute drop count from
   // isNoorListingResult specifically, not from the total filter
   // shrink which also includes isDisabled drops.
   /noorDropped\s*=\s*cached\.filter\(\s*isNoorListingResult\s*\)\.length/.test(engineSrc) &&

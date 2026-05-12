@@ -193,7 +193,7 @@ expect("verify.ts no longer carries the buggy ad-hoc welib regex",
 
 // ── S5b: isWelibHost contract (welibResolver.ts source) ─────────
 // Pin the welib-host detection contract so future regex regressions
-// (e.g. the bare-domain bug Devin Review flagged in PR #128) don't
+// (e.g. the bare-domain bug code review flagged in PR #128) don't
 // silently sneak back in.
 
 console.log("\n─── S5b: isWelibHost contract (welibResolver.ts) ───");

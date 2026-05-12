@@ -111,7 +111,7 @@ ok(
 );
 
 ok(
-  "T11 — counters use project-standard tel:dl:* prefix (regression for Devin Review on #136)",
+  "T11 — counters use project-standard tel:dl:* prefix (regression for code review on #136)",
   // Every download-related telemetry counter in the project uses the
   // tel:dl: prefix. The original P3 commit accidentally introduced
   // tel:download: which broke ops dashboards filtering on tel:dl:*.

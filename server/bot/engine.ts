@@ -174,7 +174,7 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
     // attributed *every* `sizeBefore - filtered.length` drop to the
     // noor-listing counter, which over-counted whenever a result was
     // dropped purely because its source domain was auto-disabled
-    // (Devin Review on #134).
+    // (code review on #134).
     const noorDropped = cached.filter(isNoorListingResult).length;
     const filtered = cached.filter(
       (r) => !isDisabled(r.url) && !isDisabled(r.directPdfUrl || "") && !isNoorListingResult(r),
