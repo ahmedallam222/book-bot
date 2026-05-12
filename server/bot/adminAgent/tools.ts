@@ -32,6 +32,10 @@ import {
   publicView, type LLMProvider,
 } from "./llmProviders.js";
 import { getProviderStats, resetProviderTelemetry } from "./llmTelemetry.js";
+import {
+  saveKnowledge, recallKnowledge, deleteKnowledge, knowledgeCount,
+} from "./memory.js";
+import { triggerHealthCheck, getProactiveLog } from "./proactive.js";
 
 // ──────────────────────────────────────────────────────────
 export interface ToolRunCtx {
@@ -925,11 +929,267 @@ const TOOL_SET_LLM_PRIORITY: Tool = {
 };
 
 // ══════════════════════════════════════════════════════════
+// PHASE 1: REASONING — think tool (ReAct pattern)
+// ══════════════════════════════════════════════════════════
+
+const TOOL_THINK: Tool = {
+  name:        "think",
+  description: "فكّر بصوت عالي — خطط، حلل، تأمّل. استخدم هذا قبل أي tool call عشان تنظم أفكارك.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      thought: { type: "string", description: "التفكير أو التحليل أو الخطة" },
+    },
+    required: ["thought"],
+  },
+  isWrite: false,
+  async run(args) {
+    return { thought: asStr(args.thought), note: "تابع للخطوة التالية في خطتك." };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 2: MEMORY — knowledge base tools
+// ══════════════════════════════════════════════════════════
+
+const TOOL_SAVE_KNOWLEDGE: Tool = {
+  name:        "save_knowledge",
+  description: "احفظ معلومة مهمة في الذاكرة الدائمة. تبقى حتى بعد /reset. استخدمها لحفظ incidents, قرارات, patterns.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      key:   { type: "string", description: "مفتاح قصير (مثلاً 'welib_outage_may2026')" },
+      value: { type: "string", description: "المعلومة (max 1000 char)" },
+    },
+    required: ["key", "value"],
+  },
+  isWrite: false,  // knowledge saves are non-destructive — no confirm needed
+  async run(args) {
+    const key   = asStr(args.key);
+    const value = asStr(args.value);
+    if (!key || key.length < 2)    throw new Error("key too short (min 2 chars)");
+    if (!value || value.length < 3) throw new Error("value too short");
+    await saveKnowledge(key, value);
+    const count = await knowledgeCount();
+    return { ok: true, key, stored_entries: count };
+  },
+};
+
+const TOOL_RECALL_KNOWLEDGE: Tool = {
+  name:        "recall_knowledge",
+  description: "استرجع معلومات من الذاكرة الدائمة. بدون query يرجع كل المحفوظات.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      query: { type: "string", description: "كلمات بحث (اختياري — بدونها يرجع الكل)" },
+    },
+  },
+  isWrite: false,
+  async run(args) {
+    const query   = asStr(args.query) || undefined;
+    const entries = await recallKnowledge(query);
+    if (entries.length === 0) return { entries: [], note: "الذاكرة فاضية. استخدم save_knowledge لحفظ معلومات." };
+    return {
+      count:   entries.length,
+      entries: entries.map(e => ({
+        key:       e.key,
+        value:     e.value,
+        updatedAt: new Date(e.updatedAt).toISOString(),
+      })),
+    };
+  },
+};
+
+const TOOL_DELETE_KNOWLEDGE: Tool = {
+  name:        "delete_knowledge",
+  description: "امسح معلومة من الذاكرة الدائمة.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      key: { type: "string", description: "المفتاح المراد حذفه" },
+    },
+    required: ["key"],
+  },
+  isWrite: true,  // deletion requires confirm
+  async run(args) {
+    const key = asStr(args.key);
+    const ok  = await deleteKnowledge(key);
+    return ok
+      ? { ok: true, deleted: key }
+      : { ok: false, error: `key '${key}' not found` };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 3: PROACTIVE MONITORING tools
+// ══════════════════════════════════════════════════════════
+
+const TOOL_TRIGGER_HEALTH_CHECK: Tool = {
+  name:        "trigger_health_check",
+  description: "شغّل فحص صحة يدوي فوراً. يفحص: success rate، queue، DLQ، sources. ويبعت alerts لو فيه مشاكل.",
+  parameters:  { type: "object", properties: {} },
+  isWrite:     false,
+  async run() {
+    const result = await triggerHealthCheck();
+    return {
+      alerts_found:     result.alerts.length,
+      alerts_dispatched: result.dispatched,
+      alerts: result.alerts.map(a => ({
+        type:     a.type,
+        severity: a.severity,
+        message:  a.message,
+      })),
+      note: result.alerts.length === 0
+        ? "كل حاجة تمام — مفيش anomalies."
+        : `تم اكتشاف ${result.alerts.length} مشكلة.`,
+    };
+  },
+};
+
+const TOOL_GET_PROACTIVE_LOG: Tool = {
+  name:        "get_proactive_log",
+  description: "آخر نتائج الفحوصات الصحية التلقائية (آخر 10).",
+  parameters:  {
+    type:       "object",
+    properties: {
+      limit: { type: "integer", description: "max 20 (default 10)" },
+    },
+  },
+  isWrite:     false,
+  async run(args) {
+    const limit = Math.min(asNum(args.limit, 10), 20);
+    const log = await getProactiveLog(limit);
+    return { entries: log, count: log.length };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// PHASE 4: DIAGNOSTIC — structured problem diagnosis
+// ══════════════════════════════════════════════════════════
+
+const TOOL_DIAGNOSE: Tool = {
+  name:        "diagnose",
+  description: "تشخيص شامل لمشكلة محددة. يجمع stats + sources + traces + logs في مكان واحد ويرجع ملخص.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      area: {
+        type: "string",
+        description: "المنطقة المراد تشخيصها: 'search' | 'download' | 'source' | 'queue' | 'general'",
+      },
+      source_domain: {
+        type: "string",
+        description: "(اختياري) domain المصدر لتشخيصه تحديداً (مثلاً 'welib.st')",
+      },
+    },
+    required: ["area"],
+  },
+  isWrite: false,
+  async run(args) {
+    const area   = asStr(args.area, "general");
+    const domain = asStr(args.source_domain);
+
+    const [stats, sources, queue, traces, logs] = await Promise.all([
+      getDailyStats().catch(() => ({} as Record<string, number>)),
+      getSourceStats().catch(() => []),
+      getQueueStats().catch(() => ({ highQueue: 0, normalQueue: 0, dlqSize: 0, totalActiveJobs: 0 })),
+      getRecentTraces(10).catch(() => []),
+      getRecentLogs(30, "WARN"),
+    ]);
+
+    const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : null;
+    const requests = stats.requests ?? 0;
+    const found    = stats.found ?? 0;
+
+    const diagnosis: Record<string, unknown> = {
+      area,
+      timestamp: new Date().toISOString(),
+      overview: {
+        requests,
+        found,
+        success_rate_pct: pct(found, requests),
+        downloads:  stats.downloads ?? 0,
+        cache_hits: stats.cache_hits ?? 0,
+        queue_pending: queue.highQueue + queue.normalQueue,
+        dlq: queue.dlqSize,
+        active_jobs: queue.totalActiveJobs,
+      },
+    };
+
+    // Source-specific diagnosis
+    if (area === "source" && domain) {
+      const src = sources.find((s: { domain: string }) => s.domain === domain);
+      if (src) {
+        diagnosis.source = {
+          domain:          src.domain,
+          ok:              src.ok,
+          fail:            src.fail,
+          mistralRejected: src.mistralRejected,
+          successRate:     src.successRate,
+          trustRate:       src.trustRate,
+          autoDisabled:    src.autoDisabled,
+          manuallyDisabled: src.manuallyDisabled,
+        };
+        // Traces involving this source
+        diagnosis.related_traces = traces
+          .filter((t: { phases?: Array<{ phase: string }> }) =>
+            (t.phases || []).some((p: { phase: string }) =>
+              p.phase.toLowerCase().includes(domain.toLowerCase()),
+            ),
+          )
+          .slice(0, 5);
+      } else {
+        diagnosis.source = { error: `source '${domain}' not found in stats` };
+      }
+    }
+
+    // Problem sources (failing)
+    diagnosis.problem_sources = sources
+      .filter((s: { ok: number; fail: number; autoDisabled: boolean; manuallyDisabled: boolean }) =>
+        s.ok + s.fail >= 3 && s.fail / (s.ok + s.fail) > 0.5 && !s.autoDisabled && !s.manuallyDisabled,
+      )
+      .slice(0, 5)
+      .map((s: { domain: string; ok: number; fail: number; successRate: number }) => ({
+        domain: s.domain, ok: s.ok, fail: s.fail, rate: s.successRate,
+      }));
+
+    // Recent errors
+    diagnosis.recent_errors = logs
+      .filter((l: { level: string }) => l.level === "ERROR" || l.level === "WARN")
+      .slice(0, 10)
+      .map((l: { ts: number; ns: string; msg: string }) => ({
+        ts: new Date(l.ts).toISOString(), ns: l.ns, msg: l.msg,
+      }));
+
+    // Recent failed traces
+    diagnosis.failed_traces = traces
+      .filter((t: { outcome?: string }) => t.outcome && t.outcome !== "delivered" && t.outcome !== "cache_hit")
+      .slice(0, 5)
+      .map((t: { book: string; outcome?: string; durationMs?: number }) => ({
+        book: t.book, outcome: t.outcome ?? "unknown", durationMs: t.durationMs ?? 0,
+      }));
+
+    return diagnosis;
+  },
+};
+
+// ══════════════════════════════════════════════════════════
 // REGISTRY
 // ══════════════════════════════════════════════════════════
 
 export const TOOLS: Tool[] = [
-  // read (18)
+  // ── reasoning (1) ──
+  TOOL_THINK,                    // ← ALWAYS use this first
+  // ── memory (3) ──
+  TOOL_SAVE_KNOWLEDGE,
+  TOOL_RECALL_KNOWLEDGE,
+  TOOL_DELETE_KNOWLEDGE,
+  // ── proactive (2) ──
+  TOOL_TRIGGER_HEALTH_CHECK,
+  TOOL_GET_PROACTIVE_LOG,
+  // ── diagnostic (1) ──
+  TOOL_DIAGNOSE,
+  // ── read (20) ──
   TOOL_QUICK_OVERVIEW,           // ← prefer this one for general questions
   TOOL_GET_COUNTERS,
   TOOL_GET_TEL_COUNTERS_SUMMARY,
@@ -951,7 +1211,7 @@ export const TOOLS: Tool[] = [
   TOOL_GET_MAINTENANCE_STATUS,
   TOOL_LIST_LLM_PROVIDERS,
   TOOL_LLM_PROVIDER_STATS,
-  // write (15)
+  // ── write (15) ──
   TOOL_SET_PREMIUM,
   TOOL_GRANT_PREMIUM_30D,
   TOOL_REVOKE_PREMIUM,
