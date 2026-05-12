@@ -60,7 +60,7 @@ pgdata/
 coverage/
 .nyc_output/
 
-# ── Devin/session scratch artifacts (not for commit) ─────
+# ── Local scratch artifacts (not for commit) ─────────────
 _test_*.ts
 _test_*.mjs
 _probe_*.ts
