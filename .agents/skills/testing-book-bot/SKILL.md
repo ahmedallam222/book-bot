@@ -7,7 +7,7 @@ description: Test the Telegram book-bot production runtime, source quality, and 
 
 ## When to use
 
-Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, smart cached-PDF behavior, or admin-toggle/event-driven features such as maintenance-mode announcements.
+Use this skill when testing the Telegram book-bot production deployment for search/result quality, Arabic UX copy, source-health analytics, source auto-disable, deployment health, smart cached-PDF behavior, admin-toggle/event-driven features such as maintenance-mode announcements, or admin agent features (knowledge base, proactive monitoring, ReAct tools).
 
 ## Devin Secrets Needed
 
@@ -195,6 +195,124 @@ Write a small `_test_summary.ts` at the repo root that imports `getBookSummary`,
 - **`gemini-2.0-flash` may return `RESOURCE_EXHAUSTED` with `limit: 0`** on some accounts — this is a Google billing-tier signal, not a code bug. Don't waste time debugging.
 - **List available models** with `curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"` to verify model names before assuming.
 
+## Testing the admin agent (ReAct tools, knowledge base, proactive monitoring)
+
+The admin agent runs as a separate Telegram bot (`@kholasa_admin_bot`). Without a Telegram client session, test via bundle inspection, Redis state manipulation, and log verification.
+
+### Verifying new tools are deployed
+
+After deploying admin agent changes, confirm each tool name appears in the production bundle:
+
+```bash
+cd /home/ubuntu/book-bot
+for tool in think save_knowledge recall_knowledge delete_knowledge trigger_health_check get_proactive_log diagnose; do
+  echo -n "$tool: "
+  docker compose exec -T bot grep -c "\"$tool\"" /app/dist/index.cjs
+done
+```
+
+Expected: each tool returns ≥1. If 0, the tool definition wasn't compiled into the bundle.
+
+### Arabic text in esbuild bundles — gotcha
+
+esbuild escapes Arabic characters as uppercase Unicode sequences (e.g. `\u062A` not `\u062a`) in string literals. Direct `grep` or `String.includes()` with raw Arabic text through SSH + `docker exec` may fail due to encoding mismatches.
+
+**Workaround**: Use Node.js inside the container to search for escaped sequences, or search for a unique ASCII anchor near the Arabic text:
+
+```bash
+# Search via escaped sequence (note uppercase hex)
+docker compose exec -T bot node -e "
+const code = require('fs').readFileSync('/app/dist/index.cjs','utf8');
+console.log('found:', code.includes('\\\\u0644\\\\u0627 \\\\u062A\\\\u062A\\\\u0639'));
+"
+
+# Or search via ASCII anchor nearby
+docker compose exec -T bot node -e "
+const code = require('fs').readFileSync('/app/dist/index.cjs','utf8');
+const idx = code.indexOf('success_rate = found/requests');
+console.log('context:', code.slice(idx, idx+300));
+"
+```
+
+### Testing Knowledge Base CRUD via Redis
+
+The KB uses Redis hash `admin:agent:kb`. Each field is a key, and the value is JSON `{"value":"...","updatedAt":<unixMs>}`.
+
+```bash
+cd /home/ubuntu/book-bot
+
+# Write
+docker compose exec -T redis redis-cli HSET admin:agent:kb "test_key" \
+  '{"value":"test value here","updatedAt":1747028400000}'
+# Expected: 1 (new) or 0 (updated)
+
+# Read
+docker compose exec -T redis redis-cli HGET admin:agent:kb "test_key"
+# Expected: exact JSON back
+
+# Count
+docker compose exec -T redis redis-cli HLEN admin:agent:kb
+# Expected: ≥1
+
+# Delete
+docker compose exec -T redis redis-cli HDEL admin:agent:kb "test_key"
+# Expected: 1
+
+# Confirm
+docker compose exec -T redis redis-cli HGET admin:agent:kb "test_key"
+# Expected: (nil)
+```
+
+Always clean up test entries to avoid polluting the agent's real knowledge base.
+
+### Verifying proactive monitoring
+
+Proactive monitoring starts on boot with a 5-minute initial delay, then runs hourly. After the first check, results are logged to `admin:agent:proactive:log` (Redis list, capped at 100).
+
+```bash
+# Confirm monitoring started in boot logs
+docker compose logs bot --no-log-prefix 2>&1 | grep "monitoring started"
+# Expected: [proactive] monitoring started (interval=60min)
+
+# Check health check log (may be empty if <5 min since boot)
+docker compose exec -T redis redis-cli LRANGE admin:agent:proactive:log 0 2
+# Expected after first check: JSON with ts, alerts, requests, successRate, pending, dlq
+```
+
+Health check thresholds (from `proactive.ts`):
+- Success rate alert: < 50% (with ≥10 requests)
+- Queue backlog alert: > 50 pending
+- DLQ overflow alert: > 20 jobs
+- Source auto-pause: failure rate > 80% (with ≥5 attempts)
+- Alert cooldown: 4 hours per alert type
+
+Related Redis keys:
+- `admin:agent:proactive:log` — health check results (list)
+- `admin:agent:last_alert` — alert cooldown timestamps (hash)
+- `admin:agent:kb` — knowledge base (hash, 90d TTL)
+- `admin:agent:summary:<userId>` — conversation summaries (string, 30d TTL)
+
+### Verifying memory context integration
+
+The `buildMemoryContext()` function reads from `admin:agent:kb` and `admin:agent:summary:<uid>` to build a preamble appended to the system prompt on every turn. Verify the wiring by checking the bundle:
+
+```bash
+docker compose exec -T bot node -e "
+const code = require('fs').readFileSync('/app/dist/index.cjs','utf8');
+console.log(JSON.stringify({
+  hasBuildMemoryContext: code.includes('buildMemoryContext'),
+  hasMaybeSummarize: code.includes('maybeSummarize'),
+  hasSummaryKeyPrefix: code.includes('admin:agent:summary:'),
+}));
+"
+```
+
+All should be `true`. If `buildMemoryContext` is missing, memory injection per turn won't work.
+
+### Conversation auto-summarization
+
+The summarization triggers at `SUMMARY_THRESHOLD = 24` messages. Without a Telegram client, this can only be verified at the bundle level (confirm `maybeSummarize` and `SUMMARY_THRESHOLD` are in the bundle). For a full end-to-end test, send 24+ messages through the admin Telegram bot and verify `admin:agent:summary:<uid>` appears in Redis.
+
 ## Safe runtime test checklist
 
 1. Confirm only one actual Node process is running. The container normally has a `tini` wrapper plus one `node` child:
@@ -280,7 +398,7 @@ curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
 Expected log sequence (within a few seconds):
 
 ```
-[admin] 🔧maintenance OFF {"who":"dashboard"}
+[admin] maintenance OFF {"who":"dashboard"}
 [maintenanceAnnounce] Announcing maintenance end {"targets":N,"known":K,"env":E}
 [maintenanceAnnounce] Done {"sent":N,"failed":0,"removed":0,"total":N}
 ```
@@ -302,37 +420,42 @@ Alternatively, use `MAINTENANCE_ANNOUNCE_CHAT_IDS=<csv>` in the prod `.env` to p
 
 ### Pattern: testing the 60-second NX lock for idempotence
 
-The routes.ts handler only emits the event on a real ON→OFF transition (it reads `wasActive` before the toggle). To force a *second* `announceMaintenanceEnd` call within the lock window, manually flip the flag back to ON via Redis between PUT calls:
+The announcement uses a Redis NX lock (`maintenance:announce_lock`, TTL 60 s) to prevent duplicate announcements when multiple admin clients flip maintenance off in quick succession.
 
 ```bash
-# After the first OFF (which has already fired the announcement), the lock
-# `maintenance:announce:lock` is set with TTL up to 60s.
-sudo docker compose exec -T redis redis-cli TTL maintenance:announce:lock
-sudo docker compose exec -T redis redis-cli SET flag:maintenance 1   # bypass routes.ts guard
+cd /home/ubuntu/book-bot
+TOKEN=$(sudo docker compose exec -T bot printenv DASHBOARD_SECRET | tr -d '\r\n')
+
+# 1. Turn maintenance on first.
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":true}'
+
+sleep 1
+
+# 2. Turn it off — this fires the first announcement.
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":false}'
+
+sleep 1
+
+# 3. Turn on then off again (within 60 s).
+curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":true}'
+sleep 1
 curl -s -X PUT http://127.0.0.1:5000/api/admin/maintenance \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"active":false}'
 ```
 
-Expected log line: `[maintenanceAnnounce] Skipping — another announcement in flight`. The lock value should be **unchanged** — proving `SET ... NX` refused to overwrite.
+Expected: logs show exactly **one** `[maintenanceAnnounce] Announcing maintenance end` and one `[maintenanceAnnounce] Done`. The second OFF toggle within 60 s should **not** produce a second announcement.
 
-Clean up after testing:
-
-```bash
-sudo docker compose exec -T redis redis-cli DEL bot:known_groups bot:known_groups:meta maintenance:announce:lock flag:maintenance
-```
-
-### Critical gotcha: `docker compose restart` does NOT reload `.env`
-
-If you add or change an env var in `/home/ubuntu/book-bot/.env`, a plain `docker compose restart bot` will **not** pick it up — the variable will appear empty inside the container. To reload env vars you must recreate the container:
+After the test, confirm the lock expired:
 
 ```bash
-cd /home/ubuntu/book-bot
-sudo docker compose up -d bot
-sleep 8
-sudo docker compose exec -T bot printenv MY_NEW_ENV_VAR   # verify it loaded
+sleep 61
+docker compose exec -T redis redis-cli EXISTS maintenance:announce_lock
+# Expected: 0 (lock expired)
 ```
-
-## Reporting limitations
-
-If no logged-in Telegram Web/test-chat session is available, explicitly mark literal chat UI testing as untested. Ask Ahmed to send messages while logs are monitored, or provide a test Telegram session, if full chat UI proof is required. For event-driven side-effect features (announcements, alerts), a single visual confirmation from the user is usually enough — the dashboard-PUT pattern above proves the dispatch logic without involving Telegram.
