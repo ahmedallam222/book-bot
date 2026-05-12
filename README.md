@@ -16,11 +16,11 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com)
 
-![Lines of Code](https://img.shields.io/badge/Lines_of_Code-18k+-blueviolet?style=flat-square)
-![TS Modules](https://img.shields.io/badge/TS_Modules-68-blue?style=flat-square)
+![Lines of Code](https://img.shields.io/badge/Lines_of_Code-26k+-blueviolet?style=flat-square)
+![TS Modules](https://img.shields.io/badge/TS_Modules-85-blue?style=flat-square)
 ![Sources](https://img.shields.io/badge/Arabic_Sources-14-orange?style=flat-square)
 ![AI Providers](https://img.shields.io/badge/AI_Providers-10-purple?style=flat-square)
-![Tests](https://img.shields.io/badge/Smoke_Tests-45-success?style=flat-square)
+![Tests](https://img.shields.io/badge/Smoke_Tests-64-success?style=flat-square)
 
 <br/>
 
@@ -305,7 +305,7 @@ In groups: prefix the message with `بوت`, `bot`, `كتاب`, or mention `@<bo
 | Browser automation | Playwright (Chromium) | Used only for noor-book Cloudflare bypass |
 | Build | esbuild → CJS bundle | <600 KB output, ~50ms cold build |
 | Container | Docker + Compose | One-command dev + prod parity |
-| CI | GitHub Actions | typecheck + build + 45 smoke tests on every PR |
+| CI | GitHub Actions | typecheck + build + 64 smoke tests on every PR |
 
 ---
 
@@ -709,7 +709,7 @@ book-bot/
 │   ├── PRODUCTION.md                 ← deploy notes
 │   └── SERVER_SYNC_PLAN.md
 │
-├── tests/                            ← 45 deterministic smoke tests
+├── tests/                            ← 64 deterministic smoke tests
 │   └── test-*.mjs                    ← runs in CI via `npm test`
 ├── test-suite.mjs                    ← thin shim so the legacy CI loop still works
 ├── CHANGELOG.md
