@@ -62,14 +62,35 @@ export async function recallKnowledge(query?: string): Promise<KBEntry[]> {
   const all = await loadAllKB();
   if (!query) return all.slice(0, MAX_KB_RETURN);
   const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
-  return all
-    .filter(e =>
-      keywords.some(kw =>
-        e.key.toLowerCase().includes(kw) ||
-        e.value.toLowerCase().includes(kw),
-      ),
-    )
-    .slice(0, MAX_KB_RETURN);
+
+  // Score each entry by relevance (semantic-lite: keyword frequency + position)
+  const scored = all.map(e => {
+    const text = `${e.key} ${e.value}`.toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+      // Exact key match scores highest
+      if (e.key.toLowerCase() === kw) score += 10;
+      // Key contains keyword
+      else if (e.key.toLowerCase().includes(kw)) score += 5;
+      // Value contains keyword
+      if (e.value.toLowerCase().includes(kw)) {
+        // More occurrences = higher score
+        const count = text.split(kw).length - 1;
+        score += Math.min(count * 2, 8);
+      }
+    }
+    // Recency boost: newer entries get a small boost (0-2 points)
+    const ageMs = Date.now() - e.updatedAt;
+    const ageDays = ageMs / (24 * 3600_000);
+    score += Math.max(0, 2 - ageDays * 0.1);
+    return { entry: e, score };
+  });
+
+  return scored
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_KB_RETURN)
+    .map(s => s.entry);
 }
 
 export async function deleteKnowledge(key: string): Promise<boolean> {
@@ -127,9 +148,10 @@ export async function maybeSummarize(
 ): Promise<{ summary: string; trimmedMessages: LLMMessage[] } | null> {
   if (messages.length < SUMMARY_THRESHOLD) return null;
 
-  // Summarize the older half, keep the recent half as-is.
-  const splitPoint    = Math.floor(messages.length / 2);
-  const olderMessages = messages.slice(0, splitPoint);
+  // Keep the last 1/3 of messages (more recent context), summarize older 2/3.
+  const keepCount      = Math.max(8, Math.floor(messages.length / 3));
+  const splitPoint     = messages.length - keepCount;
+  const olderMessages  = messages.slice(0, splitPoint);
   const recentMessages = messages.slice(splitPoint);
 
   const existingSummary = await loadSummary(userId);

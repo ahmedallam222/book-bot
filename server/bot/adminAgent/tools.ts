@@ -38,6 +38,9 @@ import {
 import { triggerHealthCheck, getProactiveLog } from "./proactive.js";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile, writeFile, stat, readdir } from "node:fs/promises";
+import { join, resolve, extname } from "node:path";
+import { L } from "../logger.js";
 const execAsync = promisify(execCb);
 
 // ──────────────────────────────────────────────────────────
@@ -1611,21 +1614,26 @@ let _scheduleTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startScheduleRunner(): void {
   if (_scheduleTimer) return;
+  L.info("scheduleRunner", "started (interval=60s)");
   // Check for due tasks every 60 seconds
   _scheduleTimer = setInterval(async () => {
     try {
       const raw = await redis.hgetall(SCHEDULES_KEY);
-      if (!raw) return;
+      if (!raw || Object.keys(raw).length === 0) return;
       const now = Date.now();
+      let executed = 0;
+      let skipped  = 0;
       for (const [id, json] of Object.entries(raw)) {
         try {
           const task = JSON.parse(json) as ScheduledTask;
-          if (!task.enabled || task.nextRun > now) continue;
+          if (!task.enabled || task.nextRun > now) { skipped++; continue; }
           const tool = findTool(task.toolName);
-          if (!tool || tool.isWrite) continue;
+          if (!tool || tool.isWrite) { skipped++; continue; }
 
           // Execute the tool
           const result = await tool.run(task.args, { userId: "scheduler" });
+          executed++;
+          L.info("scheduleRunner", `executed ${task.name} (${task.toolName})`, { id, intervalMs: task.intervalMs });
 
           // Store last run result in Redis (brief)
           const resultStr = JSON.stringify(result).slice(0, 500);
@@ -1640,8 +1648,8 @@ export function startScheduleRunner(): void {
           task.nextRun = now + task.intervalMs;
           await redis.hset(SCHEDULES_KEY, id, JSON.stringify(task));
         } catch (e) {
-          // Log but don't crash the runner
           const msg = e instanceof Error ? e.message : String(e);
+          L.warn("scheduleRunner", `task ${id} failed: ${msg.slice(0, 100)}`);
           await redis.set(
             `admin:agent:schedule_error:${id}`,
             msg.slice(0, 200),
@@ -1649,7 +1657,12 @@ export function startScheduleRunner(): void {
           );
         }
       }
-    } catch { /* ignore top-level errors */ }
+      if (executed > 0 || skipped > 0) {
+        L.info("scheduleRunner", "tick", { executed, skipped, total: Object.keys(raw).length });
+      }
+    } catch (e) {
+      L.warn("scheduleRunner", `tick error: ${String(e).slice(0, 100)}`);
+    }
   }, 60_000);
 }
 
@@ -1659,6 +1672,366 @@ export function stopScheduleRunner(): void {
     _scheduleTimer = null;
   }
 }
+
+// ══════════════════════════════════════════════════════════
+// IMPROVEMENT 8: BROWSER/URL FETCH — read web page content
+// ══════════════════════════════════════════════════════════
+
+const FETCH_URL_TIMEOUT = 15_000;
+const FETCH_MAX_BODY    = 5000; // chars
+
+const TOOL_FETCH_URL: Tool = {
+  name:        "fetch_url",
+  description: "اقرأ محتوى صفحة ويب (مفيد عشان تشيك لو source شغال أو تقرأ error page). يرجع status + نص الصفحة (أول 5000 حرف).",
+  parameters:  {
+    type:       "object",
+    properties: {
+      url: { type: "string", description: "الـ URL الكامل (https://...)" },
+    },
+    required: ["url"],
+  },
+  isWrite: false,
+  async run(args) {
+    const url = asStr(args.url).trim();
+    if (!url || !/^https?:\/\//i.test(url)) throw new Error("URL must start with http:// or https://");
+
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_URL_TIMEOUT);
+    try {
+      const r = await fetch(url, {
+        signal:  ctrl.signal,
+        headers: { "User-Agent": "KholasaBot-Admin/1.0" },
+        redirect: "follow",
+      });
+      const body = await r.text();
+      // Strip HTML tags for readability
+      const cleaned = body
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, FETCH_MAX_BODY);
+      return {
+        url,
+        status:       r.status,
+        statusText:   r.statusText,
+        content_type: r.headers.get("content-type") || "unknown",
+        body_length:  body.length,
+        body_preview: cleaned || "(empty)",
+        truncated:    body.length > FETCH_MAX_BODY,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { url, error: msg.slice(0, 300) };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// IMPROVEMENT 9: FILE READ/WRITE — filesystem access
+// ══════════════════════════════════════════════════════════
+
+// Safety: restrict to project directory and certain paths
+const ALLOWED_FILE_ROOTS = ["/home/ubuntu/book-bot", "/home/ubuntu/book-bot/logs"];
+const MAX_FILE_READ  = 8000;
+const MAX_FILE_WRITE = 4000;
+
+function validateFilePath(filePath: string): string {
+  const abs = resolve(filePath);
+  const ok  = ALLOWED_FILE_ROOTS.some(root => abs.startsWith(root));
+  if (!ok) throw new Error(`path not allowed — must be under ${ALLOWED_FILE_ROOTS.join(" or ")}`);
+  // Block obvious dangerous files
+  if (abs.includes(".env") || abs.includes("credentials") || abs.includes("secret"))
+    throw new Error("access to secret files is not allowed");
+  return abs;
+}
+
+const TOOL_READ_FILE: Tool = {
+  name:        "read_file",
+  description: "اقرأ محتوى ملف من السيرفر (config, logs, etc). مسموح فقط في project directory.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      path:   { type: "string", description: "مسار الملف (مثلاً '/home/ubuntu/book-bot/docker-compose.yml')" },
+      tail:   { type: "integer", description: "(اختياري) اقرأ آخر N سطر بس" },
+    },
+    required: ["path"],
+  },
+  isWrite: false,
+  async run(args) {
+    const filePath = validateFilePath(asStr(args.path));
+    const tailN    = asNum(args.tail, 0);
+
+    const info = await stat(filePath);
+    if (!info.isFile()) throw new Error("not a regular file");
+    if (info.size > 2 * 1024 * 1024) throw new Error("file too large (max 2MB) — use tail");
+
+    let content = await readFile(filePath, "utf-8");
+    if (tailN > 0) {
+      const lines = content.split("\n");
+      content = lines.slice(-tailN).join("\n");
+    }
+    return {
+      path:      filePath,
+      size:      info.size,
+      content:   content.slice(0, MAX_FILE_READ),
+      truncated: content.length > MAX_FILE_READ,
+    };
+  },
+};
+
+const TOOL_WRITE_FILE: Tool = {
+  name:        "write_file",
+  description: "اكتب محتوى في ملف على السيرفر (config, notes). مسموح فقط في project directory.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      path:    { type: "string", description: "مسار الملف" },
+      content: { type: "string", description: "المحتوى المراد كتابته" },
+      append:  { type: "boolean", description: "أضف للملف بدل ما تبدله (default: false)" },
+    },
+    required: ["path", "content"],
+  },
+  isWrite: true,
+  async run(args) {
+    const filePath = validateFilePath(asStr(args.path));
+    const content  = asStr(args.content).slice(0, MAX_FILE_WRITE);
+    const append   = asBool(args.append);
+
+    if (append) {
+      const existing = await readFile(filePath, "utf-8").catch(() => "");
+      await writeFile(filePath, existing + content, "utf-8");
+    } else {
+      await writeFile(filePath, content, "utf-8");
+    }
+    const info = await stat(filePath);
+    return { ok: true, path: filePath, size: info.size, mode: append ? "appended" : "overwritten" };
+  },
+};
+
+const TOOL_LIST_DIR: Tool = {
+  name:        "list_dir",
+  description: "اعرض محتويات مجلد على السيرفر.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      path: { type: "string", description: "مسار المجلد (مثلاً '/home/ubuntu/book-bot')" },
+    },
+    required: ["path"],
+  },
+  isWrite: false,
+  async run(args) {
+    const dirPath = validateFilePath(asStr(args.path));
+    const info = await stat(dirPath);
+    if (!info.isDirectory()) throw new Error("not a directory");
+    const entries = await readdir(dirPath, { withFileTypes: true });
+    return {
+      path: dirPath,
+      entries: entries.slice(0, 50).map(e => ({
+        name:  e.name,
+        type:  e.isDirectory() ? "dir" : e.isFile() ? "file" : "other",
+      })),
+      total: entries.length,
+    };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// IMPROVEMENT 10: NOTIFICATION PREFERENCES
+// ══════════════════════════════════════════════════════════
+
+const NOTIF_PREFS_KEY = "admin:agent:notification_prefs";
+
+interface NotificationPrefs {
+  alertLevel:   "all" | "warning" | "critical";   // min severity to send
+  digestMode:   "instant" | "hourly" | "daily";   // digest batching
+  quietHours:   { from: number; to: number } | null; // 24h format, Cairo TZ
+  updatedAt:    number;
+}
+
+const DEFAULT_PREFS: NotificationPrefs = {
+  alertLevel:  "all",
+  digestMode:  "instant",
+  quietHours:  null,
+  updatedAt:   Date.now(),
+};
+
+async function loadNotifPrefs(): Promise<NotificationPrefs> {
+  try {
+    const raw = await redis.get(NOTIF_PREFS_KEY);
+    if (raw) return JSON.parse(raw) as NotificationPrefs;
+  } catch { /* use defaults */ }
+  return { ...DEFAULT_PREFS };
+}
+
+export async function shouldAlertBySeverity(severity: string): Promise<boolean> {
+  const prefs = await loadNotifPrefs();
+  if (prefs.alertLevel === "all") return true;
+  if (prefs.alertLevel === "warning") return severity === "warning" || severity === "critical";
+  return severity === "critical";
+}
+
+const TOOL_GET_NOTIFICATION_PREFS: Tool = {
+  name:        "get_notification_prefs",
+  description: "عرض إعدادات التنبيهات الحالية (مستوى الخطورة، وضع التجميع، ساعات الهدوء).",
+  parameters:  { type: "object", properties: {} },
+  isWrite: false,
+  async run() {
+    return await loadNotifPrefs();
+  },
+};
+
+const TOOL_SET_NOTIFICATION_PREFS: Tool = {
+  name:        "set_notification_prefs",
+  description: "غيّر إعدادات التنبيهات. alert_level: 'all'|'warning'|'critical'. digest_mode: 'instant'|'hourly'|'daily'. quiet_hours: {from:22,to:8} أو null.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      alert_level:  { type: "string", enum: ["all", "warning", "critical"], description: "أقل مستوى خطورة يوصلك (default: all)" },
+      digest_mode:  { type: "string", enum: ["instant", "hourly", "daily"], description: "كيف توصلك التنبيهات" },
+      quiet_from:   { type: "integer", description: "بداية ساعات الهدوء (0-23, Cairo TZ). null لإلغاء." },
+      quiet_to:     { type: "integer", description: "نهاية ساعات الهدوء (0-23, Cairo TZ)" },
+    },
+  },
+  isWrite: true,
+  async run(args) {
+    const prefs = await loadNotifPrefs();
+    if (args.alert_level && typeof args.alert_level === "string") {
+      const al = args.alert_level as NotificationPrefs["alertLevel"];
+      if (["all", "warning", "critical"].includes(al)) prefs.alertLevel = al;
+    }
+    if (args.digest_mode && typeof args.digest_mode === "string") {
+      const dm = args.digest_mode as NotificationPrefs["digestMode"];
+      if (["instant", "hourly", "daily"].includes(dm)) prefs.digestMode = dm;
+    }
+    if (typeof args.quiet_from === "number" && typeof args.quiet_to === "number") {
+      prefs.quietHours = { from: asNum(args.quiet_from), to: asNum(args.quiet_to) };
+    } else if (args.quiet_from === null || args.quiet_to === null) {
+      prefs.quietHours = null;
+    }
+    prefs.updatedAt = Date.now();
+    await redis.set(NOTIF_PREFS_KEY, JSON.stringify(prefs));
+    return { ok: true, prefs };
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// IMPROVEMENT 12: A/B TESTING — compare prompt variations
+// ══════════════════════════════════════════════════════════
+
+const AB_KEY    = "admin:agent:ab_tests";
+const AB_MAX    = 5;
+
+interface ABTest {
+  id:          string;
+  name:        string;
+  variants:    Array<{ label: string; promptPatch: string; uses: number; avgScore: number }>;
+  active:      boolean;
+  createdAt:   number;
+}
+
+const TOOL_CREATE_AB_TEST: Tool = {
+  name:        "create_ab_test",
+  description: "أنشئ A/B test لمقارنة صياغات مختلفة للـ system prompt. كل variant هو patch يتضاف للـ prompt الأساسي.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      name:        { type: "string", description: "اسم الاختبار (مثلاً 'tone_test')" },
+      variant_a:   { type: "string", description: "وصف/patch الصياغة A" },
+      variant_b:   { type: "string", description: "وصف/patch الصياغة B" },
+    },
+    required: ["name", "variant_a", "variant_b"],
+  },
+  isWrite: true,
+  async run(args) {
+    const name = asStr(args.name).trim();
+    if (!name) throw new Error("name is required");
+
+    const existing = await redis.hlen(AB_KEY);
+    if (existing >= AB_MAX) throw new Error(`الحد الأقصى ${AB_MAX} A/B tests`);
+
+    const test: ABTest = {
+      id:        `ab_${Date.now()}`,
+      name,
+      variants: [
+        { label: "A", promptPatch: asStr(args.variant_a).slice(0, 500), uses: 0, avgScore: 0 },
+        { label: "B", promptPatch: asStr(args.variant_b).slice(0, 500), uses: 0, avgScore: 0 },
+      ],
+      active: true,
+      createdAt: Date.now(),
+    };
+    await redis.hset(AB_KEY, test.id, JSON.stringify(test));
+    return { ok: true, test };
+  },
+};
+
+const TOOL_LIST_AB_TESTS: Tool = {
+  name:        "list_ab_tests",
+  description: "عرض كل A/B tests المسجلة مع نتائجها.",
+  parameters:  { type: "object", properties: {} },
+  isWrite: false,
+  async run() {
+    const raw = await redis.hgetall(AB_KEY);
+    if (!raw || Object.keys(raw).length === 0) return { tests: [], note: "لا توجد A/B tests." };
+    const tests = Object.values(raw)
+      .map(v => { try { return JSON.parse(v) as ABTest; } catch { return null; } })
+      .filter((t): t is ABTest => t !== null);
+    return { count: tests.length, tests };
+  },
+};
+
+const TOOL_SCORE_AB_VARIANT: Tool = {
+  name:        "score_ab_variant",
+  description: "سجّل تقييم لنتيجة variant معين في A/B test (1-5). يساعد على تحديد أفضل prompt.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      test_id:       { type: "string", description: "معرّف الاختبار" },
+      variant_label: { type: "string", enum: ["A", "B"], description: "الصياغة (A أو B)" },
+      score:         { type: "integer", description: "التقييم من 1 (سيء) لـ 5 (ممتاز)" },
+    },
+    required: ["test_id", "variant_label", "score"],
+  },
+  isWrite: false,
+  async run(args) {
+    const testId = asStr(args.test_id);
+    const label  = asStr(args.variant_label);
+    const score  = Math.max(1, Math.min(5, asNum(args.score, 3)));
+
+    const raw = await redis.hget(AB_KEY, testId);
+    if (!raw) throw new Error(`A/B test '${testId}' not found`);
+    const test = JSON.parse(raw) as ABTest;
+    const variant = test.variants.find(v => v.label === label);
+    if (!variant) throw new Error(`variant '${label}' not found`);
+
+    // Running average
+    const newUses = variant.uses + 1;
+    variant.avgScore = (variant.avgScore * variant.uses + score) / newUses;
+    variant.uses     = newUses;
+    await redis.hset(AB_KEY, testId, JSON.stringify(test));
+    return { ok: true, variant: { label, uses: newUses, avgScore: Math.round(variant.avgScore * 100) / 100 } };
+  },
+};
+
+const TOOL_DELETE_AB_TEST: Tool = {
+  name:        "delete_ab_test",
+  description: "احذف A/B test.",
+  parameters:  {
+    type:       "object",
+    properties: { test_id: { type: "string", description: "معرّف الاختبار" } },
+    required:   ["test_id"],
+  },
+  isWrite: true,
+  async run(args) {
+    const testId = asStr(args.test_id);
+    const removed = await redis.hdel(AB_KEY, testId);
+    if (removed === 0) throw new Error(`A/B test '${testId}' not found`);
+    return { ok: true, deleted: testId };
+  },
+};
 
 // ══════════════════════════════════════════════════════════
 // REGISTRY
@@ -1685,6 +2058,20 @@ export const TOOLS: Tool[] = [
   TOOL_ADD_SCHEDULE,
   TOOL_REMOVE_SCHEDULE,
   TOOL_TOGGLE_SCHEDULE,
+  // ── improvement 8: URL fetch (1) ──
+  TOOL_FETCH_URL,
+  // ── improvement 9: file system (3) ──
+  TOOL_READ_FILE,
+  TOOL_LIST_DIR,
+  TOOL_WRITE_FILE,
+  // ── improvement 10: notification prefs (2) ──
+  TOOL_GET_NOTIFICATION_PREFS,
+  TOOL_SET_NOTIFICATION_PREFS,
+  // ── improvement 12: A/B testing (4) ──
+  TOOL_LIST_AB_TESTS,
+  TOOL_SCORE_AB_VARIANT,
+  TOOL_CREATE_AB_TEST,
+  TOOL_DELETE_AB_TEST,
   // ── read (20) ──
   TOOL_QUICK_OVERVIEW,           // ← prefer this one for general questions
   TOOL_GET_COUNTERS,
