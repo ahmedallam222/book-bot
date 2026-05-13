@@ -130,6 +130,10 @@ export const OPENROUTER_API_KEY       = process.env.OPENROUTER_API_KEY       || 
 export const GITHUB_MODELS_TOKEN      = process.env.GITHUB_MODELS_TOKEN      || "";
 export const CLOUDFLARE_AI_ACCOUNT_ID = process.env.CLOUDFLARE_AI_ACCOUNT_ID || "";
 export const CLOUDFLARE_AI_API_TOKEN  = process.env.CLOUDFLARE_AI_API_TOKEN  || "";
+// AgentRouter (agentrouter.org) — OpenAI-compatible router that fronts
+// multiple frontier models (Claude, DeepSeek, GLM, …) behind one key.
+// Wired into the admin agent's provider chain (server/bot/adminAgent/llmProviders.ts).
+export const AGENTROUTER_API_KEY      = process.env.AGENTROUTER_API_KEY      || "";
 // Premium-tier — paid you.com Smart API. Routed only for `isPremium` users.
 export const YOU_COM_API_KEY          = process.env.YOU_COM_API_KEY          || "";
 

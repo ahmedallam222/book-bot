@@ -20,6 +20,7 @@ import {
   GROQ_API_KEY,
   CLOUDFLARE_AI_ACCOUNT_ID,
   CLOUDFLARE_AI_API_TOKEN,
+  AGENTROUTER_API_KEY,
 } from "../config.js";
 import { L } from "../logger.js";
 
@@ -69,6 +70,51 @@ export const CLOUDFLARE_NAME  = "Cloudflare Llama 3.3 70B FP8";
 const CLOUDFLARE_LEGACY_IDS    = ["cloudflare-gpt-oss-120b"];
 const CLOUDFLARE_LEGACY_MODELS = ["@cf/openai/gpt-oss-120b"];
 
+// ── AgentRouter (agentrouter.org) — multi-model paid router ───────
+// OpenAI-compatible endpoint at https://agentrouter.org/v1 fronting Claude /
+// DeepSeek / GLM with a single API key. Wired in priority 2–6 so they kick in
+// as paid fallbacks the moment Cloudflare returns a 5xx or quota-exhaust
+// error. Order is fastest/cheapest → strongest, so failover stays quick and
+// only escalates to Opus when everything else is busted.
+const AGENTROUTER_BASE_URL = "https://agentrouter.org/v1";
+const AGENTROUTER_NAME_PREFIX = "AgentRouter";
+
+interface AgentRouterSpec {
+  /** Stable provider id used in the Redis hash. */
+  id:       string;
+  /** Display label shown in admin tools (no API key leakage). */
+  name:     string;
+  /** Model string sent in the OpenAI `model` field. */
+  model:    string;
+  /** Lower = tried first inside the agentrouter band. */
+  priority: number;
+}
+
+export const AGENTROUTER_MODELS: ReadonlyArray<AgentRouterSpec> = [
+  { id: "agentrouter-deepseek-v4-flash",     name: `${AGENTROUTER_NAME_PREFIX} DeepSeek V4 Flash`,  model: "deepseek-v4-flash",             priority: 2 },
+  { id: "agentrouter-glm-5.1",               name: `${AGENTROUTER_NAME_PREFIX} GLM 5.1`,            model: "glm-5.1",                       priority: 3 },
+  { id: "agentrouter-claude-haiku-4-5",      name: `${AGENTROUTER_NAME_PREFIX} Claude Haiku 4.5`,   model: "claude-haiku-4-5-20251001",     priority: 4 },
+  { id: "agentrouter-deepseek-v4-pro",       name: `${AGENTROUTER_NAME_PREFIX} DeepSeek V4 Pro`,    model: "deepseek-v4-pro",               priority: 5 },
+  { id: "agentrouter-claude-opus-4-6",       name: `${AGENTROUTER_NAME_PREFIX} Claude Opus 4.6`,    model: "claude-opus-4-6",               priority: 6 },
+];
+
+/** Stable id of the cheapest/fastest agentrouter model — used as the
+ * canonical reference when a migration needs to drop in *one* row at a
+ * known priority slot. */
+export const AGENTROUTER_PRIMARY_ID = AGENTROUTER_MODELS[0].id;
+
+function buildAgentRouterProvider(spec: AgentRouterSpec): LLMProvider {
+  return {
+    id:       spec.id,
+    name:     spec.name,
+    baseUrl:  AGENTROUTER_BASE_URL,
+    model:    spec.model,
+    apiKey:   AGENTROUTER_API_KEY,
+    priority: spec.priority,
+    enabled:  true,
+  };
+}
+
 /** Build the Cloudflare provider object. Account id is interpolated
  * into the baseUrl because Cloudflare's OpenAI-compat endpoint is
  * scoped per-account: `/client/v4/accounts/{ACCOUNT_ID}/ai/v1`. */
@@ -90,13 +136,17 @@ export const DEFAULT_PROVIDERS: LLMProvider[] = [
   // and supports function calling on the OpenAI-compat /v1/chat/completions
   // endpoint.
   buildCloudflareProvider(1),
+  // AgentRouter — paid multi-model fallback band (priorities 2–6).
+  // Tried fastest/cheapest first; escalates to Claude Opus only if everything
+  // upstream is exhausted.
+  ...AGENTROUTER_MODELS.map(buildAgentRouterProvider),
   {
     id:       "cerebras-gpt-oss-120b",
     name:     "Cerebras GPT-OSS 120B",
     baseUrl:  "https://api.cerebras.ai/v1",
     model:    "gpt-oss-120b",
     apiKey:   CEREBRAS_API_KEY,
-    priority: 2,
+    priority: 7,
     enabled:  true,
   },
   {
@@ -105,7 +155,7 @@ export const DEFAULT_PROVIDERS: LLMProvider[] = [
     baseUrl:  "https://api.groq.com/openai/v1",
     model:    "openai/gpt-oss-120b",
     apiKey:   GROQ_API_KEY,
-    priority: 3,
+    priority: 8,
     enabled:  true,
   },
   {
@@ -114,7 +164,7 @@ export const DEFAULT_PROVIDERS: LLMProvider[] = [
     baseUrl:  "https://api.groq.com/openai/v1",
     model:    "llama-3.3-70b-versatile",
     apiKey:   GROQ_API_KEY,
-    priority: 4,
+    priority: 9,
     enabled:  true,
   },
 ];
@@ -294,4 +344,38 @@ export async function ensureCloudflarePrimary(): Promise<
   await setProvider(provider);
   L.info("adminAgent", `Cloudflare provider upserted at priority ${priority}`);
   return { added: true, priority };
+}
+
+/**
+ * Idempotent migration: inserts the AgentRouter (agentrouter.org) provider
+ * rows for any model in AGENTROUTER_MODELS that the admin doesn't already
+ * have. Lets prod installs that were seeded before AgentRouter shipped pick
+ * up the new fallback band on next boot without a Redis wipe.
+ *
+ * Each model is skipped independently — if admin already has a row for
+ * (id), it's left untouched even if priority/key differ. Net-new rows use
+ * the spec's default priority.
+ *
+ * Returns the list of stable ids that were added (empty when AGENTROUTER_API_KEY
+ * is missing or every model is already configured).
+ */
+export async function ensureAgentRouterProviders(): Promise<{ added: string[]; reason?: "no_keys" | "already_set" }> {
+  if (!AGENTROUTER_API_KEY) {
+    return { added: [], reason: "no_keys" };
+  }
+  const added: string[] = [];
+  for (const spec of AGENTROUTER_MODELS) {
+    const existing = await getProvider(spec.id).catch(() => null);
+    if (existing) continue;
+    await setProvider(buildAgentRouterProvider(spec));
+    added.push(spec.id);
+  }
+  if (added.length === 0) {
+    return { added, reason: "already_set" };
+  }
+  L.info(
+    "adminAgent",
+    `AgentRouter providers upserted: ${added.length} model(s) at priorities ${AGENTROUTER_MODELS.filter(s => added.includes(s.id)).map(s => s.priority).join(",")}`,
+  );
+  return { added };
 }

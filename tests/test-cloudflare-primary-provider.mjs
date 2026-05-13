@@ -55,12 +55,15 @@ ok("migration handles model_migrated branch",
    /reason:\s*"model_migrated"/.test(provSrc));
 ok("migration handles id_migrated branch",
    /reason:\s*"id_migrated"/.test(provSrc));
-ok("cerebras priority bumped to 2",
-   /id:\s*"cerebras-gpt-oss-120b"[\s\S]{0,300}?priority:\s*2/.test(provSrc));
-ok("groq-gpt-oss priority bumped to 3",
-   /id:\s*"groq-gpt-oss-120b"[\s\S]{0,300}?priority:\s*3/.test(provSrc));
-ok("groq-llama priority bumped to 4",
-   /id:\s*"groq-llama-3.3-70b"[\s\S]{0,300}?priority:\s*4/.test(provSrc));
+// Post-AgentRouter rebalance: legacy fallbacks (cerebras / groq) sit
+// at priorities 7-9, behind the 5x AgentRouter band (priorities 2-6)
+// and the Cloudflare primary (priority 1).
+ok("cerebras priority 7 (behind AgentRouter band)",
+   /id:\s*"cerebras-gpt-oss-120b"[\s\S]{0,300}?priority:\s*7/.test(provSrc));
+ok("groq-gpt-oss priority 8",
+   /id:\s*"groq-gpt-oss-120b"[\s\S]{0,300}?priority:\s*8/.test(provSrc));
+ok("groq-llama priority 9",
+   /id:\s*"groq-llama-3.3-70b"[\s\S]{0,300}?priority:\s*9/.test(provSrc));
 ok("ensureCloudflarePrimary skips when keys missing",
    /reason:\s*"no_keys"/.test(provSrc));
 ok("ensureCloudflarePrimary skips when admin already configured one",
@@ -110,12 +113,76 @@ ok("Cloudflare model is @cf/meta/llama-3.3-70b-instruct-fp8-fast",
    cf?.model === "@cf/meta/llama-3.3-70b-instruct-fp8-fast", cf?.model);
 
 const cerebras = DEFAULT_PROVIDERS.find(p => p.id === "cerebras-gpt-oss-120b");
-ok("Cerebras present at priority 2", cerebras?.priority === 2);
+ok("Cerebras present at priority 7", cerebras?.priority === 7);
 
 // Sorted ascending by priority?
 const sorted = [...DEFAULT_PROVIDERS].sort((a, b) => a.priority - b.priority);
 ok("DEFAULT_PROVIDERS first in priority order is Cloudflare",
    sorted[0]?.id === CLOUDFLARE_PROVIDER_ID);
+
+// ─── C5 — AgentRouter (agentrouter.org) fallback band ─────────────
+// Five paid models routed through one key, sitting between Cloudflare
+// (priority 1) and Cerebras / Groq (priorities 7-9). Order is
+// fastest/cheapest first so failover stays quick and only escalates to
+// Claude Opus when everything upstream is exhausted.
+console.log("\nC5 — AgentRouter fallback band");
+ok("imports AGENTROUTER_API_KEY from config",
+   /AGENTROUTER_API_KEY/.test(provSrc));
+ok("exports AGENTROUTER_MODELS array",
+   /export\s+const\s+AGENTROUTER_MODELS\s*:/.test(provSrc));
+ok("exports ensureAgentRouterProviders function",
+   /export\s+async\s+function\s+ensureAgentRouterProviders/.test(provSrc));
+ok("baseUrl is https://agentrouter.org/v1",
+   /AGENTROUTER_BASE_URL\s*=\s*"https:\/\/agentrouter\.org\/v1"/.test(provSrc));
+ok("deepseek-v4-flash at priority 2 (fastest/cheapest first)",
+   /id:\s*"agentrouter-deepseek-v4-flash"[\s\S]{0,200}?priority:\s*2/.test(provSrc));
+ok("glm-5.1 at priority 3",
+   /id:\s*"agentrouter-glm-5\.1"[\s\S]{0,200}?priority:\s*3/.test(provSrc));
+ok("claude-haiku-4-5 at priority 4 with model id claude-haiku-4-5-20251001",
+   /id:\s*"agentrouter-claude-haiku-4-5"[\s\S]{0,200}?model:\s*"claude-haiku-4-5-20251001"[\s\S]{0,200}?priority:\s*4/.test(provSrc));
+ok("deepseek-v4-pro at priority 5",
+   /id:\s*"agentrouter-deepseek-v4-pro"[\s\S]{0,200}?priority:\s*5/.test(provSrc));
+ok("claude-opus-4-6 at priority 6 (top-tier last-resort)",
+   /id:\s*"agentrouter-claude-opus-4-6"[\s\S]{0,200}?priority:\s*6/.test(provSrc));
+ok("index.ts awaits ensureAgentRouterProviders() during startAdminAgent",
+   /await\s+ensureAgentRouterProviders\s*\(\s*\)/.test(idxSrc));
+
+// Runtime: build with AGENTROUTER_API_KEY to confirm DEFAULT_PROVIDERS
+// includes all 5 entries with the right shape.
+process.env.AGENTROUTER_API_KEY = process.env.AGENTROUTER_API_KEY || "test-agentrouter-key-xxxxxxxx";
+// The module is cached from the earlier import above; re-importing
+// would re-read the env, but Node caches dynamic imports by path. So we
+// just re-use the cached DEFAULT_PROVIDERS, which was loaded *before*
+// AGENTROUTER_API_KEY was set. To get a clean view, we read the spec
+// array directly instead — that one doesn't depend on env at import.
+const { AGENTROUTER_MODELS } = mod;
+ok("AGENTROUTER_MODELS exposes 5 models", Array.isArray(AGENTROUTER_MODELS) && AGENTROUTER_MODELS.length === 5);
+const ids = (AGENTROUTER_MODELS || []).map(s => s.id).sort();
+ok("AGENTROUTER_MODELS ids are the 5 expected stable ids",
+   JSON.stringify(ids) === JSON.stringify([
+     "agentrouter-claude-haiku-4-5",
+     "agentrouter-claude-opus-4-6",
+     "agentrouter-deepseek-v4-flash",
+     "agentrouter-deepseek-v4-pro",
+     "agentrouter-glm-5.1",
+   ]),
+   ids.join(","));
+
+// CHANGELOG: confirm the AgentRouter Unreleased section landed in CHANGELOG.md.
+const CHANGELOG_PATH = path.join(ROOT, "CHANGELOG.md");
+const chSrc = fs.readFileSync(CHANGELOG_PATH, "utf8");
+ok("CHANGELOG mentions AgentRouter integration",
+   /AgentRouter integration for the Admin AI agent/.test(chSrc));
+ok("CHANGELOG lists all 5 AgentRouter model ids",
+   ["agentrouter-deepseek-v4-flash", "agentrouter-glm-5.1",
+    "agentrouter-claude-haiku-4-5", "agentrouter-deepseek-v4-pro",
+    "agentrouter-claude-opus-4-6"].every(id => chSrc.includes(id)));
+
+// .env.example: confirm the new env var is documented.
+const ENVEXAMPLE_PATH = path.join(ROOT, ".env.example");
+const envSrc = fs.readFileSync(ENVEXAMPLE_PATH, "utf8");
+ok(".env.example declares AGENTROUTER_API_KEY",
+   /^AGENTROUTER_API_KEY=/m.test(envSrc));
 
 console.log(`\n${pass}/${pass + fail} probes passed`);
 // The runtime import above opens a Redis connection via the module

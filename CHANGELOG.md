@@ -7,6 +7,38 @@
 
 ---
 
+## [Unreleased] — AgentRouter integration for the Admin AI agent
+
+### ✨ Added
+- **AgentRouter (agentrouter.org) as a paid fallback band** for the admin
+  AI agent's LLM provider chain. Five new models are seeded into
+  `DEFAULT_PROVIDERS` at priorities 2–6, sitting between the free
+  Cloudflare primary (priority 1) and the existing Cerebras / Groq
+  failovers (priorities 7–9):
+  - `agentrouter-deepseek-v4-flash` (fastest / cheapest paid fallback)
+  - `agentrouter-glm-5.1`
+  - `agentrouter-claude-haiku-4-5` (`claude-haiku-4-5-20251001`)
+  - `agentrouter-deepseek-v4-pro`
+  - `agentrouter-claude-opus-4-6` (top-tier last-resort)
+- New env var **`AGENTROUTER_API_KEY`** in `.env.example` — one key
+  drives all five rows because AgentRouter is an OpenAI-compatible
+  multi-model router. Empty value disables the whole band; everything
+  else (Cloudflare, Cerebras, Groq) keeps working unchanged.
+- Idempotent migration `ensureAgentRouterProviders()` runs on admin-
+  agent boot. Mirrors `ensureCloudflarePrimary()` — only inserts rows
+  the admin doesn't already have, so manual priority / key overrides in
+  Redis are preserved on upgrade.
+
+### 🛠 Changed
+- README `🤖 Admin AI agent` section: provider list updated from the
+  stale 9-name list to the actual current chain. Env-var snippet adds
+  `AGENTROUTER_API_KEY` and corrects the legacy `CLOUDFLARE_AI_TOKEN`
+  name → `CLOUDFLARE_AI_ACCOUNT_ID` + `CLOUDFLARE_AI_API_TOKEN`.
+- The "9-provider LLM failover" feature row gets a one-line breakdown of
+  the new chain composition so the count is no longer opaque.
+
+---
+
 ## [Unreleased] — Admin AI agent: post-CF improvements (PRs #150 → #160)
 
 The section below documents the long tail of admin-agent PRs that

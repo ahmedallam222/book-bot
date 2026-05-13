@@ -19,7 +19,7 @@ import { SYSTEM_PROMPT, CONFIRM_PHRASES_RE, CANCEL_PHRASES_RE } from "./prompt.j
 import { runLLM, runLLMStream, type LLMMessage, type LLMToolCall } from "./llm.js";
 import { getToolDefinitions, findTool, type ToolRunCtx } from "./tools.js";
 import { loadConversation, saveConversation, clearConversation } from "./conversation.js";
-import { seedDefaultsIfEmpty, ensureCloudflarePrimary } from "./llmProviders.js";
+import { seedDefaultsIfEmpty, ensureCloudflarePrimary, ensureAgentRouterProviders } from "./llmProviders.js";
 import {
   createBurstGuard, inspectCall, recordExecution, recordRefusal,
   refusalToolContent, callSignature, isOverTokenBudget,
@@ -317,6 +317,16 @@ export async function startAdminAgent(): Promise<void> {
     if (cf.added) L.info("adminAgent", `Cloudflare provider added at priority ${cf.priority}`);
   } catch (e) {
     L.warn("adminAgent", `ensureCloudflarePrimary failed: ${String(e).slice(0, 80)}`);
+  }
+
+  // Idempotent: upsert AgentRouter (agentrouter.org) provider rows for any
+  // model in AGENTROUTER_MODELS that the admin doesn't already have. Skipped
+  // when AGENTROUTER_API_KEY is missing.
+  try {
+    const ar = await ensureAgentRouterProviders();
+    if (ar.added.length > 0) L.info("adminAgent", `AgentRouter providers added: ${ar.added.join(", ")}`);
+  } catch (e) {
+    L.warn("adminAgent", `ensureAgentRouterProviders failed: ${String(e).slice(0, 80)}`);
   }
 
   try {
