@@ -35,6 +35,8 @@ const expected = [
   "get_maintenance_status",
   // read (PR-A2 additions)
   "quick_overview", "get_tel_counters_summary", "list_llm_providers",
+  // read (PR-A3: llm telemetry + one-shot health probe)
+  "llm_provider_stats", "llm_test_provider",
   // write (PR-A baseline)
   "set_premium", "grant_premium_30d", "revoke_premium",
   "pause_source", "unpause_source", "clear_dlq", "cancel_user_jobs",

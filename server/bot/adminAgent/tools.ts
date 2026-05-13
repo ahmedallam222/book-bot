@@ -31,7 +31,10 @@ import {
   loadAllProvidersRaw, setProvider, removeProvider, getProvider,
   publicView, type LLMProvider,
 } from "./llmProviders.js";
-import { getProviderStats, resetProviderTelemetry } from "./llmTelemetry.js";
+import {
+  getProviderStats, resetProviderTelemetry,
+  recordSuccess, recordFailure, classifyFailure,
+} from "./llmTelemetry.js";
 import {
   saveKnowledge, recallKnowledge, deleteKnowledge, knowledgeCount,
 } from "./memory.js";
@@ -906,6 +909,121 @@ const TOOL_RESET_LLM_STATS: Tool = {
     if (!p) throw new Error(`provider not found: ${id}`);
     await resetProviderTelemetry(id);
     return { ok: true, action: "telemetry_reset", id };
+  },
+};
+
+// ── llm_test_provider — one-shot health probe ───────────────────
+// Issues a tiny chat-completions ping (≤5 tokens) against a single
+// provider OR every enabled provider in parallel. Records the result
+// into the same telemetry counters the dispatcher uses, so the next
+// `llm_provider_stats` call reflects the probe. Useful right after
+// adding a paid provider (AgentRouter, OpenRouter, …) to verify the
+// key + base URL work end-to-end without waiting for organic traffic.
+//
+// Returns a uniform shape per provider:
+//   { id, ok, ms, status?, model, error? }
+// `ok=true` ⇒ the provider returned a 2xx with a non-empty assistant
+// reply. Anything else is a fail with the exact HTTP status (or
+// network error) for triage. All probes time out at 15s individually.
+
+const PING_TIMEOUT_MS = 15_000;
+const PING_BODY = {
+  messages:   [{ role: "user", content: "ping" }],
+  max_tokens: 5,
+  temperature: 0,
+  stream:     false,
+};
+
+interface PingResult {
+  id:      string;
+  ok:      boolean;
+  ms:      number;
+  status?: number;
+  model:   string;
+  reply?:  string;
+  error?:  string;
+}
+
+async function pingProvider(p: LLMProvider): Promise<PingResult> {
+  const t0  = Date.now();
+  const url = p.baseUrl.replace(/\/+$/, "") + "/chat/completions";
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PING_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, {
+      method:  "POST",
+      headers: {
+        "Authorization": `Bearer ${p.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body:   JSON.stringify({ ...PING_BODY, model: p.model }),
+      signal: ctrl.signal,
+    });
+    const ms   = Date.now() - t0;
+    const text = await r.text();
+    if (!r.ok) {
+      const errMsg = text.slice(0, 160).replace(/\s+/g, " ");
+      recordFailure(p.id, classifyFailure(errMsg, r.status), errMsg, ms).catch(() => {});
+      return { id: p.id, ok: false, ms, status: r.status, model: p.model, error: errMsg };
+    }
+    let json: { choices?: Array<{ message?: { content?: string | null } }> };
+    try { json = JSON.parse(text); }
+    catch {
+      const errMsg = `non-json response: ${text.slice(0, 80)}`;
+      recordFailure(p.id, "other", errMsg, ms).catch(() => {});
+      return { id: p.id, ok: false, ms, status: r.status, model: p.model, error: errMsg };
+    }
+    const reply = json?.choices?.[0]?.message?.content ?? "";
+    if (!reply || typeof reply !== "string") {
+      const errMsg = "empty assistant reply";
+      recordFailure(p.id, "other", errMsg, ms).catch(() => {});
+      return { id: p.id, ok: false, ms, status: r.status, model: p.model, error: errMsg };
+    }
+    recordSuccess(p.id, ms).catch(() => {});
+    return { id: p.id, ok: true, ms, status: r.status, model: p.model, reply: reply.slice(0, 60) };
+  } catch (e) {
+    const ms     = Date.now() - t0;
+    const errMsg = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160);
+    recordFailure(p.id, classifyFailure(errMsg), errMsg, ms).catch(() => {});
+    return { id: p.id, ok: false, ms, model: p.model, error: errMsg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const TOOL_LLM_TEST_PROVIDER: Tool = {
+  name:        "llm_test_provider",
+  description: "اختبار سريع لـ LLM provider (ping 'pong' بـ ≤5 tokens). مع id واحد يختبر provider واحد، بدون id يختبر كل الـ enabled providers بالتوازي. النتيجة بتنحفظ في الـ telemetry — بعدها llm_provider_stats هتعرض الـ probe.",
+  parameters:  {
+    type:       "object",
+    properties: {
+      id: { type: "string", description: "(optional) provider id لاختبار واحد فقط. بدونه يختبر كل الـ enabled." },
+    },
+  },
+  isWrite: false,
+  async run(args) {
+    const id = asStr(args.id);
+    if (id) {
+      if (!PROVIDER_ID_RE.test(id)) throw new Error("invalid id");
+      const p = await getProvider(id);
+      if (!p) throw new Error(`provider not found: ${id}`);
+      if (!p.apiKey || p.apiKey.length < 10) {
+        return { id, ok: false, ms: 0, model: p.model, error: "missing api_key" };
+      }
+      const res = await pingProvider(p);
+      return res;
+    }
+    const all = (await loadAllProvidersRaw())
+      .filter(p => p.enabled && p.apiKey && p.apiKey.length >= 10)
+      .sort((a, b) => a.priority - b.priority);
+    const results = await Promise.all(all.map(pingProvider));
+    const ok      = results.filter(r => r.ok).length;
+    return {
+      tested:    results.length,
+      ok,
+      failed:    results.length - ok,
+      providers: results,
+    };
   },
 };
 
@@ -2095,6 +2213,7 @@ export const TOOLS: Tool[] = [
   TOOL_GET_MAINTENANCE_STATUS,
   TOOL_LIST_LLM_PROVIDERS,
   TOOL_LLM_PROVIDER_STATS,
+  TOOL_LLM_TEST_PROVIDER,
   // ── write (15) ──
   TOOL_SET_PREMIUM,
   TOOL_GRANT_PREMIUM_30D,
