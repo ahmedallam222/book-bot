@@ -111,7 +111,7 @@ What makes it different from a generic Google search bot:
 | 🔧 **Maintenance mode** | One-click maintenance toggle. Auto-announces service-back to known groups when cleared. |
 | 🚨 **Auto-alerts** | Admin gets a Telegram DM when DLQ spikes, success rate drops, Firecrawl quota is near, or rate-limited. |
 | 📈 **Daily digest** | Auto-generated 24h report (active users, success rate, top books, per-source numbers) sent to admins each morning. |
-| 🤖 **Admin AI agent** | Second Telegram bot (`ADMIN_BOT_TOKEN`) you chat with in natural Arabic. ReAct loop over **59 tools** (stats, queue, sources, premium, broadcasts, code execution, web search, scheduled tasks, reports) with 9-provider LLM failover, write-confirm flow, conversation memory, proactive monitoring, and telemetry-driven circuit breaker. |
+| 🤖 **Admin AI agent** | Second Telegram bot (`ADMIN_BOT_TOKEN`) you chat with in natural Arabic. ReAct loop over **59 tools** (stats, queue, sources, premium, broadcasts, code execution, web search, scheduled tasks, reports) with **9-provider LLM failover** (Cloudflare + 5× AgentRouter models + Cerebras + 2× Groq), write-confirm flow, conversation memory, proactive monitoring, and telemetry-driven circuit breaker. |
 
 ---
 
@@ -441,8 +441,10 @@ PDF_VALIDATE_TRUST_THRESHOLD=0.50              # filename score that bypasses AI
 PDF_MIN_PAGES=15                               # below this → "looks like TOC"
 
 # ─── AI failover (set what you have) ────────────────
+CLOUDFLARE_AI_ACCOUNT_ID=
+CLOUDFLARE_AI_API_TOKEN=
+AGENTROUTER_API_KEY=                           # agentrouter.org — paid admin-agent fallback (Claude/DeepSeek/GLM, 5 models share one key)
 CEREBRAS_API_KEY=
-CLOUDFLARE_AI_TOKEN=
 GROQ_API_KEY=
 GITHUB_MODELS_TOKEN=
 OPENROUTER_API_KEY=
@@ -562,21 +564,21 @@ It is **disabled by default**. Set `ADMIN_BOT_TOKEN` to a separate `@BotFather` 
 
 ### LLM provider chain
 
-The agent runs on top of an OpenAI-compatible adapter with **9 providers** that failover in priority order. The default chain is:
+The agent runs on top of an OpenAI-compatible adapter with **9 default providers** that failover in priority order. The default chain is:
 
 ```
-1. cloudflare-llama-3.3-70b   (@cf/meta/llama-3.3-70b-instruct-fp8-fast — primary)
-2. cerebras-llama-3.3-70b
-3. groq-llama-3.3-70b
-4. github-models-gpt-4o
-5. openrouter-mixtral
-6. sambanova-llama-3.1-405b
-7. mistral-large
-8. gemini-1.5-pro
-9. you-com-llama-3.1-70b
+1. cloudflare-llama-3.3-70b      (@cf/meta/llama-3.3-70b-instruct-fp8-fast — free primary)
+2. agentrouter-deepseek-v4-flash (agentrouter.org — fastest paid fallback)
+3. agentrouter-glm-5.1
+4. agentrouter-claude-haiku-4-5  (claude-haiku-4-5-20251001)
+5. agentrouter-deepseek-v4-pro
+6. agentrouter-claude-opus-4-6   (top-tier paid last-resort)
+7. cerebras-gpt-oss-120b
+8. groq-gpt-oss-120b
+9. groq-llama-3.3-70b
 ```
 
-All providers are configured via env vars (`CLOUDFLARE_AI_TOKEN`, `CEREBRAS_API_KEY`, …) and can be reordered / disabled at runtime via the agent's own `set_llm_priority` and `update_llm_provider` tools — **no redeploy needed**.
+Providers 2–6 share one key (`AGENTROUTER_API_KEY`) — AgentRouter is an OpenAI-compatible router that fronts Claude, DeepSeek, and GLM with a single endpoint. All providers are configured via env vars (`CLOUDFLARE_AI_API_TOKEN`, `AGENTROUTER_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`) and can be reordered / disabled or extended with any other OpenAI-compatible endpoint at runtime via the agent's own `set_llm_priority`, `update_llm_provider`, and `add_llm_provider` tools — **no redeploy needed**.
 
 ---
 
