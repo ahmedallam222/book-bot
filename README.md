@@ -111,7 +111,7 @@ What makes it different from a generic Google search bot:
 | 🔧 **Maintenance mode** | One-click maintenance toggle. Auto-announces service-back to known groups when cleared. |
 | 🚨 **Auto-alerts** | Admin gets a Telegram DM when DLQ spikes, success rate drops, Firecrawl quota is near, or rate-limited. |
 | 📈 **Daily digest** | Auto-generated 24h report (active users, success rate, top books, per-source numbers) sent to admins each morning. |
-| 🤖 **Admin AI agent** | Second Telegram bot (`ADMIN_BOT_TOKEN`) you chat with in natural Arabic. ReAct loop over **59 tools** (stats, queue, sources, premium, broadcasts, code execution, web search, scheduled tasks, reports) with **9-provider LLM failover** (Cloudflare + 5× AgentRouter models + Cerebras + 2× Groq), write-confirm flow, conversation memory, proactive monitoring, and telemetry-driven circuit breaker. |
+| 🤖 **Admin AI agent** | Second Telegram bot (`ADMIN_BOT_TOKEN`) you chat with in natural Arabic. ReAct loop over **60 tools** (stats, queue, sources, premium, broadcasts, code execution, web search, scheduled tasks, reports) with **9-provider LLM failover** (Cloudflare + 5× AgentRouter models + Cerebras + 2× Groq), write-confirm flow, conversation memory, proactive monitoring, and telemetry-driven circuit breaker. |
 
 ---
 
@@ -554,7 +554,7 @@ It is **disabled by default**. Set `ADMIN_BOT_TOKEN` to a separate `@BotFather` 
 | 📝 **Reports** | `generate_report` builds full Markdown reports (daily, weekly, premium audit, source health) on demand. |
 | 🔬 **Code & web** | `exec_command` (sandboxed shell), `web_search` (You.com), `fetch_url`, `read_file` / `write_file` / `list_dir` over the bot project + dist tree. |
 | 🧪 **A/B testing** | `create_ab_test` / `score_ab_variant` / `list_ab_tests` for prompt + UX experiments. |
-| 🧰 **Self-ops** | `list_llm_providers`, `add_llm_provider`, `update_llm_provider`, `set_llm_priority`, `llm_provider_stats`, `reset_llm_provider_stats` — manage the agent's own LLM chain at runtime. |
+| 🧰 **Self-ops** | `list_llm_providers`, `add_llm_provider`, `update_llm_provider`, `set_llm_priority`, `llm_provider_stats`, `llm_test_provider`, `reset_llm_provider_stats` — manage the agent's own LLM chain at runtime. |
 
 ### Safety model
 
@@ -675,7 +675,7 @@ book-bot/
 │       ├── adminAgent/               ← admin AI agent (separate Telegram bot)
 │       │   ├── index.ts              ← polling bootstrap, MAX_LLM_LOOPS, pending-write flow
 │       │   ├── prompt.ts             ← Arabic system prompt + confirm/cancel phrases
-│       │   ├── tools.ts              ← 59 tools (read + write + code + schedule)
+│       │   ├── tools.ts              ← 60 tools (read + write + code + schedule)
 │       │   ├── llm.ts                ← dispatcher, retry, normalize, forceText mode
 │       │   ├── llmProviders.ts       ← 9-provider chain + CF-primary boot migration
 │       │   ├── llmTelemetry.ts       ← per-provider ok/err/latency + breaker
@@ -970,7 +970,7 @@ Issues for newcomers are labelled `good first issue`. Before you start a large f
 - [x] **Engagement: streak + 10 badges + tiered referrals** (v32.0)
 - [x] **Real weekly leaderboard with canonical-key normalization** (v32.1)
 - [x] **Hard-blocked domains list** (v32.0)
-- [x] **Admin AI agent** — second Telegram bot with ReAct loop, 59 tools, 9-provider LLM failover, write-confirm flow, memory, scheduling, reports, code execution, web search, per-provider telemetry breaker
+- [x] **Admin AI agent** — second Telegram bot with ReAct loop, 60 tools, 9-provider LLM failover, write-confirm flow, memory, scheduling, reports, code execution, web search, per-provider telemetry breaker
 
 **Planned:**
 - [ ] Webhook mode (currently long-poll only)

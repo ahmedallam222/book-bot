@@ -9,6 +9,21 @@
 
 ## [Unreleased] — AgentRouter integration for the Admin AI agent
 
+### 📡 Added — `llm_test_provider` admin tool
+- New read tool (one-shot health probe) that pings a single LLM
+  provider — or every enabled provider in parallel — with a tiny
+  `messages: [{role:"user", content:"ping"}]` request (`max_tokens=5`,
+  15s per-provider timeout) and returns `{id, ok, ms, status, model,
+  reply?, error?}`. The result is recorded into the same Redis
+  telemetry counters the dispatcher uses, so the next
+  `llm_provider_stats` call reflects the probe.
+- Useful right after wiring a paid provider (AgentRouter, OpenRouter,
+  …) to verify the key + base URL work end-to-end without waiting for
+  organic traffic. Replaces the previous "deploy then watch logs"
+  routine for the admin agent's own provider chain.
+- Tool count: 59 → 60.
+
+
 ### ✨ Added
 - **AgentRouter (agentrouter.org) as a paid fallback band** for the admin
   AI agent's LLM provider chain. Five new models are seeded into
