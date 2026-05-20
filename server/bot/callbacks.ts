@@ -26,6 +26,7 @@ import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
 } from "./wishlist.js";
 import { handleSummaryCallback } from "./summaryHandler.js";
+import { handleImageCallback }   from "./imageGen.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
@@ -73,7 +74,8 @@ export function registerCallbackHandler(
                        data === "wishlist_clear"          ||
                        data.startsWith("wishlist_add:")   ||
                        data.startsWith("wishlist_del:")   ||
-                       data.startsWith("sum:");
+                       data.startsWith("sum:")             ||
+                       data.startsWith("img:");
 
     let acquiredDedup = false;
     if (needsDedup) {
@@ -288,6 +290,14 @@ export function registerCallbackHandler(
     // summaryHandler.ts to keep this dispatcher slim.
     if (data.startsWith("sum:")) {
       await handleSummaryCallback(bot, chatId, userId, data, query.id);
+      return;
+    }
+
+    // ── image generation buttons ──────────────────
+    // 🔄 توليد تاني / ✨ نسخة مختلفة / 📥 HD تحت الصور المولّدة بـ /img.
+    // الـ hash في callback_data بيربطنا بـ (prompt + url) المخزّن في Redis.
+    if (data.startsWith("img:")) {
+      await handleImageCallback(bot, chatId, userId, data, query.id);
       return;
     }
 

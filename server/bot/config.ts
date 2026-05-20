@@ -18,10 +18,13 @@ export const MAX_PDF_SIZE             = 50 * 1024 * 1024; // 50 MB
 export const MIN_QUERY_LENGTH         = 3;
 
 // ── Image generation (/img) ───────────────────
-// عدد الصور اليومي لكل مستخدم. أعلى من DAILY_LIMIT (تحميل الكتب)
-// لأن الـ endpoint مدفوع لكن سريع نسبياً (~40s/صورة) ومش بياخد
-// من Firecrawl quota. يتجاوزه الـ admins.
-export const IMAGE_DAILY_LIMIT        = parseInt(process.env.IMAGE_DAILY_LIMIT || "5", 10);
+// حد الصور اليومي لكل مستخدم. tier-based:
+//   - regular: IMAGE_DAILY_LIMIT (افتراضي 5)
+//   - premium: IMAGE_PREMIUM_DAILY_LIMIT (افتراضي 15)
+//   - admin: بلا حد
+// الـ endpoint مدفوع (~40s/صورة) ومش بياخد من Firecrawl quota.
+export const IMAGE_DAILY_LIMIT         = parseInt(process.env.IMAGE_DAILY_LIMIT || "5", 10);
+export const IMAGE_PREMIUM_DAILY_LIMIT = parseInt(process.env.IMAGE_PREMIUM_DAILY_LIMIT || "15", 10);
 
 // ── Timeouts (ms) ─────────────────────────────
 export const TIMEOUT_DOWNLOAD         = 90_000;
