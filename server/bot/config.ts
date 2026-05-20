@@ -33,8 +33,9 @@ export const TIMEOUT_UPLOAD           = 120_000;
 export const TIMEOUT_FC_SEARCH        = 30_000;
 export const TIMEOUT_FC_SCRAPE        = 20_000;
 export const TIMEOUT_MISTRAL          = 15_000;
-// nano-banana API بياخد ~42s نموذجياً — نديله هامش معقول.
-export const TIMEOUT_IMAGE_GEN        = 90_000;
+// nano-banana API بياخد ~42s نموذجياً، لكن وقت الذروة بيوصل لـ 100+s.
+// نديله هامش واسع (120s) عشان نقلل false-timeouts.
+export const TIMEOUT_IMAGE_GEN        = 120_000;
 
 // ── Cache TTLs (seconds; consumed by redis.setex) ──
 // BUG-FIX: قبل كده كانت القيم بالـ milliseconds (3_600_000، 300_000)

@@ -121,7 +121,11 @@ async function decrDailyImageCount(userId: string): Promise<void> {
   } catch { /* swallow */ }
 }
 
-async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
+// single attempt at the API. بيرجع:
+//   - success: { url, prompt, time_taken }
+//   - overloaded: { error: "try again...!" } (على 200 OK — retry-friendly)
+//   - hard error: { error: "..." } أو HTTP non-200 (مفيش فايدة من ريتراي)
+async function callNanoBananaOnce(prompt: string): Promise<NanoBananaResponse> {
   const url = new URL(NANO_BANANA_ENDPOINT);
   url.searchParams.set("key", NANO_BANANA_API_KEY);
   url.searchParams.set("prompt", prompt);
@@ -139,6 +143,9 @@ async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
       return { error: `HTTP ${r.status}: ${body.slice(0, 200)}` };
     }
     const data = await r.json() as NanoBananaResponse;
+    // الـ API بيرجع 200 OK مع {error: "try again...!"} لمّا يكون
+    // overloaded. نتعامل معاه كـ error صريح.
+    if (data.error) return { error: data.error };
     if (!data.url) return { error: "missing_url" };
     return data;
   } catch (e) {
@@ -150,6 +157,32 @@ async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// transient errors بتعني الـ API overloaded وبيستحق retry واحد.
+function isTransientNanoError(err: string): boolean {
+  const e = err.toLowerCase();
+  return e.includes("try again") ||
+         e.includes("missing_url") ||
+         e.includes("timeout") ||
+         e.includes("http 5");
+}
+
+// wrapper بيعمل retry واحد تلقائي لو الفشل transient.
+// سبب وجود ريتراي: nano-banana بيرجع "try again" بشكل عشوائي لمّا يكون
+// مزدحم، والـ user تاني request غالباً بينجح.
+async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
+  const first = await callNanoBananaOnce(prompt);
+  if (!first.error) return first;
+  if (!isTransientNanoError(first.error)) return first;
+
+  L.info("imageGen", "nano-banana transient error — retrying once", {
+    err: first.error.slice(0, 80),
+  });
+  // فترة بسيطة عشان نسيب الـ API يتنفس
+  await new Promise<void>(res => setTimeout(res, 2_000));
+  const second = await callNanoBananaOnce(prompt);
+  return second;
 }
 
 // ننزّل الـ image bytes بنفسنا. multipart upload لـ Telegram بيتم من الـ Buffer.
@@ -270,16 +303,36 @@ async function runGeneration(
     });
     redis.incr("tel:imageGen:fail").catch(() => {});
 
-    const friendly = result.error === "timeout"
-      ? `⏱ انتهى الوقت قبل اكتمال الصورة. حاول مرة أخرى.`
-      : `❌ خطأ في توليد الصورة. حاول لاحقاً.`;
+    // خزّن الـ prompt تحت hash عشان زرار "جرّب تاني" يشتغل بدون ما
+    // الـ user يعيد كتابة الـ prompt.
+    const retryHash = shortHash();
+    redis.set(imgMetaKey(retryHash), JSON.stringify({ prompt, url: "" } as ImgMeta),
+      "EX", IMG_META_TTL).catch(() => {});
+
+    const err = result.error || "unknown";
+    const friendly = err === "timeout"
+      ? `⏱ *السيرفر بطيء دلوقتي*\n\nnano-banana بياخد وقت أطول من المتوقع، حاول بعد دقيقة.`
+      : err.toLowerCase().includes("try again") || err.includes("missing_url")
+        ? `⚠️ *السيرفر مزدحم حالياً*\n\nnano-banana بيرد بـ "try again" — جرّب تاني خلال ثواني.`
+        : err.startsWith("HTTP")
+          ? `❌ *خطأ في سيرفر nano-banana*\n\n\`${escMd(err.slice(0, 100))}\``
+          : `❌ *خطأ في توليد الصورة*\n\n\`${escMd(err.slice(0, 150))}\``;
+
+    const retryKb: TelegramBot.InlineKeyboardMarkup = {
+      inline_keyboard: [[
+        { text: "🔄 جرّب تاني", callback_data: `img:re:${retryHash}` },
+      ]],
+    };
 
     if (ackMsg) {
       await bot.editMessageText(friendly, {
         chat_id: chatId, message_id: ackMsg.message_id,
-      }).catch(() => bot.sendMessage(chatId, friendly).catch(() => {}));
+        parse_mode: "Markdown", reply_markup: retryKb,
+      }).catch(() => bot.sendMessage(chatId, friendly,
+        { parse_mode: "Markdown", reply_markup: retryKb }).catch(() => {}));
     } else {
-      await bot.sendMessage(chatId, friendly).catch(() => {});
+      await bot.sendMessage(chatId, friendly,
+        { parse_mode: "Markdown", reply_markup: retryKb }).catch(() => {});
     }
     return;
   }
@@ -387,12 +440,19 @@ export async function handleImageCommand(
         ? `${limit} صور/يوم ⭐ Premium`
         : `${limit} صور/يوم مجاناً`;
     await bot.sendMessage(chatId,
-      `🎨 *إنشاء صورة بالـ AI*\n` +
+      `🎨 *توليد صورة بالـ AI — Nano Banana Pro* 🍌\n` +
       `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-      `الاستخدام: \`/img <وصف الصورة>\`\n\n` +
-      `📌 *مثال:*\n` +
-      `\`/img A red sports car drifting in a neon city\`\n\n` +
-      `⏱ توليد الصورة يستغرق ~40 ثانية\n` +
+      `الاستخدام:\n\`/img <وصف الصورة>\`\n\n` +
+      `💡 *نصيحة مهمة:*\n` +
+      `📝 اكتب الـ prompt بالـ *إنجليزي* للحصول على نتائج أفضل بكثير.\n` +
+      `الموديل بيفهم العربي لكنه مُدرَّب على إنجليزي بشكل أساسي.\n\n` +
+      `📌 *مثال جيد:*\n` +
+      `\`/img A red sports car drifting in a neon city, cinematic, 4K\`\n\n` +
+      `🎯 *نصايح للـ prompt الناجح:*\n` +
+      `• وصف تفصيلي (الموضوع + المكان + المزاج + جودة)\n` +
+      `• كلمات زي: cinematic, photorealistic, 4K, detailed\n` +
+      `• تجنّب prompts قصيرة جداً\n\n` +
+      `⏱ التوليد ~40 ثانية لكل صورة\n` +
       `🎫 لديك *${limitText}*`,
       { parse_mode: "Markdown" }).catch(() => {});
     return;

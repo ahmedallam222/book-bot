@@ -26,7 +26,7 @@ import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
 } from "./wishlist.js";
 import { handleSummaryCallback } from "./summaryHandler.js";
-import { handleImageCallback }   from "./imageGen.js";
+import { handleImageCallback, handleImageCommand } from "./imageGen.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
@@ -390,6 +390,11 @@ export function registerCallbackHandler(
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
         });
+        break;
+
+      // ── img_menu: شرح ميزة /img (مدخل من القائمة الرئيسية) ──
+      case "img_menu":
+        await handleImageCommand(bot, chatId, userId, "", undefined);
         break;
 
       case "my_stats": {

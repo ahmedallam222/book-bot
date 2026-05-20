@@ -44,6 +44,9 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
         { text: "❓  مساعدة",              callback_data: "help"         },
       ],
       [
+        { text: "🎨  توليد صورة AI — Nano Banana Pro 🍌", callback_data: "img_menu" },
+      ],
+      [
         { text: "⭐  ترقية للـ Premium",   callback_data: "premium_buy"  },
       ],
     ],
