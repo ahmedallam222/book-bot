@@ -14,9 +14,9 @@
 //   - prompt يُرسل كما هو بدون ترجمة — أي لغة مسموحة.
 //
 // الـ endpoint يرجع JSON على الصيغة:
-//   { url: "https://.../img_xxxx.png", prompt: "...", time_taken: "42.23 sec" }
-// نمرّر الـ URL مباشرة لـ bot.sendPhoto — تيليغرام يحمّلها بنفسه.
-// لا حاجة لتنزيل الـ image مؤقتاً عندنا.
+//   { url: "https://.../nano.php?dl=1&file=img_xxxx.png", prompt, time_taken }
+// تيليغرام يفشل في تحميل الـ URL مباشرة لأنها بتنتهي بـ query string
+// مش بـ .png، فبننزّل الـ bytes بنفسنا ونرسلها كـ Buffer لـ sendPhoto.
 
 import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
@@ -109,6 +109,28 @@ async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
       return { error: "timeout" };
     }
     return { error: msg.slice(0, 200) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ننزّل الـ image bytes بنفسنا لأن تيليغرام بيرفض URL منتهي بـ query
+// string. الـ Buffer بيتبعت مباشرة عبر multipart/form-data من node-telegram-bot-api.
+// نحدّ بـ 20MB احتياطاً (الـ API بترجع عادة 2-4MB لصور 2K).
+const MAX_IMG_BYTES = 20 * 1024 * 1024;
+async function downloadImage(imgUrl: string): Promise<Buffer | { error: string }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const r = await fetch(imgUrl, { signal: ctrl.signal });
+    if (!r.ok) return { error: `download HTTP ${r.status}` };
+    const len = parseInt(r.headers.get("content-length") || "0", 10);
+    if (len && len > MAX_IMG_BYTES) return { error: `image too large: ${len}` };
+    const ab = await r.arrayBuffer();
+    if (ab.byteLength > MAX_IMG_BYTES) return { error: `image too large: ${ab.byteLength}` };
+    return Buffer.from(ab);
+  } catch (e) {
+    return { error: String(e).slice(0, 200) };
   } finally {
     clearTimeout(timer);
   }
@@ -242,32 +264,43 @@ export async function handleImageCommand(
     `🎨 *الصورة جاهزة* (${seconds}s)\n\n` +
     `📝 \`${escMd(prompt.slice(0, 200))}\`${remainingLine}`;
 
-  try {
-    await bot.sendPhoto(chatId, result.url, {
-      caption,
-      parse_mode: "Markdown",
-    });
-    // حذف رسالة الـ ack بعد نجاح الإرسال
-    if (ackMsg) {
-      bot.deleteMessage(chatId, ackMsg.message_id).catch(() => {});
+  // ننزّل الـ bytes ونرسلها كـ Buffer — تيليغرام مش بيقدر يفتح الـ
+  // URL مباشرة لأنها بتنتهي بـ ?dl=1&file=*.png مش بـ .png فعلياً.
+  const downloaded = await downloadImage(result.url);
+  if (Buffer.isBuffer(downloaded)) {
+    try {
+      await bot.sendPhoto(
+        chatId,
+        downloaded,
+        { caption, parse_mode: "Markdown" },
+        { filename: "image.png", contentType: "image/png" },
+      );
+      if (ackMsg) {
+        bot.deleteMessage(chatId, ackMsg.message_id).catch(() => {});
+      }
+      return;
+    } catch (e) {
+      L.warn("imageGen", "sendPhoto with buffer failed", {
+        userId, err: String(e).slice(0, 200),
+      });
+      // نسقط لـ URL fallback تحت
     }
-  } catch (e) {
-    L.warn("imageGen", "sendPhoto failed, falling back to URL", {
-      userId, err: String(e).slice(0, 100),
+  } else {
+    L.warn("imageGen", "downloadImage failed, falling back to URL", {
+      userId, err: downloaded.error,
     });
-    // fallback: ابعت الـ URL كنص لو تيليغرام رفض الصورة
-    const fallback =
-      `🎨 *الصورة جاهزة* — اضغط الرابط:\n${result.url}${remainingLine}`;
-    if (ackMsg) {
-      await bot.editMessageText(fallback, {
-        chat_id: chatId,
-        message_id: ackMsg.message_id,
-        parse_mode: "Markdown",
-      }).catch(() => bot.sendMessage(chatId, fallback,
-        { parse_mode: "Markdown" }).catch(() => {}));
-    } else {
-      await bot.sendMessage(chatId, fallback,
-        { parse_mode: "Markdown" }).catch(() => {});
-    }
+  }
+
+  // fallback نهائي: ابعت الـ URL كنص بدون Markdown (URL فيه `_` بتكسر Markdown)
+  const fallback =
+    `🎨 الصورة جاهزة — اضغط الرابط:\n${result.url}` +
+    (remainingLine.replace(/\*/g, ""));
+  if (ackMsg) {
+    await bot.editMessageText(fallback, {
+      chat_id: chatId,
+      message_id: ackMsg.message_id,
+    }).catch(() => bot.sendMessage(chatId, fallback).catch(() => {}));
+  } else {
+    await bot.sendMessage(chatId, fallback).catch(() => {});
   }
 }
