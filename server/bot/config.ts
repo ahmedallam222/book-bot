@@ -17,6 +17,12 @@ export const MAX_PDF_SIZE             = 50 * 1024 * 1024; // 50 MB
 // FIX-PREFILTER: حد أدنى لطول الاستعلام — أقل من 3 أحرف لا يستحق Firecrawl call
 export const MIN_QUERY_LENGTH         = 3;
 
+// ── Image generation (/img) ───────────────────
+// عدد الصور اليومي لكل مستخدم. أعلى من DAILY_LIMIT (تحميل الكتب)
+// لأن الـ endpoint مدفوع لكن سريع نسبياً (~40s/صورة) ومش بياخد
+// من Firecrawl quota. يتجاوزه الـ admins.
+export const IMAGE_DAILY_LIMIT        = parseInt(process.env.IMAGE_DAILY_LIMIT || "5", 10);
+
 // ── Timeouts (ms) ─────────────────────────────
 export const TIMEOUT_DOWNLOAD         = 90_000;
 export const TIMEOUT_TELEGRAM         = 30_000;
@@ -24,6 +30,8 @@ export const TIMEOUT_UPLOAD           = 120_000;
 export const TIMEOUT_FC_SEARCH        = 30_000;
 export const TIMEOUT_FC_SCRAPE        = 20_000;
 export const TIMEOUT_MISTRAL          = 15_000;
+// nano-banana API بياخد ~42s نموذجياً — نديله هامش معقول.
+export const TIMEOUT_IMAGE_GEN        = 90_000;
 
 // ── Cache TTLs (seconds; consumed by redis.setex) ──
 // BUG-FIX: قبل كده كانت القيم بالـ milliseconds (3_600_000، 300_000)
@@ -116,6 +124,13 @@ export const BANNED_USERS = new Set<string>(
 
 // ── Mistral API key ───────────────────────────
 export const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
+
+// ── nano-banana (image generation /img) ───────
+// Endpoint مستضاف خارجياً يولّد صور عن طريق Gemini nano-banana model.
+// لو NANO_BANANA_API_KEY فاضي، الـ /img command يردّ برسالة "غير مفعّل".
+export const NANO_BANANA_API_KEY = process.env.NANO_BANANA_API_KEY || "";
+export const NANO_BANANA_ENDPOINT =
+  process.env.NANO_BANANA_ENDPOINT || "https://gold-newt-367030.hostingersite.com/nano.php";
 
 // ── AI Summary providers ──────────────────────
 // Multi-provider failover stack for the book-summary feature. Each

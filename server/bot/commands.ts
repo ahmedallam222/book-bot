@@ -6,6 +6,7 @@ import { react, reactRandom } from "./reactions.js";
 import { REACTION_RECEIVED } from "./uiVariants.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
+import { handleImageCommand } from "./imageGen.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
 import { runRetryPass, listPendingFailures } from "./failureRetry.js";
 import { cancelUserJobs, getQueueStats } from "./queue.js";
@@ -148,6 +149,16 @@ export function registerCommands(
     if (!userId) return;
     const genreInput = (match?.[1] || "").trim();
     await handleRandomCommand(bot, chatId, userId, token, username, genreInput);
+  });
+
+  // ── /img ───────────────────────────────────────
+  // توليد صورة عبر nano-banana endpoint. التفاصيل في imageGen.ts.
+  bot.onText(/^\/img(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    const prompt = (match?.[1] || "").trim();
+    await handleImageCommand(bot, chatId, userId, prompt, msg.message_id);
   });
 
   // ── /stats ─────────────────────────────────────
@@ -385,6 +396,8 @@ export function registerCommands(
       `◦ \`/stats\` — رصيدك اليومي\n` +
       `◦ \`/history\` — آخر بحث لك\n` +
       `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
+      `🎨 *الإبداع:*\n` +
+      `◦ \`/img <وصف>\` — ولّد صورة بالـ AI (5/يوم)\n\n` +
       `🎁 *الإحالات:*\n` +
       `◦ \`/invite\` — ادعُ صديقاً واحصل على Premium مجاني\n\n` +
       `🔖 *الإدارة:*\n` +
