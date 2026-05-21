@@ -36,6 +36,17 @@ import {
 const MAX_PROMPT_LEN = 1000;
 const MIN_PROMPT_LEN = 3;
 
+// ── Nano Banana usage tracking keys (read from admin panel) ──
+// عدّاد إجمالي مدى الحياة لكل مستخدم — sorted set عشان نقدر نسحب أعلى المستخدمين
+// بـ ZREVRANGE بدون scan على آلاف keys. score = عدد مرات الاستدعاء الناجحة.
+const NB_TOP_USERS_KEY = "img:topUsers";
+// إجمالي يومي لكل المستخدمين (success فقط) — مع TTL حتى منتصف ليل القاهرة.
+const NB_DAILY_TOTAL_PREFIX = "img:daily:total:";
+// إجمالي مدى الحياة (success + fail نُتركهما منفصلين، الموجودَين بالفعل
+// أسفل: `tel:imageGen:success` و `tel:imageGen:fail`).
+const NB_TOTAL_SUCCESS_KEY = "tel:imageGen:success";
+const NB_TOTAL_FAIL_KEY    = "tel:imageGen:fail";
+
 interface NanoBananaResponse {
   url?: string;
   prompt?: string;
@@ -81,6 +92,59 @@ async function decrDailyImageCount(userId: string): Promise<void> {
   try {
     await redis.decr(imageDailyKey(userId));
   } catch { /* swallow */ }
+}
+
+// ── Stats helpers (for admin panel) ───────────
+// نسجّل كل استدعاء ناجح في: (1) عدّاد المستخدم في sorted set،
+// (2) عدّاد اليوم لكل المستخدمين. fail-open: لو Redis فشل ما نأخّرش
+// رد البوت ولا نطلع error لليوزر.
+async function recordSuccessfulImage(userId: string): Promise<void> {
+  try {
+    await redis.zincrby(NB_TOP_USERS_KEY, 1, userId);
+  } catch { /* swallow */ }
+  try {
+    const key = `${NB_DAILY_TOTAL_PREFIX}${cairoDateString()}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      const ttlSec = Math.max(60, Math.ceil(msUntilCairoMidnight() / 1000));
+      await redis.expire(key, ttlSec).catch(() => {});
+    }
+  } catch { /* swallow */ }
+}
+
+export interface ImageGenStats {
+  totalSuccess: number;
+  totalFail:    number;
+  todayCount:   number;
+  topUsers:     { userId: string; count: number }[];
+}
+
+// يُقرأ من admin panel. يرجع zeros لو Redis تعطّل عشان ما يكسرش
+// الـ panel كله من أجل قسم إحصاءات واحد.
+export async function getImageGenStats(topN = 10): Promise<ImageGenStats> {
+  const safeInt = async (key: string): Promise<number> => {
+    try {
+      const v = await redis.get(key);
+      return v ? parseInt(v, 10) || 0 : 0;
+    } catch { return 0; }
+  };
+
+  const [totalSuccess, totalFail, todayCount, topRaw] = await Promise.all([
+    safeInt(NB_TOTAL_SUCCESS_KEY),
+    safeInt(NB_TOTAL_FAIL_KEY),
+    safeInt(`${NB_DAILY_TOTAL_PREFIX}${cairoDateString()}`),
+    redis.zrevrange(NB_TOP_USERS_KEY, 0, Math.max(0, topN - 1), "WITHSCORES")
+      .catch(() => [] as string[]),
+  ]);
+
+  const topUsers: { userId: string; count: number }[] = [];
+  for (let i = 0; i < topRaw.length; i += 2) {
+    const userId = topRaw[i];
+    const count  = parseInt(topRaw[i + 1] ?? "0", 10) || 0;
+    if (userId) topUsers.push({ userId, count });
+  }
+
+  return { totalSuccess, totalFail, todayCount, topUsers };
 }
 
 async function callNanoBanana(prompt: string): Promise<NanoBananaResponse> {
@@ -201,7 +265,7 @@ export async function handleImageCommand(
       err: result.error?.slice(0, 100),
       elapsedMs,
     });
-    redis.incr("tel:imageGen:fail").catch(() => {});
+    redis.incr(NB_TOTAL_FAIL_KEY).catch(() => {});
 
     const friendly = result.error === "timeout"
       ? `⏱ انتهى الوقت قبل اكتمال الصورة. حاول مرة أخرى.`
@@ -225,7 +289,10 @@ export async function handleImageCommand(
     promptLen: prompt.length,
     apiTime: result.time_taken,
   });
-  redis.incr("tel:imageGen:success").catch(() => {});
+  redis.incr(NB_TOTAL_SUCCESS_KEY).catch(() => {});
+  // عداد التشخيص للوحة الأدمن: per-user lifetime + daily global.
+  // admins يتعدّون في الإحصاءات عشان نشوف الاستخدام الفعلي كله.
+  recordSuccessfulImage(userId).catch(() => {});
 
   // عدد الصور المتبقية (admins يرون ∞)
   let remainingLine = "";
