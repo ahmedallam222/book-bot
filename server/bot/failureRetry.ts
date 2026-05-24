@@ -336,33 +336,17 @@ async function retryOne(
     return { outcome: "still_no_pdf" };
   }
 
-  // ── Send apology preface (reply-quoted to original message) ──
-  // We send this *before* the PDF so the user sees context first.
-  // Fall back gracefully if the original message was deleted —
-  // allow_sending_without_reply lets Telegram drop the quote rather
-  // than rejecting the whole message.
-  //
-  // bookName + userName are user-controlled and may contain Markdown
-  // metacharacters (`_`, `*`, `[`, `]`, ` `` `). Escaping them defends
-  // against `can't parse entities` rejections from Telegram. Telegram
-  // usernames officially allow only alphanumerics + `_`, so the
-  // underscore is the realistic clash with our `_..._` italic wrapper.
-  const safeBook = escMd(rec.bookName.slice(0, 60));
-  const displayName = rec.userName ? `@${escMd(rec.userName)}` : "🙏";
-  const apology =
-    `🙏 *أعتذر على التأخير* — وجدتُ كتاب "${safeBook}" الآن\n` +
-    `_${displayName}، كنتَ قد طلبته من قبل ولم يكن متاحاً حينها_`;
-
-  await bot.sendMessage(rec.chatId, apology, {
-    parse_mode:                  "Markdown",
-    reply_to_message_id:         rec.userMessageId,
-    allow_sending_without_reply: true,
-    disable_web_page_preview:    true,
-  }).catch((e) => {
-    L.warn("retry", "apology send failed (non-fatal)", { err: String(e).slice(0, 100) });
-  });
-
   // ── Try each candidate until one delivers ──────────────────────
+  // 2026-05-24: The apology was previously sent BEFORE the download
+  // loop. That caused two user-visible bugs:
+  //   (a) if every candidate failed to download, the user got an
+  //       apology with no PDF attached → confusing false-positive.
+  //   (b) on the next retry pass (and the next, until attempts ran
+  //       out) the apology was re-sent because the record was only
+  //       removed on actual delivery → up to 3 copies of the apology.
+  // The apology is now sent INSIDE the `if (dl?.ok)` branch, right
+  // before `removeFailure`, so it fires exactly once per record and
+  // only when a PDF actually goes out with it.
   for (const url of validUrls.slice(0, 3)) {
     const title = urlSearchTitle.get(url) ?? "";
     let dl;
@@ -373,6 +357,28 @@ async function retryOne(
       continue;
     }
     if (dl?.ok) {
+      // Send apology preface AFTER successful delivery — see comment
+      // above for rationale. Reply-quoted to the original message;
+      // allow_sending_without_reply guards against the user having
+      // deleted their original request.
+      //
+      // bookName + userName are user-controlled and may contain
+      // Markdown metacharacters (`_`, `*`, `[`, `]`, ` `` `). escMd
+      // defends against `can't parse entities` rejections.
+      const safeBook    = escMd(rec.bookName.slice(0, 60));
+      const displayName = rec.userName ? `@${escMd(rec.userName)}` : "🙏";
+      const apology =
+        `🙏 *أعتذر على التأخير* — وجدتُ كتاب "${safeBook}" الآن\n` +
+        `_${displayName}، كنتَ قد طلبته من قبل ولم يكن متاحاً حينها_`;
+      await bot.sendMessage(rec.chatId, apology, {
+        parse_mode:                  "Markdown",
+        reply_to_message_id:         rec.userMessageId,
+        allow_sending_without_reply: true,
+        disable_web_page_preview:    true,
+      }).catch((e) => {
+        L.warn("retry", "apology send failed (non-fatal)", { err: String(e).slice(0, 100) });
+      });
+
       L.info("retry", "Delivered after retry", {
         userId:   rec.userId,
         book:     rec.bookName.slice(0, 50),

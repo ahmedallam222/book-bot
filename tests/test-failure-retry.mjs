@@ -121,8 +121,20 @@ check("apology never references rec.bookName.slice without escMd",
 check("retry counter tel:retry:delivered", /redis\.incr\(["']tel:retry:delivered["']\)/.test(retrySrc));
 
 // ── 2. Hook into bookRequest.ts at all 3 fail sites ──
+// We import recordFailure plus removeFailure + failureKey (to clear
+// stale records on successful delivery — see bug fix 2026-05-24).
 check("bookRequest imports recordFailure",
-  /import\s+\{\s*recordFailure\s*\}\s+from\s+["']\.\/failureRetry/.test(bookReqSrc));
+  /import\s+\{[^}]*\brecordFailure\b[^}]*\}\s+from\s+["']\.\/failureRetry/.test(bookReqSrc));
+check("bookRequest imports removeFailure (for clear-on-success)",
+  /import\s+\{[^}]*\bremoveFailure\b[^}]*\}\s+from\s+["']\.\/failureRetry/.test(bookReqSrc));
+check("bookRequest imports failureKey (for clear-on-success)",
+  /import\s+\{[^}]*\bfailureKey\b[^}]*\}\s+from\s+["']\.\/failureRetry/.test(bookReqSrc));
+
+// Each success-path must clear any pending failure record so the
+// retry worker doesn't redeliver with an "وجدتُ الكتاب الآن" apology.
+const removeCallCount = (bookReqSrc.match(/removeFailure\(failureKey\(/g) || []).length;
+check("bookRequest calls removeFailure on >=3 success paths",
+  removeCallCount >= 3, ">=3", removeCallCount);
 
 const recordCalls = (bookReqSrc.match(/recordFailure\(\{/g) || []).length;
 check("bookRequest calls recordFailure at >=3 sites",

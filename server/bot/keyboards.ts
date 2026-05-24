@@ -44,6 +44,12 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
         { text: "❓  مساعدة",              callback_data: "help"         },
       ],
       [
+        { text: "🎨  إنشاء صورة (Nano Banana)", callback_data: "img_gen" },
+      ],
+      [
+        { text: "🎬  إنشاء فيديو (veo3)",        callback_data: "video_gen" },
+      ],
+      [
         { text: "⭐  ترقية للـ Premium",   callback_data: "premium_buy"  },
       ],
     ],
