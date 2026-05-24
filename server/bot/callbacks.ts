@@ -382,6 +382,42 @@ export function registerCallbackHandler(
         });
         break;
 
+      case "img_gen":
+        await bot.sendMessage(chatId,
+          `🎨 *إنشاء صورة بالـ AI (Nano Banana)*\n` +
+          `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+          `اكتب الأمر مع وصف الصورة:\n` +
+          `\`/img وصف الصورة هنا\`\n\n` +
+          `📌 *مثال:*\n` +
+          `\`/img A red sports car drifting in a neon city\`\n\n` +
+          `⏱ التوليد يستغرق ~40 ثانية`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
+          },
+        );
+        break;
+
+      case "video_gen":
+        await bot.sendMessage(chatId,
+          `🎬 *إنشاء فيديو بالـ AI (veo3)*\n` +
+          `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+          `اكتب الأمر مع وصف الفيديو:\n` +
+          `\`/video وصف الفيديو هنا\`\n\n` +
+          `📐 *نِسَب الأبعاد المدعومة:*\n` +
+          `◦ \`/video 9:16 <وصف>\` — عمودي (افتراضي)\n` +
+          `◦ \`/video 16:9 <وصف>\` — أفقي\n` +
+          `◦ \`/video 1:1 <وصف>\` — مربع\n\n` +
+          `📌 *مثال:*\n` +
+          `\`/video A cinematic shot of a cat playing piano\`\n\n` +
+          `⏱ التوليد يستغرق ~2-3 دقائق`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
+          },
+        );
+        break;
+
       case "my_stats": {
         // BUG-FIX: getUserDailyLimit و getPremiumExpiry تنادي Redis لـ manual flag → نجيب prem أولاً.
         const prem  = await isPremium(userId);

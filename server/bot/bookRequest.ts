@@ -16,7 +16,7 @@ import {
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
-import { recordFailure } from "./failureRetry.js";
+import { recordFailure, removeFailure, failureKey } from "./failureRetry.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
@@ -443,6 +443,9 @@ async function serveFromCache(
       // Pass cached.bookName as canonical title — أحدث صياغة كنسية للكتاب
       // ده بيدمج كل المستخدمين اللي طلبوا نفس الكتاب بصيغ مختلفة في leaderboard entry واحد.
       trackDownload(userId, bookName, true, true, undefined, Date.now() - t0, cached.bookName).catch(() => {});
+      // Clear any stale failure record so the retry worker doesn't
+      // re-deliver the same book with an "وجدتُ الكتاب الآن" apology.
+      removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
       await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
       return true;
     } catch {
@@ -473,6 +476,8 @@ async function serveFromCache(
         warmRelatedCache(bookName).catch(() => {});
         // Pass cached.bookName as canonical title — راجع التعليق أعلاه.
         trackDownload(userId, bookName, true, true, cached.sourceUrl?.split("/")[2], Date.now() - t0, cached.bookName).catch(() => {});
+        // Clear any stale failure record — see comment on file_id path.
+        removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
         await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
         return true;
       }
@@ -1033,6 +1038,10 @@ async function performFullSearch(
         setLastBook(userId, bookName).catch(() => {});
         warmRelatedCache(bookName).catch(() => {});
         trackDownload(userId, bookName, true, false, sentDomain, Date.now() - t0).catch(() => {});
+        // Clear any stale failure record so the retry worker doesn't
+        // re-deliver the same book later with a "وجدتُ الكتاب الآن"
+        // apology (the user has already received it).
+        removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
         break;
       }
     }
