@@ -23,6 +23,12 @@ export const MIN_QUERY_LENGTH         = 3;
 // من Firecrawl quota. يتجاوزه الـ admins.
 export const IMAGE_DAILY_LIMIT        = parseInt(process.env.IMAGE_DAILY_LIMIT || "5", 10);
 
+// ── Video generation (/video, veo3) ───────────
+// عدد الفيديوهات اليومي لكل مستخدم. أقل بكثير من الصور لأن
+// كل فيديو على veoaifree.com بياخد ~60-180s ويستهلك quota المصدر
+// (الـ endpoint مجاني لكن محدود). يتجاوزه الـ admins.
+export const VIDEO_DAILY_LIMIT        = parseInt(process.env.VIDEO_DAILY_LIMIT || "2", 10);
+
 // ── Timeouts (ms) ─────────────────────────────
 export const TIMEOUT_DOWNLOAD         = 90_000;
 export const TIMEOUT_TELEGRAM         = 30_000;
@@ -32,6 +38,11 @@ export const TIMEOUT_FC_SCRAPE        = 20_000;
 export const TIMEOUT_MISTRAL          = 15_000;
 // nano-banana API بياخد ~42s نموذجياً — نديله هامش معقول.
 export const TIMEOUT_IMAGE_GEN        = 90_000;
+// veo3 (veoaifree) بياخد ~60s للبدء + ~60-120s للتوليد. نتيح إجمالي
+// ~5 دقايق عشان نغطّي الـ tail latency بدون ما نقفل الـ feature.
+// كل HTTP request جزئية بتاخد cap منفصل (TIMEOUT_VIDEO_HTTP_STEP).
+export const TIMEOUT_VIDEO_GEN        = 300_000;
+export const TIMEOUT_VIDEO_HTTP_STEP  = 30_000;
 
 // ── Cache TTLs (seconds; consumed by redis.setex) ──
 // BUG-FIX: قبل كده كانت القيم بالـ milliseconds (3_600_000، 300_000)
@@ -131,6 +142,25 @@ export const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
 export const NANO_BANANA_API_KEY = process.env.NANO_BANANA_API_KEY || "";
 export const NANO_BANANA_ENDPOINT =
   process.env.NANO_BANANA_ENDPOINT || "https://gold-newt-367030.hostingersite.com/nano.php";
+
+// ── veo3 (video generation /video) ────────────
+// نواجه واجهة veoaifree.com المجانية. flow على مرحلتين:
+//   1) GET /veo-video-generator/ → نسحب nonce من الـ HTML.
+//   2) POST /wp-admin/admin-ajax.php (action=full-video-generate) → نأخذ sceneId.
+//   3) Polling: POST /wp-admin/admin-ajax.php (action=final-video-results)
+//      حتى تظهر video URL.
+//
+// VEO3_ENABLED افتراضياً true لأن المصدر مجاني — لا API key مطلوب.
+// لو حصلت مشاكل في الإنتاج (rate-limit / blocked IP) اضبطه = false عشان
+// تتعطل الميزة بدون redeploy.
+export const VEO3_ENABLED        =
+  (process.env.VEO3_ENABLED ?? "true").toLowerCase() !== "false";
+export const VEO3_BASE_URL       =
+  (process.env.VEO3_BASE_URL || "https://veoaifree.com").replace(/\/+$/, "");
+export const VEO3_GENERATOR_PATH =
+  process.env.VEO3_GENERATOR_PATH || "/veo-video-generator/";
+export const VEO3_AJAX_PATH      =
+  process.env.VEO3_AJAX_PATH      || "/wp-admin/admin-ajax.php";
 
 // ── AI Summary providers ──────────────────────
 // Multi-provider failover stack for the book-summary feature. Each

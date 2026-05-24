@@ -11,6 +11,7 @@ import {
   setSourceManuallyDisabled, isSourceManuallyDisabled, sanitizeDomainKey,
 } from "./analytics.js";
 import { getImageGenStats } from "./imageGen.js";
+import { getVideoGenStats } from "./videoGen.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
@@ -203,6 +204,7 @@ export async function sendAdminPanel(bot: TelegramBot, chatId: number): Promise<
           ],
           [
             { text: "🎨 نانو بنانا",   callback_data: "admin_nano_banana" },
+            { text: "🎬 veo3 فيديو", callback_data: "admin_veo3" },
           ],
           [
             { text: isMaint === "1" ? "✅ إيقاف الصيانة" : "🔧 تفعيل الصيانة",
@@ -592,6 +594,41 @@ export async function handleAdminCallback(
           `◦ نسبة النجاح: *${successRate}%*\n\n` +
           `*اليوم:*\n` +
           `◦ صور ناجحة: *${stats.todayCount}*\n\n` +
+          `*أعلى المستخدمين (Top 10):*\n${topLines}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[
+              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+            ]]},
+          }
+        ).catch(() => {});
+        break;
+      }
+
+      // ── veo3 (video generation) usage ───────────────
+      case "admin_veo3": {
+        const stats = await getVideoGenStats(10);
+        const total = stats.totalSuccess + stats.totalFail;
+        const successRate = total > 0
+          ? Math.round((stats.totalSuccess / total) * 100)
+          : 0;
+
+        const topLines = stats.topUsers.length
+          ? stats.topUsers.map((u, i) => {
+              const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}\\.`;
+              return `${medal} \`${u.userId}\` — *${u.count}* فيديو`;
+            }).join("\n")
+          : "_لا يوجد استخدام بعد_";
+
+        await bot.sendMessage(chatId,
+          `🎬 *veo3 — إحصاءات توليد الفيديو*\n` +
+          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+          `*الإجمالي (مدى الحياة):*\n` +
+          `◦ ناجح: *${stats.totalSuccess}*\n` +
+          `◦ فاشل: *${stats.totalFail}*\n` +
+          `◦ نسبة النجاح: *${successRate}%*\n\n` +
+          `*اليوم:*\n` +
+          `◦ فيديوهات ناجحة: *${stats.todayCount}*\n\n` +
           `*أعلى المستخدمين (Top 10):*\n${topLines}`,
           {
             parse_mode: "Markdown",
