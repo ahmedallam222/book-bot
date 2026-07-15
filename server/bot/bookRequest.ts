@@ -60,6 +60,21 @@ import { activateReferralOnFirstDownload, sendReferralNotifications } from "./re
 
 // Round-robin URLs by domain so one noisy host cannot monopolize the first
 // N attempts (e.g. five t.me hits before a good hindawi PDF).
+
+// Latency class for attempt ordering (lower = try first).
+// Cheap direct sources before Playwright-heavy hosts so we spend the
+// job budget on deliverable candidates first.
+function latencyClassForUrl(url: string): number {
+  const u = (url || "").toLowerCase();
+  if (u.includes("t.me/") || u.startsWith("tg://")) return 1; // MTProto, usually fast
+  if (u.includes("downloads.hindawi.org") || u.includes("hindawi.org")) return 0; // direct PDFs
+  if (u.includes("archive.org")) return 3; // often slow / skipped
+  if (u.includes("noor-book.com")) return 4; // Playwright
+  if (u.includes("welib.st") || u.includes("welib.org") || u.includes("welib-public")) return 5; // Playwright+wait
+  if (u.includes("foulabook") || u.includes("mktbtypdf") || u.includes("kotobati")) return 2;
+  return 2; // default mid
+}
+
 function diversifyUrlsByDomain(urls: string[]): string[] {
   if (urls.length <= 2) return urls;
   const buckets = new Map<string, string[]>();
@@ -823,14 +838,33 @@ async function performFullSearch(
           else if (sz <= 35 * 1024 * 1024) sizeBoost = 0.0;
           else sizeBoost = -0.08;
         }
-        return filenameScore * 0.45 + sourceRate * 0.25 + reliablePenalty * 0.15 + sizeBoost * 0.15;
+        // (5) latency class: invert so lower class (faster) scores higher
+        const lat = latencyClassForUrl(url);
+        const latencyBoost = Math.max(0, 1 - lat * 0.18); // 0→1.0, 1→0.82, 5→0.1
+        return (
+          filenameScore * 0.40 +
+          sourceRate * 0.20 +
+          reliablePenalty * 0.12 +
+          sizeBoost * 0.13 +
+          latencyBoost * 0.15
+        );
       };
       return scoreUrl(b) - scoreUrl(a);
     });
 
     // Domain diversity: after score sort, interleave hosts so attempt #1..N
     // sample different sources (reduces found_no_send from one bad domain).
+    // Stable secondary key: prefer lower latency class within interleave.
     validUrls = diversifyUrlsByDomain(validUrls);
+    // Final micro-pass: among first 6 slots, prefer lower latency class
+    // without fully undoing diversity (swap adjacent if same domain family).
+    {
+      const head = validUrls.slice(0, 6);
+      head.sort((a, b) => latencyClassForUrl(a) - latencyClassForUrl(b) || 0);
+      // re-diversify head only
+      const rest = validUrls.slice(6);
+      validUrls = [...diversifyUrlsByDomain(head), ...rest];
+    }
 
     // الحماية في pdfValidator — يقرأ metaTitle من PDF بعد التحميل
 

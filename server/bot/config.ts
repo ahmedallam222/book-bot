@@ -131,6 +131,10 @@ export const RESCUE_MAX_FALLBACKS = parseInt(process.env.RESCUE_MAX_FALLBACKS ||
 export const RESCUE_BEST_PDF_THRESHOLD = parseFloat(process.env.RESCUE_BEST_PDF_THRESHOLD || "0.30");
 export const RESCUE_FALLBACK_THRESHOLD = parseFloat(process.env.RESCUE_FALLBACK_THRESHOLD || "0.40");
 
+// Fast-path ranking prefers direct/cheap sources before Playwright hosts
+// (noor-book / welib). Implemented in bookRequest latencyClassForUrl().
+export const FAST_PATH_ENABLED = (process.env.FAST_PATH_ENABLED ?? "1") !== "0";
+
 
 // ── Admin IDs ─────────────────────────────────
 // SECURITY: تُقرأ فقط من env. تم حذف الـ ID المثبت في المصدر — كان مكشوفاً

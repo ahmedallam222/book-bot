@@ -59,5 +59,18 @@ check("diversity first not all same host as second if multi", div[0].includes("t
 // first three should interleave: t.me, hindawi, foulabook
 check("diversity round-robin hosts", [div[0].includes("t.me"), div[1].includes("hindawi"), div[2].includes("foulabook")], [true, true, true]);
 
+
+function latencyClassForUrl(url) {
+  const u = (url || "").toLowerCase();
+  if (u.includes("t.me/") || u.startsWith("tg://")) return 1;
+  if (u.includes("hindawi")) return 0;
+  if (u.includes("archive.org")) return 3;
+  if (u.includes("noor-book")) return 4;
+  if (u.includes("welib")) return 5;
+  return 2;
+}
+check("hindawi faster than welib", latencyClassForUrl("https://downloads.hindawi.org/x.pdf") < latencyClassForUrl("https://ar.welib.st/md5/abc"), true);
+check("tg faster than noor", latencyClassForUrl("https://t.me/ch/1") < latencyClassForUrl("https://www.noor-book.com/x"), true);
+
 console.log(pass + " passed, " + fail + " failed");
 if (fail) process.exit(1);
