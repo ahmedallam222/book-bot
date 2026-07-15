@@ -23,6 +23,44 @@ import {
 } from "./telegramFallback.js";
 import type { DownloadResult } from "./types.js";
 
+
+// ══════════════════════════════════════════════
+// SIZE / UPLOAD ERROR HELPERS
+// Telegram Bot API hard-caps sendDocument at 50MB. Channel files (via
+// userbot) and some web hosts serve larger PDFs. Without early rejection
+// we download → validate → upload → 413, then bookRequest retries the
+// same URL as a "transient" failure (production 2026-07-15: إحياء علوم
+// الدين burned 4 attempts / ~6 min on two 413s).
+// ══════════════════════════════════════════════
+export function isTelegramUploadSizeError(err: unknown): boolean {
+  const e = String((err as any)?.message || err || "").toLowerCase();
+  return (
+    e.includes("413") ||
+    e.includes("request entity too large") ||
+    e.includes("file is too big") ||
+    e.includes("file_too_big") ||
+    e.includes("payload too large") ||
+    (e.includes("document_invalid") && e.includes("size"))
+  );
+}
+
+export function rejectIfTempTooLarge(tempPath: string, pdfUrl: string): DownloadResult | null {
+  try {
+    if (!fs.existsSync(tempPath)) return null;
+    const size = fs.statSync(tempPath).size;
+    if (size > MAX_PDF_SIZE) {
+      L.dlTooLarge(pdfUrl, size / 1024 / 1024);
+      redis.incr("tel:dl:too_large").catch(() => {});
+      safeDeleteTemp(tempPath);
+      // permanent: bookRequest must NOT re-download the same URL
+      return { ok: false, permanent: true, tooLarge: true };
+    }
+  } catch {
+    /* ignore stat errors — upload path will surface real failures */
+  }
+  return null;
+}
+
 // ══════════════════════════════════════════════
 // SKIP_DIRECT_DOMAINS
 // كل موقع هنا → السيرفر يحمّله محلياً أولاً
@@ -225,6 +263,16 @@ export function buildPdfFilename(bookName: string, metaTitle: string): string {
 // Caption shown in Telegram. Always includes user query so they see
 // what they asked for. If validation surfaced a different real title,
 // surface it explicitly so users can spot mismatches before opening.
+export function escHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Caption shown in Telegram. Always includes user query so they see
+// what they asked for. If validation surfaced a different real title,
+// surface it explicitly so users can spot mismatches before opening.
 export function buildCaption(bookName: string, metaTitle: string): string {
   const cleanMeta = (metaTitle || "").trim();
   // Show the actual title only when it diverges meaningfully from the
@@ -235,9 +283,9 @@ export function buildCaption(bookName: string, metaTitle: string): string {
                      cleanMeta.length >= 4 &&
                      norm(cleanMeta) !== norm(bookName);
   if (showActual) {
-    return `📚 *${escMd(bookName)}*\n📖 _${escMd(cleanMeta)}_\n\n✅ من خلاصة الكتب`;
+    return `📚 <b>${escHtml(bookName)}</b>\n📖 <i>${escHtml(cleanMeta)}</i>\n\n✅ من خلاصة الكتب`;
   }
-  return `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`;
+  return `📚 <b>${escHtml(bookName)}</b>\n\n✅ من خلاصة الكتب`;
 }
 
 // ══════════════════════════════════════════════
@@ -609,7 +657,7 @@ export async function downloadAndSend(
             // caption can flag it when the search-result page title
             // diverges from the user's query.
             caption:    buildCaption(bookName, searchResultTitle),
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
           }),
         });
         d = await r.json();
@@ -758,7 +806,8 @@ export async function downloadAndSend(
         );
         if (bodyBuf.length > MAX_PDF_SIZE) {
           L.dlTooLarge(pdfUrl, bodyBuf.length / 1024 / 1024);
-          return { ok: false };
+          redis.incr("tel:dl:too_large").catch(() => {});
+          return { ok: false, permanent: true, tooLarge: true };
         }
         try {
           await fsPromises.writeFile(tempPath, bodyBuf);
@@ -825,7 +874,8 @@ export async function downloadAndSend(
         safeDeleteTemp(tempPath);
         if (pipeErr?.message === "FILE_TOO_LARGE") {
           L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
-          return { ok: false };
+          redis.incr("tel:dl:too_large").catch(() => {});
+          return { ok: false, permanent: true, tooLarge: true };
         }
         if (String(pipeErr).includes("abort") || String(pipeErr).includes("timeout")) {
           L.dlTimeout(pdfUrl, Date.now() - t0);
@@ -882,6 +932,15 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
+    // ── size gate (Telegram bot upload limit) ───
+    {
+      const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+      if (tooBig) {
+        await recordUrlFailure(pdfUrl);
+        return tooBig;
+      }
+    }
+
     // ── validatePdfContent — تحقق من المحتوى ─────
     // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
     // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
@@ -930,7 +989,7 @@ export async function downloadAndSend(
       tempPath,
       {
         caption:    buildCaption(bookName, validation.metaTitle),
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
       },
       { filename: fname, contentType: "application/pdf" },
     ) as Promise<TelegramBot.Message>;
@@ -974,6 +1033,12 @@ export async function downloadAndSend(
     if (err.includes("UPLOAD_TIMEOUT")) {
       safeDeleteTemp(tempPath);
       L.dlTimeout(pdfUrl, Date.now() - t0);
+    } else if (isTelegramUploadSizeError(e)) {
+      safeDeleteTemp(tempPath);
+      L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
+      redis.incr("tel:dl:too_large").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true, tooLarge: true };
     } else if (err.includes("abort") || err.includes("timeout")) {
       L.dlTimeout(pdfUrl, Date.now() - t0);
       safeDeleteTemp(tempPath);
@@ -1055,6 +1120,15 @@ async function welibDownloadAndSend(
     return { ok: false };
   }
 
+  // ── size gate ────────────────────────────────
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
+  }
+
   // ── content validation ───────────────────────
   // originalUrl (e.g. /md5/{hash}) بيدخل لـ Mistral كـ URL hint — الـ md5 فيه
   // مفيش slug للكتاب، لكن الـ metaTitle من PDF بيكون عربي وصحيح.
@@ -1089,7 +1163,7 @@ async function welibDownloadAndSend(
     tempPath,
     {
       caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
     },
     { filename: fname, contentType: "application/pdf" },
   ) as Promise<TelegramBot.Message>;
@@ -1112,6 +1186,10 @@ async function welibDownloadAndSend(
     safeDeleteTemp(tempPath);
     L.dlFail(pdfUrl, `welib upload: ${String(e?.message || e).slice(0, 80)}`);
     await recordUrlFailure(pdfUrl);
+    if (isTelegramUploadSizeError(e)) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      return { ok: false, permanent: true, tooLarge: true };
+    }
     return { ok: false };
   } finally {
     if (uploadTimerId !== null) clearTimeout(uploadTimerId);
@@ -1195,6 +1273,15 @@ async function noorBookDownloadAndSend(
 
   // ── content validation ───────────────────────
   // originalUrl فيه slug الكتاب — مفيد لـ Mistral
+  // ── size gate ────────────────────────────────
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
+  }
+
   const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, "", searchResultTitle);
   if (!validation.accepted) {
     L.warn("download", "noor-book PDF rejected — content mismatch", {
@@ -1226,7 +1313,7 @@ async function noorBookDownloadAndSend(
     tempPath,
     {
       caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
     },
     { filename: fname, contentType: "application/pdf" },
   ) as Promise<TelegramBot.Message>;
@@ -1249,6 +1336,10 @@ async function noorBookDownloadAndSend(
     safeDeleteTemp(tempPath);
     L.dlFail(pdfUrl, `noor-book upload: ${String(e?.message || e).slice(0, 80)}`);
     await recordUrlFailure(pdfUrl);
+    if (isTelegramUploadSizeError(e)) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      return { ok: false, permanent: true, tooLarge: true };
+    }
     return { ok: false };
   } finally {
     if (uploadTimerId !== null) clearTimeout(uploadTimerId);
@@ -1304,10 +1395,24 @@ async function telegramDownloadAndSend(
 
   const result = await downloadTelegramFile(parsed.channelRef, parsed.msgId, tempPath);
   if (!result.ok) {
-    L.dlFail(pdfUrl, `telegram: ${result.error?.slice(0, 80) ?? "unknown"}`);
+    const errMsg = result.error?.slice(0, 80) ?? "unknown";
+    L.dlFail(pdfUrl, `telegram: ${errMsg}`);
     safeDeleteTemp(tempPath);
     await recordUrlFailure(pdfUrl);
+    if (errMsg.startsWith("too_large") || isTelegramUploadSizeError(errMsg)) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      return { ok: false, permanent: true, tooLarge: true };
+    }
     return { ok: false };
+  }
+
+  // Post-download size gate (declared size may be missing on some peers)
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
   }
 
   // ── magic bytes ──────────────────────────────
@@ -1378,7 +1483,7 @@ async function telegramDownloadAndSend(
     tempPath,
     {
       caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
     },
     { filename: fname, contentType: "application/pdf" },
   ) as Promise<TelegramBot.Message>;
@@ -1401,6 +1506,10 @@ async function telegramDownloadAndSend(
     safeDeleteTemp(tempPath);
     L.dlFail(pdfUrl, `telegram upload: ${String(e?.message || e).slice(0, 80)}`);
     await recordUrlFailure(pdfUrl);
+    if (isTelegramUploadSizeError(e)) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      return { ok: false, permanent: true, tooLarge: true };
+    }
     return { ok: false };
   } finally {
     if (uploadTimerId !== null) clearTimeout(uploadTimerId);

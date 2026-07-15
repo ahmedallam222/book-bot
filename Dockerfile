@@ -9,7 +9,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci --no-audit --no-fund
+RUN npm install --no-audit --no-fund
 
 COPY tsconfig.json ./
 COPY drizzle.config.ts ./
@@ -46,7 +46,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/dev/null
 ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY --from=builder /app/dist   ./dist
 COPY --from=builder /app/shared ./shared

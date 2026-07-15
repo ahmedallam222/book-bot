@@ -13,7 +13,9 @@ export const FC_RATE_LIMITED_KEY      = "fc:rate_limited";
 export const DAILY_LIMIT              = 3;   // FIX: غُيّر من 5 → 3
 export const PREMIUM_LIMIT            = 15;  // FIX: غُيّر من 30 → 15 ليتطابق مع رسالة /premium
 export const MAX_BOOK_NAME_LEN        = 200;
-export const MAX_PDF_SIZE             = 50 * 1024 * 1024; // 50 MB
+export const MAX_PDF_SIZE             = 49 * 1024 * 1024; // 49 MB — under Telegram bot sendDocument 50MB limit
+/** Alias: Telegram Bot API sendDocument hard limit is 50MB; we keep a 1MB safety margin. */
+export const TELEGRAM_BOT_UPLOAD_MAX  = MAX_PDF_SIZE;
 // FIX-PREFILTER: حد أدنى لطول الاستعلام — أقل من 3 أحرف لا يستحق Firecrawl call
 export const MIN_QUERY_LENGTH         = 3;
 
@@ -82,8 +84,8 @@ export const FC_QUOTA_TTL_SEC         = 86_400;     // 24h
 //
 //   اضبطه = ACCEPT_THRESHOLD لتعطيل الـ band (back-compat).
 //   اضبطه < ACCEPT_THRESHOLD ليبدأ الفحص من تلك القيمة فما فوق.
-export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.40;
-export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.55;
+export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.75;
+export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.85;
 export const PDF_VALIDATE_REJECT_THRESHOLD  = 0.12;
 
 // ── Blacklist ─────────────────────────────────
@@ -110,6 +112,26 @@ export const WELIB_PROXY_URL = (process.env.WELIB_PROXY_URL || "").trim();
 export const WELIB_PROXY_SECRET = (process.env.WELIB_PROXY_SECRET || "").trim();
 export const WELIB_PROXY_ENABLED = WELIB_PROXY_URL.length > 0 && WELIB_PROXY_SECRET.length > 0;
 
+// ── Welib search circuit breaker ──────────────
+// Live logs showed search:done results:0 while still launching Chromium
+// (~4–5s + RAM). After N consecutive empties, skip Playwright search for
+// WELIB_CIRCUIT_TTL_SEC so Firecrawl + Telegram keep the latency budget.
+// Set WELIB_SEARCH_ENABLED=0 to force-off without redeploy.
+export const WELIB_SEARCH_ENABLED = (process.env.WELIB_SEARCH_ENABLED ?? "1") !== "0";
+export const WELIB_EMPTY_STREAK_OPEN = parseInt(process.env.WELIB_EMPTY_STREAK_OPEN || "6", 10);
+export const WELIB_CIRCUIT_TTL_SEC = parseInt(process.env.WELIB_CIRCUIT_TTL_SEC || "7200", 10);
+export const WELIB_CIRCUIT_KEY = "flag:welib_circuit_open";
+export const WELIB_EMPTY_STREAK_KEY = "welib:empty_streak";
+
+// ── Rescue / candidate diversity ──────────────
+// When verified PDFs are few, still pull download_page fallbacks so one
+// blacklisted/too-large/slow-archive URL does not end the request.
+export const RESCUE_MIN_CANDIDATES = parseInt(process.env.RESCUE_MIN_CANDIDATES || "4", 10);
+export const RESCUE_MAX_FALLBACKS = parseInt(process.env.RESCUE_MAX_FALLBACKS || "5", 10);
+export const RESCUE_BEST_PDF_THRESHOLD = parseFloat(process.env.RESCUE_BEST_PDF_THRESHOLD || "0.30");
+export const RESCUE_FALLBACK_THRESHOLD = parseFloat(process.env.RESCUE_FALLBACK_THRESHOLD || "0.40");
+
+
 // ── Admin IDs ─────────────────────────────────
 // SECURITY: تُقرأ فقط من env. تم حذف الـ ID المثبت في المصدر — كان مكشوفاً
 // لأي شخص يقرأ الـ repo (والـ repo public). انظر deployment notes في الـ PR.
@@ -134,6 +156,9 @@ export const BANNED_USERS = new Set<string>(
 );
 
 // ── Mistral API key ───────────────────────────
+export const MISTRAL_API_KEY_2 = process.env.MISTRAL_API_KEY_2;
+export const BYNARA_API_KEY_1 = process.env.BYNARA_API_KEY_1;
+export const BYNARA_API_KEY_2 = process.env.BYNARA_API_KEY_2;
 export const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
 
 // ── nano-banana (image generation /img) ───────
@@ -385,7 +410,7 @@ export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
 // ALL the canonical strong-match cases (English "atomic-habits", Arabic
 // exact slug "كافكا-على-الشاطئ", etc.) since they hit ≥ 0.67 or 1.0.
 export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
-  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.6",
+  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.85",
 );
 
 // Minimum filename-relevance for the TRUSTED_PDF_DOMAINS bypass branch
@@ -401,7 +426,7 @@ export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
 // slug, Arabic exact slug) through. Override with the env var if you
 // need to revert during incident investigation.
 export const TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD = parseFloat(
-  process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD || "0.55",
+  process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD || "0.85",
 );
 
 // ── Download attempt caps (find-to-send loss mitigation) ──

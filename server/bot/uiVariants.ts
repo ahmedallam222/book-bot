@@ -97,6 +97,7 @@ export const PROGRESS_VARIANTS: ReadonlyArray<readonly StepVariant[]> = [
 
 export const SUCCESS_TAGLINES: readonly string[] = [
   "✨ *وصل كتابك!*",
+  "🎉 *تفضّل بكتابك*",
   "🎁 *تفضّل، هذا كتابك*",
   "📦 *طلبك بين يديك الآن*",
   "🚀 *ها هو الكتاب — استمتع!*",

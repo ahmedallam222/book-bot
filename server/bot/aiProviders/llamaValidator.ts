@@ -104,7 +104,8 @@ export async function askLlamaPrefilter(args: PrefilterArgs): Promise<LlamaPrefi
     `Decide YES, NO, or UNSURE using these rules:`,
     `1) YES — the metadata or filename names the same book in any language, transliteration, or translation (extra words like "pdf", "كتاب", site name, year are fine).`,
     `2) NO  — the metadata or filename clearly names a DIFFERENT specific book.`,
-    `3) UNSURE — anything else: ambiguous filename, only digits / IDs, no useful signal, conflicting evidence.`,
+    `3) NO  — the metadata or filename ONLY contains an author's name, but not the requested book title.`,
+    `4) UNSURE — anything else: ambiguous filename, only digits / IDs, no useful signal, conflicting evidence.`,
     `Reply with EXACTLY ONE WORD: YES, NO, or UNSURE. No punctuation. No explanation.`,
   );
 

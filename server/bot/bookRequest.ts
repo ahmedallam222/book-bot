@@ -15,9 +15,10 @@ import {
 } from "./aiProviders/llamaTransliteration.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
+import { isBlacklisted } from "./blacklist.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
 import { recordFailure, removeFailure, failureKey } from "./failureRetry.js";
-import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
+import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage, buildTooLargeMsg } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
   REACTION_NO_RESULT, REACTION_ERROR,
@@ -33,6 +34,10 @@ import {
   MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
   MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
   LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
+  RESCUE_MIN_CANDIDATES,
+  RESCUE_MAX_FALLBACKS,
+  RESCUE_BEST_PDF_THRESHOLD,
+  RESCUE_FALLBACK_THRESHOLD,
 } from "./config.js";
 import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
@@ -51,6 +56,42 @@ import { activateReferralOnFirstDownload, sendReferralNotifications } from "./re
 // ══════════════════════════════════════════════
 // ENTRY POINT — Guards → Enqueue
 // ══════════════════════════════════════════════
+
+
+// Round-robin URLs by domain so one noisy host cannot monopolize the first
+// N attempts (e.g. five t.me hits before a good hindawi PDF).
+function diversifyUrlsByDomain(urls: string[]): string[] {
+  if (urls.length <= 2) return urls;
+  const buckets = new Map<string, string[]>();
+  const order: string[] = [];
+  for (const u of urls) {
+    let host = "";
+    try { host = new URL(u.startsWith("tg://") ? "https://t.me.local" : u).hostname.toLowerCase(); } catch {
+      host = (u.split("/")[2] || "unknown").toLowerCase();
+    }
+    // collapse telegram synthetic hosts
+    if (u.includes("t.me/") || u.startsWith("tg://")) host = "t.me";
+    if (!buckets.has(host)) {
+      buckets.set(host, []);
+      order.push(host);
+    }
+    buckets.get(host)!.push(u);
+  }
+  if (buckets.size <= 1) return urls;
+  const out: string[] = [];
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const h of order) {
+      const arr = buckets.get(h)!;
+      if (arr.length > 0) {
+        out.push(arr.shift()!);
+        progress = true;
+      }
+    }
+  }
+  return out;
+}
 
 export async function handleBookRequest(
   bot: TelegramBot,
@@ -366,11 +407,11 @@ function cacheHitMatchesQuery(
   }
   const matched = reqTokens.filter((w) => cachedTokens.has(w)).length;
   const overlap = matched / reqTokens.length;
-  if (overlap >= 0.40) return true;
+  if (overlap >= 0.80) return true;
 
   // Low overlap — only allow if URL filename gives independent signal
   const filenameScore = sourceUrl ? urlFilenameRelevance(requestedBook, sourceUrl) : 0;
-  if (filenameScore >= 0.40) return true;
+  if (filenameScore >= 0.80) return true;
 
   return false;
 }
@@ -427,9 +468,10 @@ async function serveFromCache(
 
   if (cached.telegramFileId) {
     try {
+      const escHtmlLocal = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       await bot.sendDocument(chatId, cached.telegramFileId, {
-        caption: `📚 *${escMd(cached.bookName)}*\n\n⚡ من مكتبة خلاصة الكتب`,
-        parse_mode: "Markdown",
+        caption: `📚 <b>${escHtmlLocal(cached.bookName)}</b>\n\n⚡ من مكتبة خلاصة الكتب`,
+        parse_mode: "HTML",
       });
       // FIX-3: دمج 3 عمليات increment في Promise.all بدل 3 fire-and-forget منفصلة
       Promise.all([
@@ -628,6 +670,9 @@ async function performFullSearch(
   // unreadable. Strip URL-only fallbacks (engine.ts uses url as title
   // when the page has no <title> tag).
   const urlSearchTitle = new Map<string, string>();
+  // url → known file size (Telegram search). Used to prefer smaller PDFs
+  // in the download order and to surface openable t.me links when too large.
+  const urlFileSize = new Map<string, number>();
   // Count results flagged as paid/protected by classifyAccess() in
   // engine.ts. When all download attempts fail AND the search returned
   // ANY paid signals, we tell the user the book is paid rather than
@@ -645,6 +690,9 @@ async function performFullSearch(
       // — first match wins (typically the highest-scored search hit).
       if (cleanTitle && !urlSearchTitle.has(r.directPdfUrl)) {
         urlSearchTitle.set(r.directPdfUrl, cleanTitle);
+      }
+      if (typeof r.fileSize === "number" && r.fileSize > 0 && !urlFileSize.has(r.directPdfUrl)) {
+        urlFileSize.set(r.directPdfUrl, r.fileSize);
       }
     } else if (r.url && r.access === "download_page") {
       if (!seenDownloadPages.has(r.url)) {
@@ -699,6 +747,22 @@ async function performFullSearch(
     validUrls = [...new Set(downloadablePageFallbacks)].slice(0, 3);
   }
 
+  // Fallback paths skip findValidPdfUrls — re-check blacklist so we don't
+  // burn a download attempt (and the user's patience) on known-bad URLs.
+  if (validUrls.length > 0) {
+    const blFlags = await Promise.all(validUrls.map((u) => isBlacklisted(u).catch(() => false)));
+    const before = validUrls.length;
+    validUrls = validUrls.filter((_, i) => !blFlags[i]);
+    if (validUrls.length < before) {
+      L.info("bot", "Filtered blacklisted candidates before download loop", {
+        book: bookName.slice(0, 50),
+        removed: before - validUrls.length,
+        remaining: validUrls.length,
+      });
+      redis.incrby("tel:dl:preloop_blacklist_filtered", before - validUrls.length).catch(() => {});
+    }
+  }
+
   // ── ترتيب URLs الذكي — 3 معايير مدمجة ──────────────────────────────
   // FIX-WRONG-FILE: الترتيب القديم كان يعتمد فقط على أداء المصدر التاريخي
   // هذا يسبب إرسال ملفات خاطئة (مثل TT-79.pdf) حتى لو المصدر "موثوق"
@@ -750,10 +814,23 @@ async function performFullSearch(
         } else {
           reliablePenalty = 1;
         }
-        return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
+        // (4) size preference when known (Telegram): smaller = better under bot cap
+        const sz = urlFileSize.get(url) ?? 0;
+        let sizeBoost = 0;
+        if (sz > 0) {
+          if (sz <= 5 * 1024 * 1024) sizeBoost = 0.15;
+          else if (sz <= 20 * 1024 * 1024) sizeBoost = 0.06;
+          else if (sz <= 35 * 1024 * 1024) sizeBoost = 0.0;
+          else sizeBoost = -0.08;
+        }
+        return filenameScore * 0.45 + sourceRate * 0.25 + reliablePenalty * 0.15 + sizeBoost * 0.15;
       };
       return scoreUrl(b) - scoreUrl(a);
     });
+
+    // Domain diversity: after score sort, interleave hosts so attempt #1..N
+    // sample different sources (reduces found_no_send from one bad domain).
+    validUrls = diversifyUrlsByDomain(validUrls);
 
     // الحماية في pdfValidator — يقرأ metaTitle من PDF بعد التحميل
 
@@ -786,11 +863,8 @@ async function performFullSearch(
   // already knows how to extract a PDF from a download_page (it does
   // exactly that in the no-PDF fallback path above); we just give it
   // more shots before declaring failure.
-  const RESCUE_BEST_PDF_THRESHOLD = 0.30;
-  const RESCUE_FALLBACK_THRESHOLD = 0.50;
-  const RESCUE_MAX_FALLBACKS      = 3;
+  // Thresholds from config (overridable via env) — see RESCUE_* in config.ts
   if (
-    validUrls.length > 0 &&
     downloadablePageFallbacks.length > 0
   ) {
     // URL-based score is fragile for trailing-slash URLs (path's
@@ -806,25 +880,42 @@ async function performFullSearch(
       return Math.max(urlScore, urlFilenameRelevance(bookName, titleAsUrl));
     };
 
-    const bestPdfScore = scoreWithTitleFallback(validUrls[0]);
-    if (bestPdfScore < RESCUE_BEST_PDF_THRESHOLD) {
+    const bestPdfScore = validUrls.length > 0
+      ? scoreWithTitleFallback(validUrls[0])
+      : 0;
+    // Rescue when: (a) top PDF is weak relevance, OR (b) too few candidates
+    // (production: 14–21 hits → 1 PDF → one permanent fail = dead request).
+    const needRescue =
+      bestPdfScore < RESCUE_BEST_PDF_THRESHOLD ||
+      validUrls.length < RESCUE_MIN_CANDIDATES;
+    if (needRescue) {
+      const want = Math.max(
+        RESCUE_MAX_FALLBACKS,
+        RESCUE_MIN_CANDIDATES - validUrls.length,
+      );
+      const scoreFloor = validUrls.length < RESCUE_MIN_CANDIDATES
+        ? Math.min(RESCUE_FALLBACK_THRESHOLD, 0.25) // looser when starved for candidates
+        : RESCUE_FALLBACK_THRESHOLD;
       const augmented = [...new Set(downloadablePageFallbacks)]
         .filter((u) => !validUrls.includes(u))
         .map((u) => ({ url: u, score: scoreWithTitleFallback(u) }))
-        .filter(({ score }) => score >= RESCUE_FALLBACK_THRESHOLD)
+        .filter(({ score }) => score >= scoreFloor)
         .sort((a, b) => b.score - a.score)
-        .slice(0, RESCUE_MAX_FALLBACKS);
+        .slice(0, want);
       if (augmented.length > 0) {
         L.info(
           "bot",
-          `rescue_low_relevance — augmenting ${validUrls.length} PDF candidate(s) with ${augmented.length} download_page fallback(s)`,
+          `rescue_candidates — augmenting ${validUrls.length} PDF candidate(s) with ${augmented.length} download_page fallback(s)`,
           {
             book:           bookName.slice(0, 50),
             bestPdfScore:   bestPdfScore.toFixed(2),
+            reason:         bestPdfScore < RESCUE_BEST_PDF_THRESHOLD ? "low_relevance" : "too_few",
             fallbackScores: augmented.map((a) => a.score.toFixed(2)),
           },
         );
         validUrls.push(...augmented.map((a) => a.url));
+        // Re-diversify after append so new domains interleave
+        validUrls = diversifyUrlsByDomain(validUrls);
         redis.incr("tel:dl:rescue_augmented").catch(() => {});
       }
     }
@@ -870,6 +961,7 @@ async function performFullSearch(
   const attemptsByDomain = new Map<string, number>();
   let globalCapReached = false;
   let domainCapHits = 0;
+  let tooLargeHits = 0;
 
   try {
     for (const pdfUrl of validUrls) {
@@ -963,9 +1055,12 @@ async function performFullSearch(
         // for every attempt and no terminal phase — operators have to
         // infer reasons from logger output. Categorize so funnel views
         // can split timeout vs HTTP vs Mistral vs heuristic rejects.
-        const failReason = result.rejectedContent
-          ? (result.mistralRejected ? "mistral_no" : "heuristic_reject")
-          : (result.permanent ? "permanent_error" : "transient_error");
+        if (result.tooLarge) tooLargeHits++;
+        const failReason = result.tooLarge
+          ? "too_large"
+          : result.rejectedContent
+            ? (result.mistralRejected ? "mistral_no" : "heuristic_reject")
+            : (result.permanent ? "permanent_error" : "transient_error");
         trace.phase("download_failed", {
           url: pdfUrl.slice(0, 80),
           domain: dlDomain,
@@ -1099,6 +1194,7 @@ async function performFullSearch(
         attempted: attemptedDownloads,
         domainCapHits,
         globalCapReached,
+        tooLargeHits,
       });
     }
     // FIX-PAID-FALSE-POSITIVE: قبل ده كنا نبعت buildPaidBookMessage *دايماً*
@@ -1141,11 +1237,21 @@ async function performFullSearch(
     // books the buy-page link would mislead the user into thinking the
     // PDF is one click away.
     const hasFallbackLinks = !showPaidBookMessage && validUrls.length > 0;
-    if (hasFallbackLinks) {
+    // When every attempted candidate was over Telegram's bot upload limit,
+    // don't pretend "not found" — tell the user the book exists but is too large.
+    const allTooLarge = tooLargeHits > 0 && tooLargeHits >= attemptedDownloads && attemptedDownloads > 0;
+    if (allTooLarge) {
+      redis.incr("tel:dl:fail_all_too_large").catch(() => {});
+    } else if (hasFallbackLinks) {
       redis.incr("tel:dl:links_only_message_sent").catch(() => {});
     }
     const failMsg = showPaidBookMessage
       ? buildPaidBookMessage(bookName, /* apologetic */ true)
+      : allTooLarge
+        ? buildTooLargeMsg(
+            bookName,
+            validUrls.filter((u) => /^https?:\/\/t\.me\//i.test(u)).slice(0, 3),
+          )
       : hasFallbackLinks
         ? buildLinksOnly(bookName, validUrls)
         : buildNoResults(bookName, false, /* apologetic */ true);
@@ -1154,7 +1260,9 @@ async function performFullSearch(
     // are deliberately not free, so retrying won't change the outcome
     // and would just spam the user. For the no-signal failure path
     // (search/download flake), record so the worker can recover later.
-    if (!showPaidBookMessage && userMessageId) {
+    // Size failures are permanent for bot delivery — don't enqueue
+    // auto-retry spam for the same oversized PDFs.
+    if (!showPaidBookMessage && !allTooLarge && userMessageId) {
       recordFailure({
         userId:        userId,
         chatId:        chatId,

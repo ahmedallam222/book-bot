@@ -45,6 +45,7 @@
 // ══════════════════════════════════════════════
 
 import { L } from "./logger.js";
+import { MAX_PDF_SIZE } from "./config.js";
 import { redis } from "./redis.js";
 
 const TG_API_ID   = Number(process.env.TELEGRAM_API_ID) || 0;
@@ -293,6 +294,13 @@ export async function searchTelegramChannels(
       const fname = extractFilename(doc) || `tg_${msg.id ?? 0}.pdf`;
       const size  = typeof doc.size === "bigint" ? Number(doc.size) : Number(doc.size || 0);
 
+      // Bot API cannot re-upload files > ~50MB. Skip at search time so we
+      // never burn a download attempt on a guaranteed 413.
+      if (size > MAX_PDF_SIZE) {
+        redis.incr("tel:tg:skipped_too_large").catch(() => {});
+        continue;
+      }
+
       out.push({
         channelId:       channelIdRaw,
         channelTitle:    String(title).slice(0, 120),
@@ -313,6 +321,14 @@ export async function searchTelegramChannels(
       q:     q.slice(0, 60),
       found: out.length,
       tookMs,
+    });
+
+    // Prefer smaller PDFs first — bot upload cap is ~50MB; smaller files
+    // validate+send faster and leave room for more candidates in the job budget.
+    out.sort((a, b) => {
+      const sa = a.fileSize > 0 ? a.fileSize : Number.MAX_SAFE_INTEGER;
+      const sb = b.fileSize > 0 ? b.fileSize : Number.MAX_SAFE_INTEGER;
+      return sa - sb;
     });
 
     if (out.length > 0) {
@@ -366,10 +382,23 @@ export async function downloadTelegramFile(
     }
 
     const messages = await c.getMessages(peer as unknown, { ids: [msgId] });
-    const m = messages?.[0] as { media?: unknown } | undefined;
+    const m = messages?.[0] as {
+      media?: {
+        document?: { size?: unknown; mimeType?: string };
+      };
+    } | undefined;
     if (!m || !m.media) {
       redis.incr("tel:tg:download_error").catch(() => {});
       return { ok: false, error: "no_media" };
+    }
+
+    // Guard before CDN pull: channel files can be >50MB while Bot API
+    // sendDocument hard-fails with 413. Refuse early to save bandwidth.
+    const declared = m.media.document?.size;
+    const declaredSize = typeof declared === "bigint" ? Number(declared) : Number(declared || 0);
+    if (declaredSize > MAX_PDF_SIZE) {
+      redis.incr("tel:tg:skipped_too_large").catch(() => {});
+      return { ok: false, error: `too_large:${(declaredSize / 1024 / 1024).toFixed(1)}MB` };
     }
 
     const buf = (await c.downloadMedia(m, { outputFile: destPath })) as

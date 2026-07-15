@@ -34,38 +34,42 @@ export function buildWelcome(
   const premBadge = isPrem ? " ⭐" : "";
   let balanceLine: string;
   if (limit <= 0) {
-    balanceLine = "♾️ رصيد غير محدود";
+    balanceLine = "♾️ *رصيد غير محدود*";
   } else {
     const used   = Math.max(0, limit - remaining);
-    const filled = Math.round((used / limit) * 8);
-    const bar    = "█".repeat(Math.min(filled, 8)) + "░".repeat(Math.max(0, 8 - filled));
+    const filled = Math.round((used / limit) * 10);
+    const bar    = "█".repeat(Math.min(filled, 10)) + "░".repeat(Math.max(0, 10 - filled));
     const emoji  = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
-    balanceLine  = `${emoji} \`${bar}\` *${remaining}/${limit}* كتاب متبقٍّ`;
+    balanceLine  = `${emoji} \`${bar}\`  *${remaining}/${limit}* متبقٍّ اليوم`;
   }
 
+  const DIV = "━━━━━━━━━━━━━━━━";
+
   if (isFirstTime) {
-    // ترحيب موسّع للمستخدم الجديد فقط — جولة سريعة
     return (
-      `🎉 *أهلاً وسهلاً يا ${escMd(name)}!*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-      `_أنا بوت خلاصة الكتب — أبحث لك في أكبر المكتبات العربية_\n\n` +
-      `🚀 *كيف أستخدمك؟*\n` +
-      `◦ اكتب اسم أي كتاب مباشرةً\n` +
-      `◦ \`/random\` لكتاب مفاجأة\n` +
-      `◦ \`/wishlist عنوان\` لحفظ كتاب لاحقاً\n` +
-      `◦ \`/help\` للقائمة الكاملة\n\n` +
+      `✨ *مرحباً بك في خلاصة الكتب*\n` +
+      `${DIV}\n` +
+      `أهلاً *${escMd(name)}* — مكتبتك العربية الذكية.\n\n` +
+      `*ابدأ في 3 ثوانٍ:*\n` +
+      `① اكتب اسم أي كتاب\n` +
+      `② انتظر البحث الذكي\n` +
+      `③ استلم ملف PDF جاهزاً\n\n` +
+      `*اختصارات مفيدة:*\n` +
+      `◦ /random — كتاب مفاجأة\n` +
+      `◦ /wishlist — قائمة أمنيات\n` +
+      `◦ /help — الدليل الكامل\n\n` +
       `${balanceLine}\n` +
-      `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
-      `_اكتب اسم كتابك الأول وانطلق_ 📖✨`
+      `🌍 *${sourceCount}* مصدراً عربياً تحت أمرك\n\n` +
+      `_اكتب عنوان كتابك الأول وانطلق._ 📖`
     );
   }
 
   return (
     `📚 *أهلاً ${escMd(name)}${premBadge}*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+    `${DIV}\n` +
     `${balanceLine}\n` +
-    `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
-    `_اكتب اسم أي كتاب وسأحضره لك فوراً_ ✨`
+    `🌍 *${sourceCount}* مصدراً عربياً جاهزاً\n\n` +
+    `_اكتب اسم الكتاب — ودع الباقي عليّ._ ✨`
   );
 }
 

@@ -34,7 +34,12 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
 import { L } from "./logger.js";
-import { UA, WELIB_PROXY_URL, WELIB_PROXY_SECRET } from "./config.js";
+import {
+  UA, WELIB_PROXY_URL, WELIB_PROXY_SECRET,
+  WELIB_SEARCH_ENABLED, WELIB_EMPTY_STREAK_OPEN, WELIB_CIRCUIT_TTL_SEC,
+  WELIB_CIRCUIT_KEY, WELIB_EMPTY_STREAK_KEY,
+} from "./config.js";
+import { redis } from "./redis.js";
 
 let _browserPromise: Promise<Browser> | null = null;
 let _browserCloseTimer: NodeJS.Timeout | null = null;
@@ -271,6 +276,20 @@ export async function searchWelib(
 ): Promise<WelibSearchResult[]> {
   const q = (query || "").trim();
   if (!q) return [];
+  if (!WELIB_SEARCH_ENABLED) {
+    redis.incr("tel:welib:search_disabled_env").catch(() => {});
+    return [];
+  }
+  // Circuit breaker: consecutive empties open a soft-disable window so we
+  // stop launching Chromium when welib is down / CF-blocked / empty index.
+  try {
+    const open = await redis.get(WELIB_CIRCUIT_KEY);
+    if (open) {
+      redis.incr("tel:welib:circuit_short_circuit").catch(() => {});
+      return [];
+    }
+  } catch { /* fail-open: try the search */ }
+
   const maxResults = Math.max(1, Math.min(50, opts?.maxResults ?? 10));
   const timeoutMs = Math.max(5_000, opts?.timeoutMs ?? WELIB_RESOLVE_TIMEOUT_MS);
 
@@ -308,9 +327,13 @@ export async function searchWelib(
         waitUntil: "domcontentloaded",
         timeout:   timeoutMs,
       });
-      // Welib hydrates result rows after DOMContentLoaded. Give it a
-      // beat so the /md5/ anchors land in the DOM.
-      await page.waitForTimeout(1500);
+      // Wait for hydrated /md5/ rows when CF allows; fall back to a short
+      // fixed delay so empty pages don't burn the full budget.
+      try {
+        await page.waitForSelector("a[href*='/md5/']", { timeout: Math.min(6_000, timeoutMs) });
+      } catch {
+        await page.waitForTimeout(2000);
+      }
 
       const results = await page.evaluate((max: number) => {
         const out: Array<{ md5: string; url: string; title: string }> = [];
@@ -342,6 +365,28 @@ export async function searchWelib(
         results: results.length,
         ms:      Date.now() - t0,
       });
+
+      // Circuit / empty-streak accounting
+      try {
+        if (results.length > 0) {
+          redis.incr("tel:welib:search_hit").catch(() => {});
+          redis.del(WELIB_EMPTY_STREAK_KEY).catch(() => {});
+          redis.del(WELIB_CIRCUIT_KEY).catch(() => {});
+        } else {
+          redis.incr("tel:welib:search_empty").catch(() => {});
+          const streak = await redis.incr(WELIB_EMPTY_STREAK_KEY);
+          redis.expire(WELIB_EMPTY_STREAK_KEY, WELIB_CIRCUIT_TTL_SEC).catch(() => {});
+          if (WELIB_EMPTY_STREAK_OPEN > 0 && streak >= WELIB_EMPTY_STREAK_OPEN) {
+            await redis.setex(WELIB_CIRCUIT_KEY, WELIB_CIRCUIT_TTL_SEC, String(streak));
+            L.warn("welib", "circuit OPEN — skipping Playwright search temporarily", {
+              streak,
+              ttlSec: WELIB_CIRCUIT_TTL_SEC,
+            });
+            redis.incr("tel:welib:circuit_opened").catch(() => {});
+          }
+        }
+      } catch { /* telemetry must never fail the search */ }
+
       return results;
     } catch (err: any) {
       const msg = String(err?.message || err);
@@ -350,6 +395,17 @@ export async function searchWelib(
         error: msg.slice(0, 200),
         ms:    Date.now() - t0,
       });
+      // Count hard failures toward the empty streak — Chromium/CF errors
+      // are the main reason we want the circuit to open.
+      try {
+        redis.incr("tel:welib:search_error").catch(() => {});
+        const streak = await redis.incr(WELIB_EMPTY_STREAK_KEY);
+        redis.expire(WELIB_EMPTY_STREAK_KEY, WELIB_CIRCUIT_TTL_SEC).catch(() => {});
+        if (WELIB_EMPTY_STREAK_OPEN > 0 && streak >= WELIB_EMPTY_STREAK_OPEN) {
+          await redis.setex(WELIB_CIRCUIT_KEY, WELIB_CIRCUIT_TTL_SEC, String(streak));
+          redis.incr("tel:welib:circuit_opened").catch(() => {});
+        }
+      } catch {}
       return [];
     } finally {
       await context?.close().catch(() => {});

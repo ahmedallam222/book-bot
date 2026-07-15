@@ -14,67 +14,110 @@ import {
 } from "./uiVariants.js";
 
 // ══════════════════════════════════════════════
-// UI — خلاصة الكتب | تجربة غامرة
+// UI — خلاصة الكتب | نظام تصميم موحّد (v7)
+// ──────────────────────────────────────────────
+// فلسفة التجربة:
+//   1) هرم بصري واضح: عنوان → فاصل → محتوى → تذييل
+//   2) لغة عربية فصحى أنيقة بلا ضجيج
+//   3) كل رسالة تجيب: ماذا يحدث؟ ماذا بعد؟
+//   4) Markdown متوازن (* و _) لتجنّب أخطاء Telegram
 // ══════════════════════════════════════════════
 
-// ── شريط تقدم سينمائي ─────────────────────────
+/** Primary section divider */
+export const DIV = "━━━━━━━━━━━━━━━━";
+/** Soft secondary divider */
+export const DIV_SOFT = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
 
+// Named journey stages (shown under progress)
+const STAGE_NAMES = [
+  "استقبال",
+  "بحث",
+  "توسيع",
+  "نتائج",
+  "تحقق",
+  "تحميل",
+  "إرسال",
+] as const;
+
+// Modern progress track — step 0..6
 const PROGRESS_BARS = [
-  "░░░░░░░░░░",
-  "▓░░░░░░░░░",
-  "▓▓▓░░░░░░░",
-  "▓▓▓▓▓░░░░░",
-  "▓▓▓▓▓▓▓░░░",
-  "▓▓▓▓▓▓▓▓▓░",
-  "▓▓▓▓▓▓▓▓▓▓",
+  "〔░░░░░░░░░░〕",
+  "〔█░░░░░░░░░〕",
+  "〔███░░░░░░░〕",
+  "〔█████░░░░░〕",
+  "〔███████░░░〕",
+  "〔█████████░〕",
+  "〔██████████〕",
 ];
 
 const PROGRESS_STEPS_COUNT = 7;
 
+/** Visual stage map: ● completed/current  ○ upcoming */
+function stageMap(step: number): string {
+  const n = STAGE_NAMES.length;
+  const s = Math.max(0, Math.min(step, n - 1));
+  const dots = STAGE_NAMES.map((_, i) => (i <= s ? "●" : "○")).join(" ");
+  const name = STAGE_NAMES[s];
+  return `\`${dots}\`  _${name}_`;
+}
+
+function balanceBar(used: number, limit: number): { bar: string; emoji: string; remaining: number } {
+  if (limit <= 0) return { bar: "∞", emoji: "♾️", remaining: 999 };
+  const remaining = Math.max(0, limit - used);
+  const filled = Math.round((used / limit) * 10);
+  const bar = "█".repeat(Math.min(filled, 10)) + "░".repeat(Math.max(0, 10 - filled));
+  const emoji = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
+  return { bar, emoji, remaining };
+}
+
+// ── شريط تقدّم سينمائي ───────────────────────
+
 export function buildProgress(step: number, bookName: string, extraLine?: string): string {
-  // Pick a random variant for this step from the pool. Falls back
-  // to the step-0 pool if step is out of range (defensive).
   const variantPool = PROGRESS_VARIANTS[step] ?? PROGRESS_VARIANTS[0];
   const s = pickRandom(variantPool);
   const bar = PROGRESS_BARS[step] ?? PROGRESS_BARS[0];
   const pct = Math.round((step / (PROGRESS_STEPS_COUNT - 1)) * 100);
+  const title = escMd(bookName.slice(0, 52));
 
   let msg =
-    `${s.icon} *${s.label}...*\n` +
-    `\`${bar}\` ${pct}%\n\n` +
-    `📖 _"${escMd(bookName.slice(0, 55))}"_`;
+    `${s.icon} *${s.label}*\n` +
+    `${DIV}\n` +
+    `${bar}  *${pct}%*\n` +
+    `${stageMap(step)}\n\n` +
+    `📖  _«${title}»_`;
 
-  if (extraLine) msg += `\n\n${extraLine}`;
+  if (extraLine) {
+    msg += `\n\n${DIV_SOFT}\n${extraLine}`;
+  }
   return msg;
 }
 
-// ── نصائح ذكية — مختلفة للعادي والـ Premium ──
+// ── نصائح ذكية ───────────────────────────────
 
 const TIPS_FREE = [
-  "💎 _أضف اسم المؤلف — يضاعف دقة النتائج_",
+  "💡 _أضف اسم المؤلف بعد العنوان — يضاعف دقّة النتائج_",
   "🎲 _جرّب /random لكتاب مفاجأة يناسب ذوقك_",
-  "🔖 _/wishlist لحفظ ما تريد قراءته لاحقاً_",
+  "🔖 _/wishlist يحفظ ما تريد قراءته لاحقاً_",
   "📅 _/weekly — أكثر الكتب تحميلاً هذا الأسبوع_",
-  "👥 _استخدمني في المجموعات: بوت اسم الكتاب_",
-  "⚡ _الكتاب المحفوظ مسبقاً يصلك في ثوانٍ_",
-  "🌍 _أبحث في مكتبات عربية متعددة في آنٍ واحد_",
-  "🎯 _اكتب العنوان فقط — بدون كلمة رواية أو pdf_",
-  `⭐ _ترقّ لـ Premium — ${PREMIUM_LIMIT} تحميل/يوم بـ ${PREMIUM_STARS_PRICE} Stars فقط_`,
+  "👥 _في المجموعات: بوت + اسم الكتاب_",
+  "⚡ _الكتب المحفوظة سابقاً تصلك في ثوانٍ_",
+  "🌍 _أبحث في مكتبات عربية متعدّدة معاً_",
+  "🎯 _اكتب العنوان فقط — بلا «رواية» أو «pdf»_",
+  `⭐ _Premium: ${PREMIUM_LIMIT} تحميلاً/يوم بـ ${PREMIUM_STARS_PRICE} Stars_`,
 ];
 
 const TIPS_PREMIUM = [
-  "💎 _أضف اسم المؤلف — يضاعف دقة النتائج_",
-  "🎲 _جرّب /random لكتاب مفاجأة يناسب ذوقك_",
-  "🔖 _قائمتك تتسع لـ 50 كتاب كـ Premium — استغلّها!_",
-  "📅 _/weekly — أكثر الكتب تحميلاً هذا الأسبوع_",
-  "👥 _استخدمني في المجموعات: بوت اسم الكتاب_",
-  "⚡ _طلباتك بأولوية قصوى — تُعالَج أولاً دائماً_",
-  "🌍 _أبحث في مكتبات عربية متعددة في آنٍ واحد_",
-  "🎯 _اكتب العنوان فقط — بدون كلمة رواية أو pdf_",
-  "📚 _سجلّك يحتفظ بآخر 20 كتاب حمّلتها_",
+  "💡 _أضف اسم المؤلف — يضاعف دقّة النتائج_",
+  "🎲 _/random لكتاب مفاجأة من مكتبتنا_",
+  "🔖 _قائمتك تتّسع لـ 50 كتاباً — استغلّها_",
+  "📅 _/weekly — نبض القرّاء هذا الأسبوع_",
+  "⚡ _طلباتك بأولوية قصوى دائماً_",
+  "🌍 _أبحث في مكتبات عربية متعدّدة معاً_",
+  "🎯 _العنوان فقط — بلا كلمات زائدة_",
+  "📚 _سجّلك يحتفظ بآخر 20 كتاباً حمّلتها_",
+  "⭐ _شكراً لثقتك — أنت قارئ من الطراز الرفيع_",
 ];
 
-/** isPrem اختياري — لو مش موجود بيستخدم الـ tips العادية */
 export function tip(isPrem = false): string {
   const pool = isPrem ? TIPS_PREMIUM : TIPS_FREE;
   return pool[Math.floor(Math.random() * pool.length)];
@@ -122,143 +165,139 @@ export function buildSuccessMsg(
   sizeMB?:   string,
   fromCache  = false,
   isPrem     = false,
-  /**
-   * سطر اختياري يُضاف بعد balanceLine — مثلاً "🔥 سلسلة 4 يوم".
-   * يأتي من updateStreakOnDownload في streak.ts. اختياري بحيث يظل
-   * الـ test runners القديمة شغّالة بدون تعديل.
-   */
   streakLine?: string,
 ): string {
   const sizeStr   = sizeMB ? ` · *${sizeMB} MB*` : "";
   const cacheStr  = fromCache ? `\n${pickRandom(CACHE_HIT_TAGLINES)}` : "";
   const premBadge = isPrem ? " ⭐" : "";
+  const { bar, emoji, remaining } = balanceBar(dlCount, limit);
 
   let balanceLine: string;
   if (limit <= 0) {
-    balanceLine = "♾️ رصيد غير محدود";
+    balanceLine = "♾️ *رصيد غير محدود*";
   } else {
-    const remaining = Math.max(0, limit - dlCount);
-    const filled    = Math.round((dlCount / limit) * 8);
-    const bar       = "█".repeat(Math.min(filled, 8)) + "░".repeat(Math.max(0, 8 - filled));
-    const emoji     = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
-    balanceLine     = `${emoji} \`${bar}\` *${remaining}/${limit}* متبقٍّ اليوم`;
+    balanceLine = `${emoji} \`${bar}\`  *${remaining}/${limit}* متبقٍّ اليوم`;
   }
 
   const tagline = isPrem
     ? pickRandom(SUCCESS_TAGLINES_PREMIUM)
     : pickRandom(SUCCESS_TAGLINES);
 
-  // Occasionally append a personality line (~10% by default).
   const personality = chance(PERSONALITY_LINE_CHANCE)
     ? `\n\n${pickRandom(PERSONALITY_LINES)}`
     : "";
 
   const streakPart = streakLine ? `\n${streakLine}` : "";
+  const title = escMd(bookName.slice(0, 52));
 
   return (
     `${tagline}${premBadge}\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `📗 _"${escMd(bookName.slice(0, 55))}"_${sizeStr}${cacheStr}\n\n` +
+    `${DIV}\n` +
+    `📗  _«${title}»_${sizeStr}${cacheStr}\n\n` +
     `${balanceLine}${streakPart}${personality}`
   );
 }
 
-// ── رسالة لا نتائج ───────────────────────────
+// ── لا نتائج ─────────────────────────────────
 
-// `apologetic` — when true, prepends a brief apology line. Used on
-// failure paths where we want to be visibly contrite (e.g. group chats
-// where the bot replies to the asker by quoting their message — see
-// performFullSearch's reply_to_message_id wiring). No-op otherwise.
 export function buildNoResults(
   bookName: string,
   _usedFuzzy: boolean,
   apologetic = false,
 ): string {
   const apology = apologetic
-    ? `🙏 _عذراً، حاولت من المصادر المتاحة._\n\n`
+    ? `🙏 _عذراً — بحثتُ في المصادر المتاحة._\n\n`
     : "";
+  const title = escMd(bookName.slice(0, 52));
   return (
     apology +
     `${pickRandom(NO_RESULTS_HEADLINES)}\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
-    `جرّب:\n` +
-    `◦ اكتف بالعنوان الرئيسي فقط\n` +
-    `◦ أضف اسم المؤلف بعد العنوان\n` +
-    `◦ تأكد من الإملاء الصحيح\n\n` +
-    `_بعض الكتب مدفوعة أو غير متاحة رقمياً._`
+    `${DIV}\n` +
+    `📖  _«${title}»_\n\n` +
+    `*جرّب تحسين البحث:*\n` +
+    `◦ العنوان الرئيسي فقط\n` +
+    `◦ أضف اسم المؤلف بعده\n` +
+    `◦ راجع الإملاء والتشكيل\n\n` +
+    `_بعض الكتب مدفوعة أو غير منشورة رقمياً._`
   );
 }
 
-// ── رسالة "وجدت روابط لكن لم أحمّل" ───────────
-// Sent when search returned candidate URLs but every download attempt
-// failed (timeouts, HTTP errors, validator rejects, per-domain caps,
-// global cap reached). The user gets the top-N verified links so they
-// can manually try one — better than the silent "no PDF" message which
-// loses signal that we actually found candidates.
-//
-// Used only when `paidSignalCount` is below the threshold (i.e. NOT a
-// genuine paid book). Safe URL list is the post-verify candidate list
-// already filtered by directSendUnsafe / blacklist / hard-blocks, so
-// every link here passed pre-validation.
-//
-// Why not include URLs in `buildNoResults`: that path is also taken
-// when `results.length === 0` (search found nothing) — there are no
-// links to surface in that case.
+// ── روابط فقط ────────────────────────────────
+
 export function buildLinksOnly(
   bookName: string,
   links: readonly string[],
 ): string {
   if (!links || links.length === 0) {
-    // defensive — should never happen because callers gate on
-    // results.length > 0, but if it does fall back to the regular
-    // no-results message rather than producing an empty section.
     return buildNoResults(bookName, false, /* apologetic */ true);
   }
   const top = links.slice(0, 3);
   const linksBlock = top
-    .map((u, i) => `${i + 1}. ${escMd(u)}`)
+    .map((u, i) => `  ${i + 1}\\. ${escMd(u)}`)
     .join("\n");
+  const title = escMd(bookName.slice(0, 52));
   return (
-    `🙏 _عذراً، لم أتمكّن من تحميل الكتاب تلقائياً._\n\n` +
-    `🔗 *وجدت روابط محتملة*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
-    `جرّب الروابط يدوياً:\n` +
+    `🔗 *وجدتُ أثراً — لكن التحميل التلقائي تعذّر*\n` +
+    `${DIV}\n` +
+    `📖  _«${title}»_\n\n` +
+    `*روابط يمكنك فتحها يدوياً:*\n` +
     `${linksBlock}\n\n` +
-    `_بعض المصادر تتطلب تجاوز إعلان أو تأكيد قبل التحميل._`
+    `_قد يطلب المصدر تأكيداً أو تجاوز إعلان قبل التحميل._`
   );
 }
 
-// ── رسالة كتاب مدفوع / غير متوفر مجاناً ───────
-// Sent when classifyAccess() flagged at least one search result as
-// paid/protected (matches PROTECTED_ACCESS_PATTERNS like "اشترِ", "buy now",
-// "premium", licensed-only catalogs) AND every download attempt failed.
-// This replaces the misleading silent "no PDF" outcome — and prevents
-// the bot from sending the wrong author's book just because the PDF
-// host was on the trusted list.
+// ── ملف أكبر من حد البوت ─────────────────────
+
+export function buildTooLargeMsg(
+  bookName: string,
+  openableLinks: readonly string[] = [],
+): string {
+  const title = escMd(bookName.slice(0, 52));
+  let linkBlock = "";
+  if (openableLinks.length > 0) {
+    const lines = openableLinks.slice(0, 3).map((u, i) => `  ${i + 1}\\. ${u}`);
+    linkBlock =
+      `\n\n*افتح من تطبيق تيليجرام* _(يقبل ملفات أكبر من البوت):_\n` +
+      lines.join("\n");
+  }
+  return (
+    `📦 *الكتاب أكبر من حدّ تيليجرام للبوت*\n` +
+    `${DIV}\n` +
+    `📖  _«${title}»_\n\n` +
+    `وجدتُ النسخة، لكن حجمها يتجاوز *50 MB* — وهذا سقف رفع الملفات للبوتات.\n\n` +
+    `*ما الذي يمكنك فعله؟*\n` +
+    `◦ اطلب جزءاً أو مجلّداً محدّداً\n` +
+    `◦ جرّب صياغة «مختصر» أو «طبعة صغيرة»\n` +
+    `◦ افتح الرابط في تطبيق تيليجرام مباشرة` +
+    linkBlock
+  );
+}
+
+// ── كتاب مدفوع ───────────────────────────────
+
 export function buildPaidBookMessage(
   bookName: string,
   apologetic = false,
 ): string {
   const apology = apologetic
-    ? `🙏 _عذراً، فحصت المصادر ولم أجد نسخة مجانية._\n\n`
+    ? `🙏 _عذراً — لم أجد نسخة مجّانية موثوقة._\n\n`
     : "";
+  const title = escMd(bookName.slice(0, 52));
   return (
     apology +
     `${pickRandom(PAID_BOOK_HEADLINES)}\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `_"${escMd(bookName.slice(0, 55))}"_\n\n` +
-    `يبدو أن هذا الكتاب لا يتوفر له *PDF مجاني* في المصادر المتاحة.\n\n` +
-    `قد يكون:\n` +
-    `◦ مدفوعاً — يُباع في متاجر الكتب\n` +
-    `◦ متاحاً للقراءة فقط على موقع الناشر\n` +
+    `${DIV}\n` +
+    `📖  _«${title}»_\n\n` +
+    `يبدو أن هذا العمل *لا يتوفّر كـ PDF مجّاني* في المصادر المتاحة.\n\n` +
+    `*احتمالات شائعة:*\n` +
+    `◦ يُباع في متاجر الكتب\n` +
+    `◦ متاح للقراءة فقط على موقع الناشر\n` +
     `◦ غير منشور رقمياً بعد\n\n` +
-    `_لو تعتقد أنه متاح مجاناً، جرّب صياغة أخرى أو أضِف اسم المؤلف._`
+    `_إن كنت متأكّداً من وجود نسخة مجّانية، جرّب صياغة أخرى أو أضف المؤلف._`
   );
 }
 
-// ── رسالة الحد اليومي ────────────────────────
+// ── الحد اليومي ──────────────────────────────
 
 export function buildDailyLimit(
   dlCount:   number,
@@ -266,87 +305,91 @@ export function buildDailyLimit(
   resetTime: string,
   isPrem     = false,
 ): string {
-  const bar = "█".repeat(8) + "░░";
+  const { bar } = balanceBar(limit, limit); // full bar
 
   if (isPrem) {
     return (
       `⛔ *اكتمل رصيدك اليومي*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-      `\`${bar}\` *${dlCount}/${limit}* ⭐\n\n` +
-      `🌙 يتجدد رصيدك بعد *${resetTime}*\n\n` +
-      `_قرأت كثيراً اليوم — أنت قارئ حقيقي!_ 📚`
+      `${DIV}\n` +
+      `\`${bar}\`  *${dlCount}/${limit}* ⭐\n\n` +
+      `🌙 يتجدّد رصيدك بعد *${resetTime}*\n\n` +
+      `_قرأتَ كثيراً اليوم — أنت قارئ حقيقي._ 📚`
     );
   }
 
   return (
     `⛔ *اكتمل رصيدك اليومي*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `\`${bar}\` *${dlCount}/${limit}*\n\n` +
-    `🌙 يتجدد رصيدك بعد *${resetTime}*\n\n` +
-    `⭐ _ترقّ لـ Premium — ${PREMIUM_LIMIT} تحميل/يوم بـ ${PREMIUM_STARS_PRICE} Stars_`
+    `${DIV}\n` +
+    `\`${bar}\`  *${dlCount}/${limit}*\n\n` +
+    `🌙 يتجدّد رصيدك بعد *${resetTime}*\n\n` +
+    `⭐ *Premium* — ${PREMIUM_LIMIT} تحميلاً/يوم بـ ${PREMIUM_STARS_PRICE} Stars\n` +
+    `_اضغط الزر أدناه أو /premium_`
   );
 }
 
-// ── رسالة rate limit ──────────────────────────
+// ── rate limit ───────────────────────────────
 
 export function buildRateLimitMsg(_max: number): string {
   return (
-    `⏱️ *تمهّل قليلاً!*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `أرسلت طلبات كثيرة في وقت قصير جداً\n\n` +
-    `_انتظر بضع ثوانٍ ثم أعد المحاولة_ 🙏`
+    `⏱️ *تمهّل لحظة*\n` +
+    `${DIV}\n` +
+    `أرسلتَ طلبات متتالية بسرعة عالية.\n\n` +
+    `_انتظر بضع ثوانٍ ثم أعد المحاولة — أنا معك._ 🙏`
   );
 }
 
-// ── رسالة قبول الطابور ───────────────────────
+// ── قبول الطابور ─────────────────────────────
 
 export function buildQueueAccepted(bookName: string, position: number, isHigh: boolean): string {
   let posStr: string;
   if (position <= 1) {
-    posStr = "🟢 _يُعالَج الآن مباشرةً..._";
+    posStr = "🟢  _يُعالَج الآن مباشرةً_";
   } else if (position <= 3) {
-    posStr = `🔢 موقعك: *#${position}* — _بعد لحظات قليلة_`;
+    posStr = `🔢  موقعك *#${position}* — _لحظات قليلة_`;
   } else {
     const estMin = Math.ceil(position * 0.75);
-    posStr = `🔢 موقعك: *#${position}* — _حوالي ${estMin} دقيقة_`;
+    posStr = `🔢  موقعك *#${position}* — _حوالي ${estMin} د_`;
   }
 
   const badge    = isHigh ? " ⭐" : "";
   const subtitle = isHigh
-    ? "_طلبك في مقدمة الطابور — أولوية Premium_"
+    ? "_في مقدّمة الطابور — أولوية Premium_"
     : "_في طابور المعالجة_";
+  const title = escMd(bookName.slice(0, 52));
 
   return (
-    `📬 *في الطريق${badge}*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `📖 _"${escMd(bookName.slice(0, 55))}"_\n` +
+    `📬 *طلبك في الطريق${badge}*\n` +
+    `${DIV}\n` +
+    `📖  _«${title}»_\n` +
     `${subtitle}\n\n` +
     `${posStr}`
   );
 }
 
-// ── رسالة طلب معلق ───────────────────────────
+// ── طلب معلّق ────────────────────────────────
 
 export function buildPendingMsg(): string {
   return (
-    `⏳ *لديك طلب قيد المعالجة*\n\n` +
-    `_انتظر حتى يكتمل ثم اطلب كتاباً آخر_\n\n` +
-    `◦ /queue لمعرفة حالة طلبك\n` +
-    `◦ /cancel لإلغائه والبدء من جديد`
+    `⏳ *لديك طلب قيد المعالجة*\n` +
+    `${DIV}\n` +
+    `انتظر اكتماله قبل طلب كتاب آخر.\n\n` +
+    `◦ /queue — حالة طلبك\n` +
+    `◦ /cancel — إلغاء والبدء من جديد`
   );
 }
 
-// ── رسالة "وصل دورك" ─────────────────────────
+// ── وصل دورك ─────────────────────────────────
 
 export function buildTurnNotification(bookName: string, waitSec: number): string {
   const waitStr = waitSec >= 60
     ? `${Math.floor(waitSec / 60)} دقيقة`
     : `${waitSec} ثانية`;
+  const title = escMd(bookName.slice(0, 52));
   return (
     `🔔 *وصل دورك!*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-    `📖 _"${escMd(bookName.slice(0, 55))}"_\n` +
-    `⏱️ انتظرت بصبر *${waitStr}*\n\n` +
-    `_أبحث الآن بكل طاقتي..._ 🚀`
+    `${DIV}\n` +
+    `📖  _«${title}»_\n` +
+    `⏱️ انتظرتَ *${waitStr}*\n\n` +
+    `_أبدأ البحث الآن بكل طاقتي..._ 🚀`
   );
 }

@@ -21,8 +21,7 @@ import {
   SEARCH_CACHE_TTL_HIT, SEARCH_CACHE_TTL_MISS,
   FC_QUOTA_EXCEEDED_KEY, FC_RATE_LIMITED_KEY, FC_RATE_LIMITED_TTL_SEC,
   FC_QUOTA_TTL_SEC, TRUSTED_PDF_DOMAINS, MIN_QUERY_LENGTH,
-  SOURCE_RANK_MIN_SAMPLES,
-} from "./config.js";
+  SOURCE_RANK_MIN_SAMPLES, MAX_PDF_SIZE } from "./config.js";
 
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || "";
 const FIRECRAWL_SEARCH  = "https://api.firecrawl.dev/v2";
@@ -544,12 +543,30 @@ export function telegramResultToBookResult(
   const title = t.fileName.replace(/\.pdf$/i, "").trim() ||
                 t.caption.split("\n")[0]?.slice(0, 80) ||
                 t.channelTitle;
-  const score = scoreResult(
+  let score = scoreResult(
     { url: t.url, markdown: "", metadata: { title } },
     t.url,
     "direct_pdf",
     userQuery,
   );
+  // Size-aware ranking: prefer smaller deliverable PDFs (faster send,
+  // less 413 risk). Unknown size (0) stays neutral.
+  if (t.fileSize > 0) {
+    if (t.fileSize > MAX_PDF_SIZE) {
+      score -= 1.5; // should already be filtered at search
+    } else if (t.fileSize <= 5 * 1024 * 1024) {
+      score += 0.20;
+    } else if (t.fileSize <= 20 * 1024 * 1024) {
+      score += 0.08;
+    } else if (t.fileSize <= 35 * 1024 * 1024) {
+      score += 0.02;
+    } else {
+      score -= 0.05; // still under cap but large
+    }
+  }
+  const sizeNote = t.fileSize > 0
+    ? `, ${(t.fileSize / 1024 / 1024).toFixed(1)}MB`
+    : "";
   return {
     id:           `tg-${t.channelId}-${t.msgId}-${Date.now()}`,
     title,
@@ -557,8 +574,9 @@ export function telegramResultToBookResult(
     directPdfUrl: t.url,
     source:       TELEGRAM_SOURCE,
     access:       "direct_pdf",
-    accessReason: `telegram search hit (${t.channelTitle.slice(0, 40)})`,
+    accessReason: `telegram search hit (${t.channelTitle.slice(0, 40)}${sizeNote})`,
     _score:       score,
+    fileSize:     t.fileSize > 0 ? t.fileSize : undefined,
   };
 }
 

@@ -2,11 +2,15 @@ import TelegramBot from "node-telegram-bot-api";
 import type { BookResult } from "./types.js";
 import { escMd } from "./text.js";
 import { storeRetryKey, storeFeedbackUrl, storeSummaryKey } from "./session.js";
+import { DIV, DIV_SOFT } from "./ui.js";
 
 // ══════════════════════════════════════════════════════════════
-//  KEYBOARDS — خلاصة الكتب v6
-//  الفلسفة: أزرار ذات معنى — كل زر يُجيب على سؤال يحمله المستخدم
-//  ترتيب: الأكثر أهمية أولاً — لا ضجيج بصري
+// KEYBOARDS — خلاصة الكتب v7
+// ──────────────────────────────────────────────────────────────
+// فلسفة:
+//   • الصف الأول = الفعل الأكثر احتمالاً
+//   • تجميع منطقي: بحث | اكتشاف | أنا | إبداع | ترقية
+//   • تسميات قصيرة واضحة — مسافتان بعد الإيموجي للقراءة
 // ══════════════════════════════════════════════════════════════
 
 const CB_MAX_BYTES = 64;
@@ -19,66 +23,59 @@ function safeCb(data: string): string {
 }
 
 // ── القائمة الرئيسية ──────────────────────────────────────
-// ترتيب: البحث هو القلب — ثم الاكتشاف — ثم الأدوات
 export function kbMain(): TelegramBot.InlineKeyboardMarkup {
   return {
     inline_keyboard: [
+      // Core actions
       [
-        { text: "🔍  ابحث عن كتاب",      callback_data: "new_search"   },
-        { text: "🎲  كتاب مفاجأة",        callback_data: "rg:any"       },
+        { text: "🔍  ابحث عن كتاب",   callback_data: "new_search" },
+        { text: "🎲  كتاب مفاجأة",     callback_data: "rg:any"     },
+      ],
+      // Discover
+      [
+        { text: "🏆  الأكثر تحميلاً",  callback_data: "top_books"      },
+        { text: "📅  أفضل الأسبوع",    callback_data: "weekly_refresh" },
+      ],
+      // Me
+      [
+        { text: "👤  ملفي",            callback_data: "my_profile"  },
+        { text: "📚  سجلّي",           callback_data: "my_history"  },
       ],
       [
-        { text: "👤  ملفي",               callback_data: "my_profile"   },
-        { text: "🎁  ادعُ صديقاً",         callback_data: "invite_view"  },
+        { text: "🔖  أمنياتي",         callback_data: "wishlist_view" },
+        { text: "🎁  ادعُ صديقاً",      callback_data: "invite_view"   },
       ],
+      // Create
       [
-        { text: "📊  إحصائياتي",          callback_data: "my_stats"     },
-        { text: "📚  سجل كتبي",           callback_data: "my_history"   },
+        { text: "🎨  صورة AI",         callback_data: "img_gen"   },
+        { text: "🎬  فيديو AI",        callback_data: "video_gen" },
       ],
+      // Premium + help
       [
-        { text: "🏆  الأكثر تحميلاً",     callback_data: "top_books"    },
-        { text: "📅  أفضل الأسبوع",       callback_data: "weekly_refresh"},
-      ],
-      [
-        { text: "🔖  قائمة أمنياتي",      callback_data: "wishlist_view" },
-        { text: "❓  مساعدة",              callback_data: "help"         },
-      ],
-      [
-        { text: "🎨  إنشاء صورة (Nano Banana)", callback_data: "img_gen" },
-      ],
-      [
-        { text: "🎬  إنشاء فيديو (veo3)",        callback_data: "video_gen" },
-      ],
-      [
-        { text: "⭐  ترقية للـ Premium",   callback_data: "premium_buy"  },
+        { text: "⭐  Premium",         callback_data: "premium_buy" },
+        { text: "❓  مساعدة",          callback_data: "help"        },
       ],
     ],
   };
 }
 
-// ── بعد إرسال الكتاب بنجاح ────────────────────────────────
-// السياق: المستخدم فرحان — نُعطيه خياراً للاستمرار أو الإبلاغ
+// ── بعد النجاح ────────────────────────────────────────────
 export function kbAfterSuccess(
   bookName: string,
   sourceUrl: string
 ): TelegramBot.InlineKeyboardMarkup {
   const retryK   = storeRetryKey(bookName);
   const summaryK = storeSummaryKey(bookName, sourceUrl || undefined);
-  // Top row: the action the user is most likely to want immediately
-  // after seeing the file — get a quick AI summary before reading.
-  // Label is generic ("ملخص الكتاب"); the callback handler decides at
-  // runtime whether to render with spoiler-protection framing based on
-  // the AI-detected book type.
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
-      { text: "📘  ملخص الكتاب",    callback_data: safeCb(`sum:${summaryK}`) },
+      { text: "📘  ملخّص ذكي",     callback_data: safeCb(`sum:${summaryK}`) },
     ],
     [
-      { text: "🔍  كتاب آخر",      callback_data: "new_search"  },
-      { text: "🔖  احفظ للاحقاً",  callback_data: safeCb(`wishlist_add:${retryK}`) },
+      { text: "🔍  كتاب آخر",     callback_data: "new_search" },
+      { text: "🔖  احفظه",         callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
     [
-      { text: "🔁  أعد الإرسال",   callback_data: safeCb(`retry:${retryK}`) },
+      { text: "🔁  أعد الإرسال",  callback_data: safeCb(`retry:${retryK}`) },
     ],
   ];
 
@@ -88,13 +85,13 @@ export function kbAfterSuccess(
   }
 
   rows.push([
-    { text: "🎲  كتاب مفاجأة",        callback_data: "rg:any"     },
-    { text: "🏠  القائمة الرئيسية",   callback_data: "main_menu"  },
+    { text: "🎲  مفاجأة",           callback_data: "rg:any"    },
+    { text: "🏠  القائمة",          callback_data: "main_menu" },
   ]);
   return { inline_keyboard: rows };
 }
 
-// ── بعد الفشل — مع pagination محسّن ──────────────────────
+// ── بعد الفشل ─────────────────────────────────────────────
 export function kbAfterFail(
   bookName: string,
   results:  BookResult[],
@@ -105,29 +102,28 @@ export function kbAfterFail(
   const retryK     = storeRetryKey(bookName);
   const rows: TelegramBot.InlineKeyboardButton[][] = [];
 
-  // التنقل — فقط لو يوجد أكثر من صفحة
   if (totalPages > 1) {
     const nav: TelegramBot.InlineKeyboardButton[] = [];
     if (page > 0)
       nav.push({ text: "◀️", callback_data: safeCb(`fp:${retryK}:${page - 1}`) });
-    nav.push({ text: `📄  ${page + 1} / ${totalPages}`, callback_data: "noop" });
+    nav.push({ text: `📄  ${page + 1}/${totalPages}`, callback_data: "noop" });
     if (page < totalPages - 1)
       nav.push({ text: "▶️", callback_data: safeCb(`fp:${retryK}:${page + 1}`) });
     rows.push(nav);
   }
 
   rows.push([
-    { text: "🔄  أعد المحاولة",    callback_data: safeCb(`retry:${retryK}`) },
-    { text: "🔍  بحث جديد",        callback_data: "new_search"               },
+    { text: "🔄  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
+    { text: "🔍  بحث جديد",      callback_data: "new_search"               },
   ]);
   rows.push([
-    { text: "🎲  كتاب مفاجأة",     callback_data: "rg:any"     },
-    { text: "🏠  القائمة",          callback_data: "main_menu"  },
+    { text: "🎲  مفاجأة",        callback_data: "rg:any"    },
+    { text: "🏠  القائمة",       callback_data: "main_menu" },
   ]);
   return { inline_keyboard: rows };
 }
 
-// ── بعد لا نتائج ─────────────────────────────────────────
+// ── لا نتائج ──────────────────────────────────────────────
 export function kbNoResults(bookName: string): TelegramBot.InlineKeyboardMarkup {
   const retryK = storeRetryKey(bookName);
   return {
@@ -137,31 +133,31 @@ export function kbNoResults(bookName: string): TelegramBot.InlineKeyboardMarkup 
         { text: "🔍  بحث جديد",      callback_data: "new_search"               },
       ],
       [
-        { text: "🔖  احفظ لأمنياتي", callback_data: safeCb(`wishlist_add:${retryK}`) },
-        { text: "🎲  كتاب مفاجأة",   callback_data: "rg:any"       },
+        { text: "🔖  للأمنيات",     callback_data: safeCb(`wishlist_add:${retryK}`) },
+        { text: "🎲  مفاجأة",        callback_data: "rg:any"                        },
       ],
       [
-        { text: "🏠  القائمة",        callback_data: "main_menu"    },
+        { text: "🏠  القائمة",       callback_data: "main_menu" },
       ],
     ],
   };
 }
 
-// ── الطابور — مع عرض الموقع ───────────────────────────────
+// ── الطابور ───────────────────────────────────────────────
 export function kbQueued(position: number): TelegramBot.InlineKeyboardMarkup {
-  const posLabel = position <= 1 ? "🟢  يُعالَج الآن" : `🔢  موقعك: #${position}`;
+  const posLabel = position <= 1 ? "🟢  يُعالَج الآن" : `🔢  موقعك #${position}`;
   return {
     inline_keyboard: [
       [{ text: posLabel, callback_data: "queue_status" }],
       [
-        { text: "❌  إلغاء طلبي",     callback_data: "cancel_my_jobs" },
-        { text: "📋  حالة الطابور",   callback_data: "queue_status"   },
+        { text: "❌  إلغاء",         callback_data: "cancel_my_jobs" },
+        { text: "📋  حالة الطابور",  callback_data: "queue_status"   },
       ],
     ],
   };
 }
 
-// ── رسالة فشل الإرسال مع الروابط ────────────────────────
+// ── رسالة فشل مع روابط معاينة ────────────────────────────
 export function buildFailMessage(
   bookName: string,
   results:  BookResult[],
@@ -169,10 +165,10 @@ export function buildFailMessage(
 ): string {
   if (results.length === 0) {
     return (
-      `😔 *لم أجد PDF قابل للإرسال*\n` +
-      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_"${escMd(bookName.slice(0, 52))}"_\n\n` +
-      `جرّب العنوان فقط أو أضف اسم المؤلف.`
+      `😔 *لم أجد PDF قابلاً للإرسال*\n` +
+      `${DIV}\n` +
+      `📖  _«${escMd(bookName.slice(0, 52))}»_\n\n` +
+      `جرّب العنوان فقط، أو أضف اسم المؤلف.`
     );
   }
 
@@ -184,30 +180,30 @@ export function buildFailMessage(
   const protectedCount = results.filter((r) => r.access === "protected_page").length;
 
   let msg =
-    `🔎 *لا يوجد PDF مباشر صالح للإرسال*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-    `_"${escMd(bookName.slice(0, 52))}"_\n`;
+    `🔎 *تعذّر الإرسال التلقائي*\n` +
+    `${DIV}\n` +
+    `📖  _«${escMd(bookName.slice(0, 52))}»_\n`;
 
   if (totalPages > 1) msg += `_صفحة ${page + 1} من ${totalPages}_\n`;
   msg += `\n`;
-  if (directCount > 0) msg += `• PDF فشل: ${directCount}\n`;
-  if (downloadPageCount > 0) msg += `• تحميل محتمل: ${downloadPageCount}\n`;
-  if (protectedCount > 0) msg += `• مدفوع/قراءة فقط: ${protectedCount}\n`;
-  msg += `\n_هذه نتائج معاينة وليست تحميلًا مضمونًا:_\n\n`;
+  if (directCount > 0) msg += `• PDF فشل الإرسال: *${directCount}*\n`;
+  if (downloadPageCount > 0) msg += `• صفحات تحميل محتملة: *${downloadPageCount}*\n`;
+  if (protectedCount > 0) msg += `• مدفوع / قراءة فقط: *${protectedCount}*\n`;
+  msg += `\n${DIV_SOFT}\n_معاينة — ليست تحميلاً مضموناً:_\n\n`;
 
   slice.forEach((r, i) => {
     const rawUrl  = r.directPdfUrl || r.url;
     const safeUrl = rawUrl.replace(/\)/g, "%29").replace(/\]/g, "%5D");
     const labelByAccess: Record<BookResult["access"], string> = {
-      direct_pdf: "PDF فشل",
-      download_page: "تحميل محتمل",
-      catalog_page: "معلومات",
+      direct_pdf:     "PDF",
+      download_page:  "تحميل",
+      catalog_page:   "معلومات",
       protected_page: "مدفوع",
     };
-    const label   = labelByAccess[r.access ?? (r.directPdfUrl ? "direct_pdf" : "catalog_page")];
-    const star    = (r._score && r._score > 0.5) ? " ⭐" : "";
-    const num     = page * PAGE_SIZE + i + 1;
-    msg += `${num}\\. ${r.source.emoji} [${escMd(r.title.slice(0, 38))}](${safeUrl}) _${label}${star}_\n`;
+    const label = labelByAccess[r.access ?? (r.directPdfUrl ? "direct_pdf" : "catalog_page")];
+    const star  = (r._score && r._score > 0.5) ? " ⭐" : "";
+    const num   = page * PAGE_SIZE + i + 1;
+    msg += `${num}\\. ${r.source.emoji} [${escMd(r.title.slice(0, 36))}](${safeUrl}) _${label}${star}_\n`;
   });
 
   return msg;

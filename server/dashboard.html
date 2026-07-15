@@ -3,58 +3,93 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>خلاصة الكتب — لوحة الإدارة</title>
+<title>خلاصة الكتب · مركز العمليات</title>
 <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Noto+Kufi+Arabic:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
+:root{
+  --bg:#06080e;--bg-elevated:#0a0e16;--surface:#0d121b;--surface-2:#121826;
+  --card:#141b27;--card-hover:#1a2332;--border:#1c2536;--border-strong:#2a3650;
+  --gold:#e0b04a;--gold-soft:#d4a843;--gold-dim:#8a6a22;--gold-glow:rgba(224,176,74,.18);
+  --green:#3ecf8e;--green-dim:#134e37;--red:#ff6b6b;--red-dim:#4a1d1d;
+  --blue:#5b9dff;--blue-dim:#16325c;--purple:#b794f6;--orange:#f0a04b;
+  --text:#edf2f7;--text-mid:#a8b3c4;--muted:#6b778c;--dim:#2a3344;
+  --radius:14px;--radius-sm:10px;--shadow:0 8px 32px rgba(0,0,0,.35);
+  --shadow-lg:0 16px 48px rgba(0,0,0,.45);
+  --font-ar:'Noto Kufi Arabic',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;background:#07090f;color:#e6edf3;font-family:'Noto Kufi Arabic',sans-serif;overflow-x:hidden}
-::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#2d333b;border-radius:3px}
-.mono{font-family:'IBM Plex Mono',monospace!important;direction:ltr;display:inline-block}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-@keyframes glow{0%,100%{box-shadow:0 0 4px #d4a84344}50%{box-shadow:0 0 18px #d4a84388}}
-@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font-ar);overflow-x:hidden;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+body{background:radial-gradient(1200px 600px at 100% -10%,rgba(224,176,74,.07),transparent 55%),radial-gradient(900px 500px at 0% 100%,rgba(91,157,255,.05),transparent 50%),var(--bg)}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--dim);border-radius:99px}::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+.mono{font-family:var(--font-mono)!important;direction:ltr;display:inline-block;letter-spacing:.02em}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes glow{0%,100%{box-shadow:0 0 0 1px rgba(224,176,74,.25),0 0 12px rgba(224,176,74,.12)}50%{box-shadow:0 0 0 1px rgba(224,176,74,.45),0 0 28px rgba(224,176,74,.22)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-@keyframes slideRight{from{transform:translateX(100%)}to{transform:translateX(0)}}
-@keyframes shimmer{0%{background-position:-400px 0}100%{background-position:400px 0}}
-.pulse{animation:pulse 2.5s ease-in-out infinite}
-.glow{animation:glow 2.5s ease-in-out infinite}
-.fade-up{animation:fadeUp .3s ease forwards}
-.fade-in{animation:fadeIn .25s ease forwards}
-.slide-right{animation:slideRight .25s cubic-bezier(.4,0,.2,1) forwards}
-.hcard:hover{background:#191f28!important}
-table{border-collapse:collapse;width:100%}th,td{padding:9px 12px;text-align:right}
-input,select,textarea{background:#0d1117;border:1px solid #1e2533;border-radius:8px;color:#e6edf3;padding:8px 12px;font-family:inherit;font-size:13px;outline:none;width:100%}
-input:focus,select:focus,textarea:focus{border-color:#d4a84388}
-button{cursor:pointer;font-family:'Noto Kufi Arabic',sans-serif}
-.shimmer{background:linear-gradient(90deg,#2d333b 25%,#1e2533 50%,#2d333b 75%);background-size:400px;animation:shimmer 1.4s infinite}
+@keyframes slideRight{from{transform:translateX(100%);opacity:.6}to{transform:translateX(0);opacity:1}}
+@keyframes shimmer{0%{background-position:-420px 0}100%{background-position:420px 0}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+.pulse{animation:pulse 2.4s ease-in-out infinite}.glow{animation:glow 2.8s ease-in-out infinite}
+.fade-up{animation:fadeUp .35s cubic-bezier(.22,1,.36,1) forwards}.fade-in{animation:fadeIn .28s ease forwards}
+.slide-right{animation:slideRight .28s cubic-bezier(.4,0,.2,1) forwards}
+.shimmer{background:linear-gradient(90deg,var(--dim) 20%,var(--border) 45%,var(--dim) 70%);background-size:420px 100%;animation:shimmer 1.35s infinite linear}
+.ui-card{background:linear-gradient(180deg,rgba(255,255,255,.02),transparent 40%),var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset;transition:border-color .18s,background .18s,transform .18s,box-shadow .18s}
+.ui-card.hcard:hover,.hcard:hover{background:var(--card-hover)!important;border-color:var(--border-strong)!important;transform:translateY(-1px);box-shadow:var(--shadow)}
+table{border-collapse:separate;border-spacing:0;width:100%}
+th,td{padding:11px 14px;text-align:right;border-bottom:1px solid var(--border)}
+th{font-size:11px;font-weight:700;color:var(--muted);background:rgba(0,0,0,.18);position:sticky;top:0;z-index:1}
+tr:hover td{background:rgba(224,176,74,.03)}td{font-size:13px;color:var(--text-mid)}
+input,select,textarea{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:10px 14px;font-family:inherit;font-size:13px;outline:none;width:100%;transition:border-color .15s,box-shadow .15s}
+input:focus,select:focus,textarea:focus{border-color:rgba(224,176,74,.55);box-shadow:0 0 0 3px var(--gold-glow)}
+input::placeholder,textarea::placeholder{color:var(--muted)}
+button{cursor:pointer;font-family:var(--font-ar);transition:all .15s}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:10px;font-weight:600;border:1px solid transparent;white-space:nowrap;user-select:none}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-sm{padding:5px 11px;font-size:11px}.btn-md{padding:8px 16px;font-size:13px}.btn-lg{padding:12px 22px;font-size:14px}
+.btn-ghost{background:transparent;border-color:var(--border);color:var(--text-mid)}
+.btn-ghost:hover{border-color:var(--border-strong);color:var(--text);background:rgba(255,255,255,.02)}
+.btn-gold{background:linear-gradient(135deg,#9a7424,var(--gold));border-color:transparent;color:#1a1205;box-shadow:0 4px 16px rgba(224,176,74,.2)}
+.btn-gold:hover{filter:brightness(1.06);box-shadow:0 6px 22px rgba(224,176,74,.3)}
+.btn-danger{background:rgba(255,107,107,.1);border-color:rgba(255,107,107,.35);color:var(--red)}
+.btn-success{background:rgba(62,207,142,.1);border-color:rgba(62,207,142,.35);color:var(--green)}
+.btn-blue{background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:var(--blue)}
+.tag{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;border:1px solid transparent}
 #root{display:flex;height:100vh}
-
-/* ── Mobile responsive (<768px) ───────────────── */
-.mobile-only{display:none}
-.desktop-only{display:flex}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.section-title{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:800;color:var(--text)}
+.section-title .ico{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(224,176,74,.1);border:1px solid rgba(224,176,74,.2);font-size:16px}
+.empty-state{text-align:center;padding:48px 20px;color:var(--muted)}
+.empty-state .big{font-size:36px;margin-bottom:10px;opacity:.85}
+.empty-state h3{color:var(--text-mid);font-size:15px;margin-bottom:6px}
+.empty-state p{font-size:12px;line-height:1.7;max-width:320px;margin:0 auto}
+.sidebar{background:linear-gradient(180deg,rgba(224,176,74,.03),transparent 120px),var(--surface);border-left:1px solid var(--border)}
+.nav-item{background:transparent;border:1px solid transparent;color:var(--muted);padding:10px 12px;border-radius:11px;display:flex;align-items:center;gap:10px;width:100%;text-align:right;transition:all .15s;font-size:13px}
+.nav-item:hover{background:rgba(255,255,255,.03);color:var(--text-mid)}
+.nav-item.active{background:linear-gradient(90deg,rgba(224,176,74,.14),rgba(224,176,74,.04));border-color:rgba(224,176,74,.28);color:var(--gold);font-weight:700}
+.nav-group-label{font-size:10px;font-weight:700;color:var(--muted);padding:14px 12px 6px;letter-spacing:.06em;opacity:.8}
+.topbar{background:rgba(13,18,27,.82)!important;backdrop-filter:blur(16px) saturate(1.2);border-bottom:1px solid var(--border)!important;box-shadow:0 1px 0 rgba(255,255,255,.02)}
+.login-shell{min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;padding:24px;position:relative;overflow:hidden}
+.login-shell::before{content:"";position:absolute;inset:-20%;background:radial-gradient(circle at 70% 20%,rgba(224,176,74,.12),transparent 40%),radial-gradient(circle at 20% 80%,rgba(91,157,255,.08),transparent 35%);animation:float 8s ease-in-out infinite;pointer-events:none}
+.login-card{width:100%;max-width:420px;background:linear-gradient(165deg,rgba(255,255,255,.04),transparent 50%),var(--card);border:1px solid var(--border);border-radius:20px;padding:36px 32px;box-shadow:var(--shadow-lg);position:relative;z-index:1}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:12px 22px;border-radius:14px;font-size:13px;font-weight:600;z-index:9999;display:flex;align-items:center;gap:8px;background:var(--card);box-shadow:var(--shadow-lg);backdrop-filter:blur(12px)}
+.content{padding:24px 22px!important}
+.mobile-only{display:none}.desktop-only{display:flex}
 @media (max-width:768px){
-  .mobile-only{display:flex}
-  .desktop-only{display:none}
-  /* Sidebar becomes overlay drawer on mobile */
-  .sidebar{position:fixed!important;right:0;top:0;height:100vh!important;z-index:200;
-    box-shadow:-8px 0 32px rgba(0,0,0,.55);transition:transform .25s cubic-bezier(.4,0,.2,1)!important}
+  .mobile-only{display:flex}.desktop-only{display:none}
+  .sidebar{position:fixed!important;right:0;top:0;height:100vh!important;z-index:200;box-shadow:-12px 0 40px rgba(0,0,0,.55);transition:transform .28s cubic-bezier(.4,0,.2,1)!important}
   .sidebar.closed{transform:translateX(110%)}
-  .sidebar-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:150;animation:fadeIn .2s}
-  /* Smaller paddings + fonts on mobile */
-  .content{padding:14px 10px!important}
-  .topbar{padding:0 12px!important;height:52px!important;gap:6px}
+  .sidebar-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:150;animation:fadeIn .2s;backdrop-filter:blur(2px)}
+  .content{padding:14px 12px!important}.topbar{padding:0 12px!important;height:54px!important}
   .topbar-title{font-size:14px!important}
-  .kpi-grid{gap:8px!important}
-  /* Make tables scrollable */
-  table{font-size:12px}
-  th,td{padding:7px 8px}
+  .kpi-grid{gap:8px!important;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))!important}
+  table{font-size:12px}th,td{padding:8px}.login-card{padding:28px 20px}
 }
-@media (max-width:480px){
-  .topbar-status{display:none}  /* hide "متصل" tag on tiny screens */
-}
+@media (max-width:480px){.topbar-status{display:none}}
 </style>
 </head>
 <body>
@@ -229,11 +264,11 @@ function exportCSV(filename, rows, columns){
 // TOKEN SHORTCUTS
 // ══════════════════════════════════════════════
 const T={
-  bg:"#07090f",surface:"#0d1117",card:"#141920",border:"#1e2533",
-  gold:"#d4a843",goldMid:"#b8902e",goldDim:"#7a5c18",
-  green:"#3fb950",greenDim:"#1a4d23",red:"#f85149",redDim:"#4d1a18",
-  blue:"#58a6ff",blueDim:"#1a3a5c",purple:"#bc8cff",orange:"#f0883e",
-  text:"#e6edf3",textMid:"#adbac7",muted:"#636e7b",dim:"#2d333b",
+  bg:"#06080e",surface:"#0d121b",card:"#141b27",border:"#1c2536",
+  gold:"#e0b04a",goldMid:"#c99835",goldDim:"#8a6a22",
+  green:"#3ecf8e",greenDim:"#134e37",red:"#ff6b6b",redDim:"#4a1d1d",
+  blue:"#5b9dff",blueDim:"#16325c",purple:"#b794f6",orange:"#f0a04b",
+  text:"#edf2f7",textMid:"#a8b3c4",muted:"#6b778c",dim:"#2a3344",
 };
 
 // Guard: لو Recharts مش محمّل، نعمل stub فارغ عشان الداشبورد ميكسرش
@@ -263,7 +298,7 @@ const SafeChart=({fallback,children})=>
 // ATOMS
 // ══════════════════════════════════════════════
 const Card=({children,style={},className="",onClick})=>
-  h("div",{className:`${onClick?"hcard":""} ${className}`,onClick,
+  h("div",{className:`ui-card ${onClick?"hcard":""} ${className}`,onClick,
     style:{background:T.card,border:`1px solid ${T.border}`,borderRadius:14,padding:20,transition:"background .15s",...style}},children);
 
 const Tag=({children,color=T.gold,size=11})=>
@@ -276,25 +311,27 @@ const Dot=({color=T.green,size=8})=>
   h("span",{className:"pulse",style:{display:"inline-block",width:size,height:size,borderRadius:"50%",background:color,marginLeft:5,flexShrink:0}});
 
 function Btn({children,onClick,variant="ghost",size="md",disabled=false}){
-  const pad={sm:"5px 11px",md:"8px 18px",lg:"11px 24px"}[size]||"8px 18px";
-  const fs={sm:11,md:13,lg:14}[size]||13;
-  const v={
-    ghost:{bg:"transparent",border:T.border,color:T.textMid},
-    gold:{bg:T.goldDim+"40",border:T.goldDim,color:T.gold},
-    danger:{bg:T.redDim+"40",border:T.redDim,color:T.red},
-    success:{bg:T.greenDim+"40",border:T.greenDim,color:T.green},
-    blue:{bg:T.blueDim+"40",border:T.blueDim,color:T.blue},
-  }[variant]||{bg:"transparent",border:T.border,color:T.textMid};
-  return h("button",{onClick,disabled,style:{background:v.bg,border:`1px solid ${v.border}`,color:v.color,
-    padding:pad,borderRadius:8,fontSize:fs,display:"inline-flex",alignItems:"center",gap:5,
-    opacity:disabled?.5:1,transition:"all .15s",whiteSpace:"nowrap",fontWeight:500}},children);
+  const cls={ghost:"btn btn-ghost",gold:"btn btn-gold",danger:"btn btn-danger",success:"btn btn-success",blue:"btn btn-blue"}[variant]||"btn btn-ghost";
+  const sizeCls={sm:"btn-sm",md:"btn-md",lg:"btn-lg"}[size]||"btn-md";
+  return h("button",{className:`${cls} ${sizeCls}`,onClick,disabled},children);
 }
 
-const SH=({icon,title,actions})=>
-  h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}},
-    h("div",{style:{display:"flex",alignItems:"center",gap:8,fontSize:15,fontWeight:700}},
-      h("span",{style:{fontSize:18}},icon)," ",title),
+const SH=({icon,title,actions,sub})=>
+  h("div",{className:"section-head"},
+    h("div",{className:"section-title"},
+      h("span",{className:"ico"},icon),
+      h("div",null,
+        h("div",null,title),
+        sub&&h("div",{style:{fontSize:11,color:T.muted,fontWeight:400,marginTop:2}},sub)
+      )
+    ),
     actions&&h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},actions));
+const Empty=({icon="📭",title="لا توجد بيانات",hint})=>
+  h("div",{className:"empty-state"},
+    h("div",{className:"big"},icon),
+    h("h3",null,title),
+    hint&&h("p",null,hint));
+
 
 const CT=({active,payload,label})=>{
   if(!active||!payload?.length) return null;
@@ -312,25 +349,31 @@ const Sk=({w="100%",h:ht=20,r=6})=>
   h("div",{className:"shimmer",style:{width:w,height:ht,borderRadius:r}});
 
 function Toast({msg,type="ok",onDone}){
-  useEffect(()=>{const t=setTimeout(onDone,3200);return()=>clearTimeout(t);},[]);
+  useEffect(()=>{const t=setTimeout(onDone,3400);return()=>clearTimeout(t);},[]);
   const c=type==="ok"?T.green:type==="warn"?T.orange:T.red;
-  return h("div",{className:"fade-up",style:{position:"fixed",bottom:28,left:"50%",transform:"translateX(-50%)",
-    background:T.card,border:`1px solid ${c}60`,color:c,padding:"11px 22px",borderRadius:12,
-    fontSize:13,fontWeight:600,zIndex:9999,display:"flex",alignItems:"center",gap:8}},
+  return h("div",{className:"toast fade-up",style:{border:`1px solid ${c}55`,color:c,
+    boxShadow:`0 12px 40px rgba(0,0,0,.4),0 0 0 1px ${c}15`}},
     type==="ok"?"✅":type==="warn"?"⚠️":"❌"," ",msg);
 }
 
 function KPI({icon,label,value,sub,color=T.gold,trend}){
-  return h(Card,{style:{position:"relative",overflow:"hidden"}},
+  return h(Card,{className:"ui-kpi",style:{position:"relative",overflow:"hidden"}},
     h("div",{style:{position:"absolute",top:0,right:0,width:3,height:"100%",
-      background:`linear-gradient(180deg,${color},${color}44)`,borderRadius:"0 14px 14px 0"}}),
-    h("div",{style:{display:"flex",gap:12,alignItems:"flex-start"}},
-      h("span",{style:{fontSize:24,lineHeight:1,marginTop:4}},icon),
-      h("div",{style:{flex:1}},
-        h("div",{style:{fontSize:11,color:T.muted,marginBottom:5,fontWeight:500}},label),
-        h("div",{className:"mono",style:{fontSize:26,fontWeight:700,color,lineHeight:1}},value??"—"),
-        sub&&h("div",{style:{fontSize:11,color:T.muted,marginTop:5}},sub),
-        trend!=null&&h("div",{style:{fontSize:11,marginTop:4,color:trend>0?T.green:trend<0?T.red:T.muted}},
+      background:`linear-gradient(180deg,${color},transparent)`,borderRadius:"0 14px 14px 0"}}),
+    h("div",{style:{position:"absolute",top:-28,left:-16,width:88,height:88,borderRadius:"50%",
+      background:`radial-gradient(circle,${color}16,transparent 70%)`,pointerEvents:"none"}}),
+    h("div",{style:{display:"flex",gap:14,alignItems:"flex-start"}},
+      h("div",{style:{width:42,height:42,borderRadius:12,flexShrink:0,
+        background:`linear-gradient(145deg,${color}22,${color}08)`,border:`1px solid ${color}33`,
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}},icon),
+      h("div",{style:{flex:1,minWidth:0}},
+        h("div",{style:{fontSize:11,color:T.muted,marginBottom:6,fontWeight:600}},label),
+        h("div",{className:"mono",style:{fontSize:25,fontWeight:700,color,lineHeight:1.1}},value??"—"),
+        sub&&h("div",{style:{fontSize:11,color:T.muted,marginTop:6}},sub),
+        trend!=null&&h("div",{style:{display:"inline-flex",alignItems:"center",gap:4,marginTop:8,
+          fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:999,
+          background:(trend>0?T.green:trend<0?T.red:T.muted)+"18",
+          color:trend>0?T.green:trend<0?T.red:T.muted}},
           trend>0?"↑":trend<0?"↓":"→"," ",Math.abs(trend),"%")
       )
     )
@@ -342,26 +385,43 @@ function KPI({icon,label,value,sub,color=T.gold,trend}){
 // ══════════════════════════════════════════════
 
 function OverviewTab({ov,costs}){
-  if(!ov) return h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}},
+  if(!ov) return h("div",{className:"kpi-grid"},
     Array(12).fill(0).map((_,i)=>h(Card,{key:i},h(Sk,{h:70}))));
-  const {today,total,queue,premium,banned,system}=ov;
-  const sr=today.searches>0?((today.success/today.searches)*100).toFixed(1):"0";
+  // Defensive defaults — API fields vary; never crash the whole dashboard
+  const today = ov.today || {};
+  const total = ov.total || {};
+  const queue = ov.queue || {};
+  const premium = ov.premium || {};
+  const banned = ov.banned || {};
+  const system = ov.system || {memory:{}};
+  const mem = system.memory || {};
+  const n = (v)=> (typeof v==="number" && !isNaN(v)) ? v : (parseInt(v,10)||0);
+  const searches = n(today.searches);
+  const downloads = n(today.downloads);
+  const success = n(today.success ?? today.found);
+  const cacheHits = n(today.cacheHits ?? today.cache_hits);
+  const activeUsers = n(today.activeUsers ?? today.users);
+  const avgMs = n(today.avgMs);
+  const totalSearches = n(total.totalSearches ?? total.searches);
+  const totalDownloads = n(total.totalDownloads ?? total.downloads);
+  const sr = searches>0 ? ((success/searches)*100).toFixed(1) : "0";
+  const cacheRate = today.cacheRate || (searches>0 ? ((cacheHits/searches)*100).toFixed(1)+"%" : "0%");
   const kpis=[
-    {icon:"🔍",label:"بحث اليوم",value:today.searches.toLocaleString(),color:T.blue,sub:`إجمالي: ${total.totalSearches.toLocaleString()}`},
-    {icon:"📥",label:"تحميل اليوم",value:today.downloads.toLocaleString(),color:T.gold,sub:`إجمالي: ${total.totalDownloads.toLocaleString()}`,trend:8},
-    {icon:"✅",label:"نسبة النجاح",value:`${sr}٪`,color:+sr>=90?T.green:+sr>=70?T.orange:T.red,sub:`${today.success} نجاح`},
-    {icon:"⚡",label:"من الكاش",value:today.cacheHits.toLocaleString(),color:T.purple,sub:today.cacheRate},
-    {icon:"👥",label:"نشطون اليوم",value:today.activeUsers.toLocaleString(),color:T.blue},
-    {icon:"⏱️",label:"متوسط الاستجابة",value:`${today.avgMs}ms`,color:today.avgMs<5000?T.green:T.red},
-    {icon:"⭐",label:"مميزون",value:premium.count,color:T.gold},
-    {icon:"🔄",label:"الطابور",value:queue.totalActiveJobs,color:T.orange,sub:`H:${queue.highQueue} N:${queue.normalQueue}`},
-    {icon:"💀",label:"DLQ",value:queue.dlqSize,color:queue.dlqSize>10?T.red:T.muted},
-    {icon:"🚫",label:"محظورون",value:banned.count,color:T.red},
-    {icon:"💾",label:"Heap",value:`${system.memory.heapUsed}MB`,color:T.muted,sub:`RSS:${system.memory.rss}MB`},
-    {icon:"⏰",label:"Uptime",value:system.uptimeHuman,color:T.green,sub:`${system.workers} workers`},
+    {icon:"🔍",label:"بحث اليوم",value:searches.toLocaleString(),color:T.blue,sub:`إجمالي: ${totalSearches.toLocaleString()}`},
+    {icon:"📥",label:"تحميل اليوم",value:downloads.toLocaleString(),color:T.gold,sub:`إجمالي: ${totalDownloads.toLocaleString()}`},
+    {icon:"✅",label:"نسبة النجاح",value:`${sr}٪`,color:+sr>=90?T.green:+sr>=70?T.orange:T.red,sub:`${success} نجاح`},
+    {icon:"⚡",label:"من الكاش",value:cacheHits.toLocaleString(),color:T.purple,sub:cacheRate},
+    {icon:"👥",label:"نشطون اليوم",value:activeUsers.toLocaleString(),color:T.blue},
+    {icon:"⏱️",label:"متوسط الاستجابة",value:avgMs?`${avgMs}ms`:"—",color:!avgMs?T.muted:avgMs<5000?T.green:T.red},
+    {icon:"⭐",label:"مميزون",value:n(premium.count),color:T.gold},
+    {icon:"🔄",label:"الطابور",value:n(queue.totalActiveJobs),color:T.orange,sub:`H:${n(queue.highQueue)} N:${n(queue.normalQueue)}`},
+    {icon:"💀",label:"DLQ",value:n(queue.dlqSize),color:n(queue.dlqSize)>10?T.red:T.muted},
+    {icon:"🚫",label:"محظورون",value:n(banned.count),color:T.red},
+    {icon:"💾",label:"Heap",value:`${n(mem.heapUsed)}MB`,color:T.muted,sub:`RSS:${n(mem.rss)}MB`},
+    {icon:"⏰",label:"Uptime",value:system.uptimeHuman||"—",color:T.green,sub:`${n(system.workers)} workers`},
   ];
   return h("div",{className:"fade-up"},
-    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}},
+    h("div",{className:"kpi-grid"},
       kpis.map((k,i)=>h(KPI,{key:i,...k}))),
     system.maintenance&&h("div",{style:{marginTop:16,background:T.redDim,border:`1px solid ${T.red}55`,
       borderRadius:12,padding:"12px 18px",color:T.red,fontWeight:600,fontSize:13}},
@@ -993,19 +1053,21 @@ function TelemetryTab({funnel,traces}){
 }
 
 const TABS=[
-  {id:"overview",icon:"🏠",label:"نظرة عامة"},
-  {id:"analytics",icon:"📊",label:"التحليلات"},
-  {id:"books",icon:"📚",label:"الكتب"},
-  {id:"failed",icon:"❌",label:"فشل البحث"},
-  {id:"cache",icon:"💾",label:"مكتبة الكاش"},
-  {id:"recent",icon:"🕐",label:"آخر الطلبات"},
-  {id:"sources",icon:"🔌",label:"المصادر"},
-  {id:"queue",icon:"🔄",label:"الطابور"},
-  {id:"users",icon:"👥",label:"المستخدمون"},
-  {id:"telemetry",icon:"📡",label:"Telemetry"},
-  {id:"logs",icon:"📜",label:"السجلات"},
-  {id:"system",icon:"💻",label:"النظام"},
+  {id:"overview",icon:"🏠",label:"نظرة عامة",group:"رئيسي"},
+  {id:"analytics",icon:"📊",label:"التحليلات",group:"رئيسي"},
+  {id:"books",icon:"📚",label:"الكتب",group:"محتوى"},
+  {id:"failed",icon:"❌",label:"فشل البحث",group:"محتوى"},
+  {id:"cache",icon:"💾",label:"مكتبة الكاش",group:"محتوى"},
+  {id:"recent",icon:"🕐",label:"آخر الطلبات",group:"محتوى"},
+  {id:"sources",icon:"🔌",label:"المصادر",group:"تشغيل"},
+  {id:"queue",icon:"🔄",label:"الطابور",group:"تشغيل"},
+  {id:"users",icon:"👥",label:"المستخدمون",group:"تشغيل"},
+  {id:"telemetry",icon:"📡",label:"القياس",group:"مراقبة"},
+  {id:"logs",icon:"📜",label:"السجلات",group:"مراقبة"},
+  {id:"system",icon:"💻",label:"النظام",group:"مراقبة"},
 ];
+const TAB_GROUPS=["رئيسي","محتوى","تشغيل","مراقبة"];
+
 
 // ── Cached Books Tab ──────────────────────────────────────────
 function CacheTab({books}){
@@ -2009,35 +2071,39 @@ function App({onLogout}){
       style:{width:sidebarWidth,background:T.surface,borderLeft:`1px solid ${T.border}`,
       display:"flex",flexDirection:"column",transition:"width .25s cubic-bezier(.4,0,.2,1)",
       overflow:"hidden",flexShrink:0,position:isMobile?"fixed":"sticky",top:0,height:"100vh"}},
-      h("div",{style:{padding:"18px 14px",borderBottom:`1px solid ${T.border}`,
-        display:"flex",alignItems:"center",gap:10,overflow:"hidden"}},
-        h("div",{className:"glow",style:{width:38,height:38,borderRadius:10,flexShrink:0,
-          background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
-          display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}},"📚"),
-        (sidebar||isMobile)&&h("div",{style:{overflow:"hidden",lineHeight:1.3,flex:1}},
-          h("div",{style:{color:T.gold,fontWeight:800,fontSize:13,whiteSpace:"nowrap"}},"خلاصة الكتب"),
-          h("div",{style:{color:T.muted,fontSize:10,whiteSpace:"nowrap"}},"لوحة الإدارة")
+      h("div",{style:{padding:"20px 14px 16px",borderBottom:`1px solid ${T.border}`,
+        display:"flex",alignItems:"center",gap:12,overflow:"hidden"}},
+        h("div",{className:"glow",style:{width:42,height:42,borderRadius:12,flexShrink:0,
+          background:`linear-gradient(145deg,${T.gold},${T.goldDim})`,
+          display:"flex",alignItems:"center",justifyContent:"center",fontSize:21,
+          boxShadow:`0 6px 20px ${T.gold}33`}},"📚"),
+        (sidebar||isMobile)&&h("div",{style:{overflow:"hidden",lineHeight:1.35,flex:1}},
+          h("div",{style:{color:T.gold,fontWeight:800,fontSize:14,whiteSpace:"nowrap"}},"خلاصة الكتب"),
+          h("div",{style:{color:T.muted,fontSize:10,whiteSpace:"nowrap",fontWeight:500}},"مركز العمليات")
         ),
         // Close button on mobile drawer
         isMobile && h("button",{onClick:closeSidebar,style:{background:"transparent",border:"none",
           color:T.muted,fontSize:18,padding:4,cursor:"pointer"}},"✕")
       ),
-      h("nav",{style:{flex:1,padding:"10px 8px",display:"flex",flexDirection:"column",gap:2,overflowY:"auto"}},
-        TABS.map(t=>h("button",{key:t.id,onClick:()=>{ setTab(t.id); if(isMobile) closeSidebar(); },style:{
-          background:tab===t.id?T.goldDim+"30":"transparent",
-          border:`1px solid ${tab===t.id?T.gold+"55":"transparent"}`,
-          color:tab===t.id?T.gold:T.muted,
-          padding:"9px 10px",borderRadius:9,display:"flex",alignItems:"center",
-          gap:9,transition:"all .15s",textAlign:"right",width:"100%"}},
-          h("span",{style:{fontSize:17,flexShrink:0}},t.icon),
-          (sidebar||isMobile)&&h("span",{style:{fontSize:13,fontWeight:tab===t.id?600:400,whiteSpace:"nowrap"}},t.label)
-        ))
+      h("nav",{style:{flex:1,padding:"8px 8px 12px",display:"flex",flexDirection:"column",gap:1,overflowY:"auto"}},
+        (typeof TAB_GROUPS!=="undefined"?TAB_GROUPS:["رئيسي","محتوى","تشغيل","مراقبة"]).flatMap(group=>{
+          const items=TABS.filter(t=>t.group===group);
+          if(!items.length) return [];
+          const nodes=[];
+          if(sidebar||isMobile) nodes.push(h("div",{key:"g-"+group,className:"nav-group-label"},group));
+          items.forEach(t=>nodes.push(
+            h("button",{key:t.id,className:`nav-item ${tab===t.id?"active":""}`,
+              onClick:()=>{ setTab(t.id); if(isMobile) closeSidebar(); }, title:t.label},
+              h("span",{style:{fontSize:17,flexShrink:0,width:22,textAlign:"center"}},t.icon),
+              (sidebar||isMobile)&&h("span",{style:{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},t.label)
+            )
+          ));
+          return nodes;
+        })
       ),
       // Footer: logout + collapse toggle
       h("div",{style:{borderTop:`1px solid ${T.border}`,padding:"8px",display:"flex",flexDirection:"column",gap:4}},
-        (sidebar||isMobile)&&h("button",{onClick:onLogout,style:{background:"transparent",border:`1px solid ${T.border}`,
-          color:T.red,padding:"8px 10px",borderRadius:8,fontSize:12,display:"flex",alignItems:"center",
-          gap:8,width:"100%",textAlign:"right"}},"🚪 تسجيل خروج"),
+        (sidebar||isMobile)&&h("button",{className:"btn btn-danger btn-md",onClick:onLogout,style:{width:"100%",justifyContent:"flex-start"}},"🚪  تسجيل خروج"),
         !isMobile && h("button",{onClick:toggleSidebar,style:{background:"transparent",border:"none",color:T.muted,padding:8,fontSize:14}},sidebar?"◀ طيّ":"▶")
       )
     ),
@@ -2071,8 +2137,8 @@ function App({onLogout}){
             background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
             width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:14
           }},"?"),
-          !isMobile && h("div",{style:{background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,
-            color:T.gold,padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:600}},"🛡️ أدمن")
+          !isMobile && h("div",{className:"tag",style:{background:T.goldDim+"30",border:`1px solid ${T.goldDim}`,
+            color:T.gold,padding:"5px 12px",fontSize:11,fontWeight:700}},"🛡️  أدمن")
         )
       ),
       // Content
@@ -2131,62 +2197,78 @@ function Login({onLogin}){
   const submit=async(e)=>{
     e?.preventDefault?.();
     const t=val.trim();
-    if(!t){ setErr("ادخل الـ Dashboard Secret"); return; }
+    if(!t){ setErr("أدخل مفتاح لوحة الإدارة (Dashboard Secret)"); return; }
     setBusy(true); setErr("");
     try{
       const r=await fetch(`${API_BASE}/api/admin/overview`,{headers:{Authorization:`Bearer ${t}`}});
       if(r.status===200){ setToken(t); onLogin(); }
-      else if(r.status===401||r.status===403){ setErr("Secret غير صحيح"); }
+      else if(r.status===401||r.status===403){ setErr("المفتاح غير صحيح — تحقّق من .env"); }
       else if(r.status===503){ setErr("DASHBOARD_SECRET غير مضبوط على السيرفر"); }
       else{ setErr(`خطأ غير متوقع (HTTP ${r.status})`); }
-    }catch{ setErr("تعذّر الاتصال بالسيرفر"); }
+    }catch{ setErr("تعذّر الاتصال بالسيرفر — تأكد أن البوت يعمل"); }
     finally{ setBusy(false); }
   };
-  return h("div",{className:"fade-in",style:{
-    display:"flex",alignItems:"center",justifyContent:"center",
-    width:"100%",minHeight:"100vh",background:T.bg,padding:"20px"
-  }},
-    h("form",{onSubmit:submit,style:{
-      width:"100%",maxWidth:380,background:T.card,
-      border:`1px solid ${T.border}`,borderRadius:16,
-      padding:"32px 28px",display:"flex",flexDirection:"column",gap:16
-    }},
-      h("div",{style:{display:"flex",alignItems:"center",gap:12,marginBottom:8}},
-        h("div",{className:"glow",style:{width:46,height:46,borderRadius:12,
-          background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
-          display:"flex",alignItems:"center",justifyContent:"center",fontSize:24}},"📚"),
+  return h("div",{className:"login-shell fade-in"},
+    h("form",{className:"login-card",onSubmit:submit,style:{display:"flex",flexDirection:"column",gap:18}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:14}},
+        h("div",{className:"glow",style:{width:52,height:52,borderRadius:14,
+          background:`linear-gradient(145deg,${T.gold},${T.goldDim})`,
+          display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,
+          boxShadow:`0 8px 28px ${T.gold}40`}},"📚"),
         h("div",null,
-          h("div",{style:{color:T.gold,fontWeight:800,fontSize:16}},"خلاصة الكتب"),
-          h("div",{style:{color:T.muted,fontSize:11}},"لوحة الإدارة")
+          h("div",{style:{color:T.gold,fontWeight:800,fontSize:18}},"خلاصة الكتب"),
+          h("div",{style:{color:T.muted,fontSize:12,marginTop:2,fontWeight:500}},"مركز العمليات · لوحة الإدارة")
         )
       ),
-      h("div",{style:{fontSize:12,color:T.muted,lineHeight:1.6}},
-        "أدخل الـ ",h("span",{className:"mono",style:{color:T.gold}},"DASHBOARD_SECRET")," من ملف ",
-        h("span",{className:"mono",style:{color:T.gold}},".env"),
-        " على السيرفر. يُحفظ في الجهاز فقط — لن يُرسل لأي طرف ثالث."
+      h("div",{style:{height:1,background:`linear-gradient(90deg,transparent,${T.border},transparent)`}}),
+      h("div",null,
+        h("div",{style:{fontSize:14,fontWeight:700,color:T.text,marginBottom:6}},"تسجيل الدخول"),
+        h("div",{style:{fontSize:12,color:T.muted,lineHeight:1.75}},
+          "أدخل ",h("span",{className:"mono",style:{color:T.gold}},"DASHBOARD_SECRET"),
+          " من ملف ",h("span",{className:"mono",style:{color:T.gold}},".env"),
+          " على السيرفر. يُحفظ محلياً في متصفحك فقط."
+        )
       ),
-      h("input",{type:"password",value:val,
-        onChange:e=>setVal(e.target.value),
-        placeholder:"••••••••••••••",
-        autoFocus:true,autoComplete:"off",
-        style:{direction:"ltr",fontFamily:"'IBM Plex Mono',monospace",fontSize:14}}),
-      err&&h("div",{style:{fontSize:12,color:T.red,
-        background:T.redDim+"30",border:`1px solid ${T.redDim}`,
-        padding:"8px 12px",borderRadius:8}},"❌ ",err),
-      h("button",{type:"submit",disabled:busy,style:{
-        background:`linear-gradient(135deg,${T.goldDim},${T.gold})`,
-        border:"none",color:"#1a1208",
-        padding:"11px 18px",borderRadius:10,
-        fontSize:14,fontWeight:700,opacity:busy?.6:1,
-        transition:"all .15s"
-      }},busy?"… جاري التحقق":"🔓 دخول")
+      h("div",null,
+        h("label",{style:{display:"block",fontSize:11,fontWeight:600,color:T.muted,marginBottom:8}},"مفتاح الوصول"),
+        h("input",{type:"password",value:val,onChange:e=>setVal(e.target.value),
+          placeholder:"••••••••••••••••",autoFocus:true,autoComplete:"off",
+          style:{direction:"ltr",fontFamily:"'IBM Plex Mono',monospace",fontSize:15,padding:"12px 14px"}})
+      ),
+      err&&h("div",{style:{fontSize:12,color:T.red,background:T.redDim+"40",border:`1px solid ${T.red}40`,
+        padding:"10px 12px",borderRadius:10,lineHeight:1.5}},"❌ ",err),
+      h("button",{type:"submit",className:"btn btn-gold btn-lg",disabled:busy,style:{width:"100%",opacity:busy?.65:1}},
+        busy?"… جاري التحقق":"🔓  دخول آمن"),
+      h("div",{style:{fontSize:10,color:T.muted,textAlign:"center",lineHeight:1.6}},
+        "محمي بمصادقة Bearer · حد معدّل 60 طلب/دقيقة")
     )
   );
 }
 
-// ══════════════════════════════════════════════
+// ═
 // ROOT — يبدّل بين Login و App بناءً على وجود token
 // ══════════════════════════════════════════════
+class DashErrorBoundary extends React.Component {
+  constructor(p){ super(p); this.state={err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err, info){ try{ console.error("Dashboard crash:", err, info); }catch(e){} }
+  render(){
+    if(this.state.err){
+      const msg = String(this.state.err && (this.state.err.message||this.state.err));
+      return h("div",{style:{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+        background:T.bg,color:T.text,padding:24,flexDirection:"column",gap:14,textAlign:"center"}},
+        h("div",{style:{fontSize:40}},"⚠️"),
+        h("div",{style:{fontSize:18,fontWeight:800,color:T.gold}},"تعذّر تحميل لوحة الإدارة"),
+        h("div",{style:{fontSize:12,color:T.muted,maxWidth:420,lineHeight:1.7,direction:"ltr"}}, msg.slice(0,300)),
+        h("button",{className:"btn btn-gold btn-md",onClick:()=>location.reload()},"🔄  إعادة تحميل"),
+        h("button",{className:"btn btn-ghost btn-md",onClick:()=>{ try{localStorage.removeItem(TOKEN_KEY);}catch(e){} location.reload(); }},
+          "🚪  تسجيل خروج وإعادة المحاولة")
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function Root(){
   const [authed,setAuthed]=useState(()=>!!getToken());
   useEffect(()=>{
@@ -2194,7 +2276,9 @@ function Root(){
     return ()=>setAuthLostHandler(null);
   },[]);
   if(!authed) return h(Login,{onLogin:()=>setAuthed(true)});
-  return h(App,{onLogout:()=>{ setToken(""); setAuthed(false); }});
+  return h(DashErrorBoundary,null,
+    h(App,{onLogout:()=>{ setToken(""); setAuthed(false); }})
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(h(Root));

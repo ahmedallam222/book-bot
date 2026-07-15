@@ -6,6 +6,9 @@ import { redis } from "./redis.js";
 import { askLlamaPrefilter } from "./aiProviders/llamaValidator.js";
 import {
   MISTRAL_API_KEY,
+  MISTRAL_API_KEY_2,
+  BYNARA_API_KEY_1,
+  BYNARA_API_KEY_2,
   PDF_VALIDATE_ACCEPT_THRESHOLD,
   PDF_VALIDATE_CONFIRM_THRESHOLD,
   PDF_VALIDATE_REJECT_THRESHOLD,
@@ -687,8 +690,8 @@ async function askMistral(
     `2) If metadata is empty or unhelpful, check the filename hint:`,
     `   - YES if the filename contains the requested book title (in any language, transliteration, or translation),`,
     `     even with extra words like "pdf", "book", "كتاب", site name, year, etc.`,
-    `   - YES if the filename contains the requested author's name.`,
     `3) Answer NO only if there is positive evidence of a different book — i.e. the filename or metadata clearly names a different specific book.`,
+    `   - IMPORTANT: Answer NO if the filename or metadata ONLY contains an author's name, but not the requested book title.`,
     `4) If the filename has no useful information (only digits, random IDs, empty), answer NO.`,
     `Reply with one word only: YES or NO`,
   );
@@ -715,58 +718,60 @@ async function askMistral(
     return verdict;
   }
 
-  try {
-    const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
-      method:  "POST",
-      headers: {
-        "Content-Type":  "application/json",
-        "Authorization": `Bearer ${MISTRAL_API_KEY}`,
-      },
-      signal: AbortSignal.timeout(TIMEOUT_MISTRAL),
-      body: JSON.stringify({
-        model:       "mistral-small-latest",
-        messages:    [{ role: "user", content: lines.join("\n") }],
-        max_tokens:  16,   // كافٍ لـ YES/NO حتى مع leading whitespace
-        temperature: 0,
-      }),
-    });
+  const endpoints = [
+    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY, model: "mistral-small-latest" },
+    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY_2, model: "mistral-small-latest" },
+    { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_1, model: "mistral-large" },
+    { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_2, model: "mistral-large" }
+  ].filter(e => !!e.key);
 
-    if (!r.ok) {
-      // FIX: fail-closed عند خطأ HTTP من Mistral
-      L.warn("pdfValidator", `Mistral API HTTP ${r.status} — fail-closed`);
-      redis.incr(TEL_MISTRAL_HTTP_ERROR).catch(() => {});
-      return false;
+  let lastErr = null;
+  for (const ep of endpoints) {
+    try {
+      const r = await fetch(ep.url, {
+        method:  "POST",
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer ${ep.key}`,
+        },
+        signal: AbortSignal.timeout(TIMEOUT_MISTRAL),
+        body: JSON.stringify({
+          model:       ep.model,
+          messages:    [{ role: "user", content: lines.join("\n") }],
+          max_tokens:  16,
+          temperature: 0,
+        }),
+      });
+
+      if (!r.ok) {
+        L.warn("pdfValidator", `Mistral API HTTP ${r.status} on ${ep.url} — trying next`);
+        redis.incr(TEL_MISTRAL_HTTP_ERROR).catch(() => {});
+        continue;
+      }
+
+      const data    = await r.json() as { choices?: { message?: { content?: string } }[] };
+      const ans     = (data.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
+      const verdict = ans.startsWith("Y");
+
+      L.info("pdfValidator", "Mistral answered", { ans: ans.slice(0, 10), verdict, book: bookName.slice(0, 40), crosslang: isCrossLang, endpoint: ep.url });
+      redis.incr(verdict ? TEL_MISTRAL_YES : TEL_MISTRAL_NO).catch(() => {});
+      redis.setex(cacheKey, MISTRAL_CACHE_TTL_SEC, verdict ? "1" : "0").catch(() => {});
+      return verdict;
+    } catch (e) {
+      lastErr = e;
+      L.warn("pdfValidator", `Mistral error on ${ep.url}: ${String(e).slice(0, 80)} — trying next`);
     }
-
-    const data    = await r.json() as { choices?: { message?: { content?: string } }[] };
-    const ans     = (data.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
-    const verdict = ans.startsWith("Y");
-
-    L.info("pdfValidator", "Mistral answered", { ans: ans.slice(0, 10), verdict, book: bookName.slice(0, 40), crosslang: isCrossLang });
-    redis.incr(verdict ? TEL_MISTRAL_YES : TEL_MISTRAL_NO).catch(() => {});
-    redis.setex(cacheKey, MISTRAL_CACHE_TTL_SEC, verdict ? "1" : "0").catch(() => {});
-    return verdict;
-
-  } catch (e) {
-    // FIX: fail-closed عند خطأ Mistral بدل fail-open
-    // Mistral معطّل مؤقتاً → لا نُرسَل كتاباً ربما غلط — نرفض ونجرّب الـ URL التالي
-    //
-    // P1 fix: split the failure-mode counter so ops can see whether
-    // we're rejecting because Mistral *said no* (rejected_mismatch
-    // already counts that) or because Mistral *itself failed* (timeout
-    // / network) — those need different remediation (better prompt vs
-    // wider timeout / retry / failover).
-    const errStr = String(e);
-    const isTimeout = /AbortError|TimeoutError|aborted|timed?\s*out/i.test(errStr) ||
-                      /AbortError|TimeoutError/.test((e as Error)?.name || "");
-    if (isTimeout) {
-      redis.incr(TEL_MISTRAL_TIMEOUT).catch(() => {});
-    } else {
-      redis.incr(TEL_MISTRAL_OTHER_ERR).catch(() => {});
-    }
-    L.warn("pdfValidator", `Mistral error — fail-closed: ${errStr.slice(0, 80)}`);
-    return false;
   }
+
+  const errStr = String(lastErr);
+  const isTimeout = /AbortError|TimeoutError|aborted|timed?\s*out/i.test(errStr) || /AbortError|TimeoutError/.test((lastErr as any)?.name || "");
+  if (isTimeout) {
+    redis.incr(TEL_MISTRAL_TIMEOUT).catch(() => {});
+  } else {
+    redis.incr(TEL_MISTRAL_OTHER_ERR).catch(() => {});
+  }
+  L.warn("pdfValidator", `All Mistral endpoints failed — fail-closed: ${errStr.slice(0, 80)}`);
+  return false;
 }
 
 // ══════════════════════════════════════════════

@@ -20,6 +20,8 @@ export interface BookResult {
   access:        "direct_pdf" | "download_page" | "catalog_page" | "protected_page";
   accessReason?: string;
   _score?:       number;
+  /** Bytes when known (e.g. Telegram search); used for size-aware ranking. */
+  fileSize?:     number;
 }
 
 export interface DownloadResult {
@@ -34,6 +36,9 @@ export interface DownloadResult {
   // and short-circuit further Mistral calls once the streak crosses a
   // threshold — see MISTRAL_NO_STREAK_LIMIT in config.ts.
   mistralRejected?: boolean;
+  // True when the file exceeds Telegram bot upload limit (~50MB).
+  // bookRequest treats this as permanent and may surface a size-specific message.
+  tooLarge?: boolean;
 }
 
 export interface QueueJob {

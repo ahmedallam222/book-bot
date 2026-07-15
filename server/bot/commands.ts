@@ -18,6 +18,7 @@ import { isPremium, getUserDailyLimit, setPremium, setUserDailyLimit, resetUserD
 import { storage } from "../storage.js";
 import { escMd, normalizeArabic, buildResetTime } from "./text.js";
 import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
+import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { storeRetryKey } from "./session.js";
 import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
@@ -813,9 +814,21 @@ export function registerMessageHandler(
     // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
 
-    const wantsSummary = detectSummaryIntent(bookName);
-    const parsedBookName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id, wantsSummary);
+    const intent = await parseChatIntent(bookName);
+    if (intent.isChat && intent.response) {
+      await bot.sendMessage(chatId, intent.response, { parse_mode: "Markdown" }).catch(() => {});
+      return;
+    }
+    
+    let finalBookName = intent.bookName;
+    let finalWantsSummary = intent.wantsSummary;
+    
+    if (!finalBookName || finalBookName.trim().length < 2) {
+      finalWantsSummary = detectSummaryIntent(bookName);
+      finalBookName = await parseBookName(bookName);
+    }
+    
+    await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
   });
 }
 
