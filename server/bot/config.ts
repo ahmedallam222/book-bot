@@ -24,6 +24,7 @@ export const MIN_QUERY_LENGTH         = 3;
 // لأن الـ endpoint مدفوع لكن سريع نسبياً (~40s/صورة) ومش بياخد
 // من Firecrawl quota. يتجاوزه الـ admins.
 export const IMAGE_DAILY_LIMIT        = parseInt(process.env.IMAGE_DAILY_LIMIT || "5", 10);
+export const IMAGE_PREMIUM_DAILY_LIMIT = parseInt(process.env.IMAGE_PREMIUM_DAILY_LIMIT || "15", 10);
 
 // ── Video generation (/video, veo3) ───────────
 // عدد الفيديوهات اليومي لكل مستخدم. أقل بكثير من الصور لأن

@@ -394,7 +394,22 @@ async function callVeo3(
           // رسائل فشل صريحة (Rate Limit / Error / failed / retry).
           const err = pollResponseSignalsError(pollText);
           if (err) return { error: `poll_terminal: ${err}` };
-          const url = normalizeVideoUrl(pollText, VEO3_BASE_URL);
+          // JSON responses: { video, url, video_url, result }
+          let candidate = pollText;
+          try {
+            if (pollText.startsWith("{") || pollText.startsWith("[")) {
+              const j = JSON.parse(pollText) as Record<string, unknown>;
+              const pick =
+                (j.video as string) ||
+                (j.url as string) ||
+                (j.video_url as string) ||
+                (j.result as string) ||
+                (typeof j.data === "string" ? j.data : "") ||
+                "";
+              if (pick) candidate = pick;
+            }
+          } catch { /* not JSON */ }
+          const url = normalizeVideoUrl(candidate, VEO3_BASE_URL);
           if (url) return { url };
         }
       }
@@ -528,9 +543,14 @@ export async function handleVideoCommand(
     });
     redis.incr(VID_TOTAL_FAIL_KEY).catch(() => {});
 
-    const friendly = result.error === "timeout"
-      ? `⏱ انتهى الوقت قبل اكتمال الفيديو. حاول مرة أخرى.`
-      : `❌ خطأ في توليد الفيديو. حاول لاحقاً.`;
+    let friendly = `❌ تعذّر توليد الفيديو. حاول لاحقاً.`;
+    const e = result.error || "";
+    if (e === "timeout") friendly = `⏱ انتهى الوقت قبل اكتمال الفيديو (أكثر من 5 دقائق). حاول مرة أخرى بوصف أقصر.`;
+    else if (e.includes("no_nonce")) friendly = `⚠️ مصدر الفيديو غير متاح حالياً. جرّب بعد قليل.`;
+    else if (e.includes("rate_limit") || e.includes("In Progress") || e.includes("in_progress"))
+      friendly = `⏳ الخدمة مشغولة الآن. انتظر دقيقة وأعد المحاولة.`;
+    else if (e.includes("no_scene_id")) friendly = `⚠️ لم يبدأ التوليد — أعد المحاولة بوصف إنجليزي أوضح.`;
+    L.warn("videoGen", "user-facing fail", { err: e.slice(0, 120) });
 
     if (ackMsg) {
       await bot.editMessageText(friendly, {
