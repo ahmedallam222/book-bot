@@ -5,6 +5,7 @@ import { GENRE_MAP, SUGGESTIONS } from "./suggestions.js";
 import { handleBookRequest }      from "./bookRequest.js";
 import { escMd }                  from "./text.js";
 import { onSuccessfulRandom } from "./retention.js";
+import { getPrimaryGenre, booksForGenreId } from "./interests.js";
 
 // ══════════════════════════════════════════════
 // RANDOM — كتاب مفاجأة بجنس أدبي
@@ -147,7 +148,17 @@ async function handleRandomByGenre(
   username: string | null | undefined,
   genreKey: string
 ): Promise<void> {
-  const books    = getBooksForGenre(genreKey);
+  let books    = getBooksForGenre(genreKey);
+  // تخصيص: عند «أي كتاب» انحز لذوق المستخدم إن وُجد
+  if (genreKey === "any" || genreKey === "أي") {
+    try {
+      const g = await getPrimaryGenre(userId);
+      if (g && g !== "other") {
+        const pref = booksForGenreId(g);
+        if (pref.length >= 5) books = pref;
+      }
+    } catch { /* */ }
+  }
   const bookName = await pickUniqueRandom(userId, books);
 
   // إحصاءات الجنس

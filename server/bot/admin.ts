@@ -17,6 +17,7 @@ import { announceMaintenanceEnd }                              from "./maintenan
 import { getStreakState } from "./streak.js";
 import { getUserBadges, BADGES }     from "./badges.js";
 import { buildRetentionProfileBlock } from "./retention.js";
+import { buildInterestProfileLine } from "./interests.js";
 import { getReferralState }          from "./referral.js";
 import { ARABIC_SOURCES }            from "./sources.js";
 import type { SourceStat }           from "./analytics.js";
@@ -141,7 +142,10 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
-  const retentionBlock = await buildRetentionProfileBlock(userId).catch(() => "");
+  const [retentionBlock, interestLine] = await Promise.all([
+    buildRetentionProfileBlock(userId).catch(() => ""),
+    buildInterestProfileLine(userId).catch(() => ""),
+  ]);
 
   return (
     `👤 *ملفي الشخصي — ${escMd(name)}*\n` +
@@ -150,6 +154,7 @@ export async function buildProfileMessage(userId: string, name: string): Promise
     `📥 *الكتب التي حمّلتها (إجمالاً):* ${totalDl}\n` +
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
+    (interestLine ? `${interestLine}\n` : "") +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
     `*أوامر سريعة:*\n` +

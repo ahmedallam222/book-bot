@@ -30,6 +30,8 @@ import { handleImageCallback } from "./imageGen.js";
 import { claimDaily, RETENTION_TIPS } from "./retention.js";
 import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { replyKeyboardMain } from "./replyKeyboard.js";
+import { completeOnboarding } from "./onboarding.js";
+import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
 
@@ -201,10 +203,10 @@ export function registerCallbackHandler(
         // Toast يؤكد الحذف — يظهر الآن بعد إصلاح الترتيب
         await bot.answerCallbackQuery(query.id, { text: `🗑️ حُذف: ${removed.slice(0, 30)}` }).catch(() => {});
         if (query.message?.message_id) {
-          await bot.editMessageText(buildWishlistMsg(list), {
+          await bot.editMessageText(buildWishlistMsg(list, false, 50, await getJourneyMap(userId), await journeySummary(userId, list)), {
             chat_id: chatId, message_id: query.message.message_id,
             parse_mode: "Markdown",
-            reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+            reply_markup: await buildWishlistKb(list, userId), // FIX-4: token محذوف — لم يكن مستخدماً
           }).catch(() => {});
         }
       } else {
@@ -219,10 +221,10 @@ export function registerCallbackHandler(
       // Toast يؤكد المسح — يظهر الآن بعد إصلاح الترتيب
       await bot.answerCallbackQuery(query.id, { text: "🗑️ تم مسح القائمة" }).catch(() => {});
       if (query.message?.message_id) {
-        await bot.editMessageText(buildWishlistMsg([]), {
+        await bot.editMessageText(buildWishlistMsg([], false, 50), {
           chat_id: chatId, message_id: query.message.message_id,
           parse_mode: "Markdown",
-          reply_markup: buildWishlistKb([]), // FIX-4: token محذوف
+          reply_markup: await buildWishlistKb([], userId), // FIX-4: token محذوف
         }).catch(() => {});
       }
       return;
@@ -363,14 +365,70 @@ export function registerCallbackHandler(
     // بعد الـ general answer — لا تحتاج toast خاص
     if (data === "wishlist_view") {
       const list = await getWishlist(userId);
-      await bot.sendMessage(chatId, buildWishlistMsg(list), {
+      await bot.sendMessage(chatId, buildWishlistMsg(list, false, 50, await getJourneyMap(userId), await journeySummary(userId, list)), {
         parse_mode: "Markdown",
-        reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+        reply_markup: await buildWishlistKb(list, userId), // FIX-4: token محذوف — لم يكن مستخدماً
       }).catch(() => {});
       return;
     }
 
     // ── switch ────────────────────────────────────
+
+    // ── onboarding genre pick ──
+    if (data.startsWith("onb:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const genre = data.slice(4) || "skip";
+      try {
+        const text = await completeOnboarding(userId, genre === "skip" ? "skip" : genre);
+        if (query.message?.message_id) {
+          await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "Markdown",
+          }).catch(async () => {
+            await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+          });
+        } else {
+          await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+        }
+      } catch (e) {
+        L.error("cb", "onb failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
+    // ── wishlist journey cycle ──
+    if (data.startsWith("wlj:")) {
+      const idx = parseInt(data.slice(4), 10);
+      try {
+        const list = await getWishlist(userId);
+        if (!isNaN(idx) && idx >= 0 && idx < list.length) {
+          const title = list[idx];
+          const st = await cycleStatus(userId, title);
+          await bot.answerCallbackQuery(query.id, {
+            text: `${statusLabel(st)} — ${title.slice(0, 40)}`,
+            show_alert: false,
+          }).catch(() => {});
+          // refresh wishlist view
+          const prem = await isPremium(userId).catch(() => false);
+          const maxSlots = await getWishlistMax(userId, prem);
+          const journey = await getJourneyMap(userId);
+          const summary = await journeySummary(userId, list);
+          if (query.message?.message_id) {
+            await bot.editMessageText(buildWishlistMsg(list, prem, maxSlots, journey, summary), {
+              chat_id: chatId,
+              message_id: query.message.message_id,
+              parse_mode: "Markdown",
+              reply_markup: await buildWishlistKb(list, userId),
+            }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        L.error("cb", "wlj failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
     switch (data) {
       case "main_menu": {
         const name = query.from.first_name || "صديقي";

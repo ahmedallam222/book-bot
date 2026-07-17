@@ -12,6 +12,7 @@ import { cairoDateString, escMd } from "./text.js";
 import { SUGGESTIONS, GENRE_MAP } from "./suggestions.js";
 import { storeRetryKey } from "./session.js";
 import { BOT_NAME } from "./brand.js";
+import { getPrimaryGenre, booksForGenreId } from "./interests.js";
 
 const KEY = (day: string) => `ret:botd:${day}`;
 
@@ -79,8 +80,8 @@ function whyLine(day: string): string {
   return WHY_LINES[h % WHY_LINES.length];
 }
 
-export async function buildBookOfDayMessage(): Promise<string> {
-  const { day, title } = await getBookOfDay();
+export async function buildBookOfDayMessage(userId?: string): Promise<string> {
+  const { day, title } = userId ? await getBookOfDayForUser(userId) : await getBookOfDay();
   return (
     `📖 *كتاب اليوم*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
@@ -126,4 +127,25 @@ export function kbBookOfDay(title?: string): TelegramBot.InlineKeyboardMarkup {
 export async function kbBookOfDayAsync(): Promise<TelegramBot.InlineKeyboardMarkup> {
   const { title } = await getBookOfDay();
   return kbBookOfDay(title);
+}
+
+
+/** كتاب اليوم مع انحياز خفيف لذوق المستخدم (إن وُجد) */
+export async function getBookOfDayForUser(userId?: string): Promise<{ day: string; title: string }> {
+  const base = await getBookOfDay();
+  if (!userId) return base;
+  try {
+    const g = await getPrimaryGenre(userId);
+    if (!g || g === "other") return base;
+    const pool = booksForGenreId(g).map((b) => (b.split(/\s*[—–-]\s*/)[0] || b).trim()).filter((t) => t.length >= 3);
+    if (pool.length < 3) return base;
+    // mix user id + day for stable daily pick per user
+    const day = base.day;
+    let h = 0;
+    const seed = day + ":" + userId + ":" + g;
+    for (let i = 0; i < seed.length; i++) h = (h * 33 + seed.charCodeAt(i)) >>> 0;
+    return { day, title: pool[h % pool.length] };
+  } catch {
+    return base;
+  }
 }

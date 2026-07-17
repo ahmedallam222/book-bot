@@ -21,6 +21,7 @@ import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
+import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { pickFresh } from "./uiVariants.js";
 import {
@@ -120,6 +121,30 @@ export function registerCommands(
         { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
       if (isFirstTime) {
         react(bot, chatId, msg.message_id, "🎉").catch(() => {});
+        // ترحيب ذوق — مرّة واحدة
+        try {
+          if (await shouldShowOnboarding(userId)) {
+            await bot.sendMessage(
+              chatId,
+              buildOnboardingMessage(name),
+              { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+            );
+          }
+        } catch { /* */ }
+      } else {
+        // مستخدم قديم لم يكمل onboarding
+        try {
+          if (await shouldShowOnboarding(userId)) {
+            const shown = await redis.set(`ret:onb_nudge:${userId}`, "1", "EX", 14 * 86400, "NX");
+            if (shown === "OK") {
+              await bot.sendMessage(
+                chatId,
+                buildOnboardingMessage(name),
+                { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+              ).catch(() => {});
+            }
+          }
+        } catch { /* */ }
       }
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
@@ -246,8 +271,9 @@ export function registerCommands(
   // ── /today — كتاب اليوم ─────────────────────
   bot.onText(/^\/(?:today|كتاب_اليوم|كتاب اليوم)(?:@\w+)?$/i, async (msg) => {
     const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
     try {
-      const body = await buildBookOfDayMessage();
+      const body = await buildBookOfDayMessage(userId || undefined);
       const kb = await kbBookOfDayAsync();
       await bot.sendMessage(chatId, body, {
         parse_mode: "Markdown",

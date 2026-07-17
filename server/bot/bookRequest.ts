@@ -54,6 +54,8 @@ import {
 } from "./streak.js";
 import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badges.js";
 import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
+import { recordInterest } from "./interests.js";
+import { getRelatedBooks, pickReadingTip, buildDiscoverFooter } from "./discover.js";
 import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
 // buildResetTime مستوردة من text.ts
@@ -1478,12 +1480,23 @@ _حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُ
 
   const streakLine = formatStreakLine(streak) ?? undefined;
 
-  const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
+  const related = await getRelatedBooks(bookName, userId, 2).catch(() => [] as string[]);
+  const tip = pickReadingTip(bookName + userId);
+  recordInterest(userId, bookName).catch(() => {});
+
+  let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
+  if (related.length > 0) {
+    msg += `\n\n✨ *قد يعجبك أيضاً — اضغط الزر بالأسفل*`;
+  }
+  // نصيحة قراءة قصيرة (بدون تنسيق معقّد)
+  const tipPlain = tip.replace(/[_*`\[]/g, "").slice(0, 120);
+  if (tipPlain) msg += `\n\n💬 _${tipPlain}_`;
+
   await bot.sendMessage(
     chatId, msg,
     {
       parse_mode: "Markdown",
-      reply_markup: kbAfterSuccess(bookName, sourceUrl, { isPrem, fromCache }),
+      reply_markup: kbAfterSuccess(bookName, sourceUrl, { isPrem, fromCache, related }),
       disable_web_page_preview: true,
     },
   );

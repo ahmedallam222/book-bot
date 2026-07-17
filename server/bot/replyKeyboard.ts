@@ -125,7 +125,7 @@ export async function tryHandleReplyKeyboard(
     }
 
     case RK.TODAY: {
-      const body = await buildBookOfDayMessage();
+      const body = await buildBookOfDayMessage(userId);
       await bot.sendMessage(chatId, body, {
         parse_mode: "Markdown",
         reply_markup: kbBookOfDay(),

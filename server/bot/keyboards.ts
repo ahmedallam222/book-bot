@@ -62,27 +62,33 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
 export function kbAfterSuccess(
   bookName: string,
   sourceUrl?: string,
-  opts?: { isPrem?: boolean; fromCache?: boolean },
+  opts?: { isPrem?: boolean; fromCache?: boolean; related?: string[] },
 ): TelegramBot.InlineKeyboardMarkup {
   const retryK   = storeRetryKey(bookName);
   const summaryK = storeSummaryKey(bookName, sourceUrl || undefined);
   const isPrem = !!opts?.isPrem;
+  const related = (opts?.related || []).slice(0, 2);
 
-  // Post-delivery UX (mini-app clarity):
+  // Post-delivery UX:
   //  primary: summary + wishlist
-  //  discover: another book + surprise
-  //  quality: wrong file / resend
-  //  nav: premium (free) or profile + home
+  //  discover: related titles (one-tap)
+  //  more: search + surprise
+  //  quality + nav
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
       { text: "📘  ملخّص سريع", callback_data: safeCb(`sum:${summaryK}`) },
       { text: "🔖  احفظه",     callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
-    [
+  ];
+  for (const title of related) {
+    const rk = storeRetryKey(title);
+    const label = title.length > 28 ? title.slice(0, 27) + "…" : title;
+    rows.push([{ text: `✨  ${label}`, callback_data: safeCb(`retry:${rk}`) }]);
+  }
+  rows.push([
       { text: "🔍  كتاب آخر", callback_data: "new_search" },
       { text: "🎲  مفاجأة",   callback_data: "rg:any" },
-    ],
-  ];
+  ]);
 
   if (sourceUrl) {
     const fbKey = storeFeedbackUrl(sourceUrl, bookName);
