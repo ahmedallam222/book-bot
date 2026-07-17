@@ -28,6 +28,8 @@ import {
 import { handleSummaryCallback } from "./summaryHandler.js";
 import { handleImageCallback } from "./imageGen.js";
 import { claimDaily, RETENTION_TIPS } from "./retention.js";
+import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
+import { replyKeyboardMain } from "./replyKeyboard.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
 
@@ -382,6 +384,9 @@ export function registerCallbackHandler(
         await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem), {
           parse_mode: "Markdown", reply_markup: kbMain(),
         });
+        await bot.sendMessage(chatId, `_الأزرار السفلية جاهزة._`, {
+          parse_mode: "Markdown", reply_markup: replyKeyboardMain(),
+        }).catch(() => {});
         break;
       }
 
@@ -511,6 +516,30 @@ export function registerCallbackHandler(
           });
         } catch (e) {
           L.error("cb", "invite_view error", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "botd:go": {
+        try {
+          const { title } = await getBookOfDay();
+          await bot.sendMessage(chatId,
+            `📖 *كتاب اليوم:* «${title.slice(0, 80)}»\n_جارٍ البحث…_`,
+            { parse_mode: "Markdown" }).catch(() => {});
+          await handleBookRequest(bot, chatId, userId, title, token, query.from?.username);
+        } catch (e) {
+          L.error("cb", "botd:go failed", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "botd:show": {
+        try {
+          const body = await buildBookOfDayMessage();
+          const kb = await kbBookOfDayAsync();
+          await bot.sendMessage(chatId, body, { parse_mode: "Markdown", reply_markup: kb });
+        } catch (e) {
+          L.error("cb", "botd:show failed", { err: String(e).slice(0, 100) });
         }
         break;
       }

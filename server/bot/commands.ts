@@ -20,6 +20,8 @@ import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
+import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
+import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { pickFresh } from "./uiVariants.js";
 import {
   allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
@@ -109,15 +111,21 @@ export function registerCommands(
       ]);
       const remaining = Math.max(0, limit - dlRaw);
       await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem, isFirstTime),
-        { parse_mode: "Markdown", reply_markup: kbMain() });
+        { parse_mode: "Markdown", reply_markup: replyKeyboardMain() });
+      // قائمة inline إضافية للأفعال المتقدمة
+      await bot.sendMessage(chatId,
+        isFirstTime
+          ? `👇 *اختصارات سريعة* — والأزرار السفلية دائماً معك.`
+          : `👇 *القائمة السريعة*`,
+        { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
       if (isFirstTime) {
         react(bot, chatId, msg.message_id, "🎉").catch(() => {});
       }
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId,
-        `🌿 *أهلاً! أنا رفيق*\n\nاكتب اسم أي كتاب… وأنا أبحث عنه بهدوء.`,
-        { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
+        `🌿 *أهلاً! أنا رفيق*\n\nاكتب عنوان أي كتاب… وأبحث عنه بهدوء.`,
+        { parse_mode: "Markdown", reply_markup: replyKeyboardMain() }).catch(() => {});
     }
   });
 
@@ -231,6 +239,22 @@ export function registerCommands(
       });
     } catch (e) {
       L.error("cmd", "/daily error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+  
+  // ── /today — كتاب اليوم ─────────────────────
+  bot.onText(/^\/(?:today|كتاب_اليوم|كتاب اليوم)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      const body = await buildBookOfDayMessage();
+      const kb = await kbBookOfDayAsync();
+      await bot.sendMessage(chatId, body, {
+        parse_mode: "Markdown",
+        reply_markup: kb,
+      });
+    } catch (e) {
+      L.error("cmd", "/today error", { err: String(e).slice(0, 100) });
     }
   });
 
@@ -786,6 +810,13 @@ export function registerMessageHandler(
     }
 
     if (text.startsWith("/")) return;
+
+    // لوحة الرد السفلية (خاص فقط) — قبل تفسير النص كعنوان كتاب
+    if (!isGroup) {
+      const handledRk = await tryHandleReplyKeyboard(bot, msg, token, getBotUsername).catch(() => false);
+      if (handledRk) return;
+    }
+
 
     let bookName = "";
     if (isGroup) {

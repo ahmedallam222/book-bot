@@ -9,6 +9,7 @@ import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
+import { buildDidYouMeanMessage, kbDidYouMean } from "./didYouMean.js";
 import {
   correctTransliteration,
   TEL_TLIT_RETRY_RECOVERED,
@@ -662,22 +663,22 @@ async function performFullSearch(
       }).catch(() => {});
     }
 
-    await bot.sendMessage(
-      chatId,
-      await buildNoResultMessage(bookName, /* apologetic */ true),
-      {
-        parse_mode:   "Markdown",
-        reply_markup: kbNoResults(bookName),
-        // Reply-quote the user's original message so the failure is
-        // attributed to them. In groups this surfaces as a quoted reply
-        // (effective @mention); in private chats it's a polite anchor.
-        // allow_sending_without_reply guards against the user having
-        // deleted their original message.
-        ...(userMessageId
-          ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
-          : {}),
-      },
-    );
+    {
+      const dym = await buildDidYouMeanMessage(bookName, /* apologetic */ true);
+      await bot.sendMessage(
+        chatId,
+        dym.text,
+        {
+          parse_mode:   "Markdown",
+          reply_markup: dym.suggestions.length > 0
+            ? kbDidYouMean(bookName, dym.suggestions)
+            : kbNoResults(bookName),
+          ...(userMessageId
+            ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
+            : {}),
+        },
+      );
+    }
     return { sent: false };
   }
 
@@ -1661,32 +1662,18 @@ async function buildNoResultMessage(
   bookName: string,
   apologetic = false,
 ): Promise<string> {
-  // لو Firecrawl quota منتهية → رسالة صادقة بدل "لم أجد"
   const fcDown = await isFirecrawlDown().catch(() => false);
   if (fcDown) {
     const apology = apologetic
-      ? `🙏 _عذراً، لم أتمكّن من البحث الآن._\n\n`
+      ? `🙏 _عذراً، لم أتمكّن من البحث الآن._
+
+`
       : "";
-    return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
+    return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*
+_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
   }
-  // Llama suggestions (audit follow-up #3, 2026-05-09): when search
-  // genuinely came up empty, ask Llama-on-Cloudflare for 3 topic-relevant
-  // Arabic books. Empty array → silent fallback to the generic message
-  // (no behaviour change). See server/bot/aiProviders/llamaSuggestions.ts.
-  const base = buildNoResults(bookName, false, apologetic);
-  const suggestions = await getLlamaSuggestions(bookName).catch(() => []);
-  if (suggestions.length === 0) return base;
-  const block = suggestions
-    .slice(0, 3)
-    .map((s) => `◦ ${escMd(s.slice(0, 80))}`)
-    .join("\n");
-  return (
-    base +
-    `\n\n` +
-    `📚 *كتب مشابهة قد تجدها بسهولة:*\n` +
-    `${block}\n\n` +
-    `_جرّب البحث عن أحدها — قد يكون أقرب إلى ما تريد._`
-  );
+  const dym = await buildDidYouMeanMessage(bookName, apologetic);
+  return dym.text;
 }
 
 

@@ -20,6 +20,7 @@ import {
   WARM_DAILY_NOTES,
   WARM_EVENING_NOTES,
 } from "./brand.js";
+import { bookOfDayMorningBlock, kbBookOfDayAsync } from "./bookOfDay.js";
 
 const QUEST_KEY     = (uid: string, day: string) => `ret:quest:${uid}:${day}`;
 const QUEST_DONE    = (uid: string, day: string) => `ret:qdone:${uid}:${day}`;
@@ -677,17 +678,21 @@ async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
       }
 
       const note = pickNote(WARM_DAILY_NOTES, `${day}:${uid}`);
+      const botd = await bookOfDayMorningBlock();
       const text =
         `🕊 *رسالة من ${BOT_NAME}*\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `${escMd(note)}\n\n` +
-        `*تقدر:*\n` +
-        `◦ اكتب عنوان كتاب\n` +
-        `◦ أو سجّل حضورك: /daily\n` +
+        `${botd.text}\n\n` +
+        `*يمكنك:*\n` +
+        `◦ طلب كتاب اليوم من الزر\n` +
+        `◦ كتابة عنوان كتاب\n` +
+        `◦ تسجيل الحضور: /daily\n` +
         `◦ أو تجاهل الرسالة كما تشاء`;
 
       try {
-        await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown" });
+        const kb = await kbBookOfDayAsync();
+        await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown", reply_markup: kb });
         await redis.sadd(MORNING_KEY(day), uid);
         await redis.expire(MORNING_KEY(day), 2 * 86400);
         sent++;
