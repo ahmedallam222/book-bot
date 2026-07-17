@@ -187,7 +187,7 @@ interface GenImageResult {
 }
 
 async function callNanoBananaRaw(prompt: string): Promise<NanoBananaResponse> {
-  if (!NANO_BANANA_API_KEY || NANO_BANANA_API_KEY.length < 12) {
+  if (!NANO_BANANA_API_KEY || NANO_BANANA_API_KEY.length < 4) {
     return { error: "nano_key_invalid_or_short" };
   }
   const url = new URL(NANO_BANANA_ENDPOINT);
@@ -305,29 +305,39 @@ async function callGeminiImage(prompt: string): Promise<GenImageResult> {
 /** Unified generator with failover. Prefer buffer for Telegram reliability. */
 async function generateImage(prompt: string): Promise<GenImageResult> {
   // 1) Nano with up to 3 attempts (API sometimes returns try again)
-  if (NANO_BANANA_API_KEY && NANO_BANANA_API_KEY.length >= 12) {
-    for (let i = 0; i < 3; i++) {
+  // Nano Banana Pro (2K, no watermark) — key can be short (e.g. USAGIWK).
+  // Host may return "try again" under load or when the bot server IP is throttled;
+  // we retry then fall through to Flux without failing the user.
+  if (NANO_BANANA_API_KEY && NANO_BANANA_API_KEY.length >= 4) {
+    for (let i = 0; i < 4; i++) {
       const nano = await callNanoBananaRaw(prompt);
       if (nano.url) {
-        // download to buffer for reliable Telegram upload
         const dl = await downloadImage(nano.url);
         if (Buffer.isBuffer(dl)) {
-          return { buffer: dl, url: nano.url, provider: "nano-banana", time_taken: nano.time_taken };
+          L.info("imageGen", "nano-banana success", { attempt: i + 1, time: nano.time_taken });
+          return { buffer: dl, url: nano.url, provider: "nano-banana-2k", time_taken: nano.time_taken };
         }
-        // if download fails, still try sending URL later
-        return { url: nano.url, provider: "nano-banana", time_taken: nano.time_taken };
+        // URL-only: download failed (query-string URL) — still return url for fallback send
+        L.warn("imageGen", "nano url ok but download failed — will try buffer providers", {
+          err: Buffer.isBuffer(dl) ? "" : String((dl as { error?: string }).error || ""),
+        });
+        // continue to Flux for reliable buffer; keep nano url as last resort below
       }
       const err = (nano.error || "").toLowerCase();
-      if (err.includes("try again") || err.includes("rate") || err.includes("busy")) {
-        L.warn("imageGen", "nano retry", { attempt: i + 1, err: nano.error });
-        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      if (err.includes("try again") || err.includes("rate") || err.includes("busy") || err.includes("limit")) {
+        L.warn("imageGen", "nano busy — retry", { attempt: i + 1, err: nano.error });
+        await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
         continue;
       }
-      L.warn("imageGen", "nano failed permanently", { err: nano.error });
-      break;
+      if (err.includes("invalid key")) {
+        L.warn("imageGen", "nano invalid key — skip to Flux", { keyLen: NANO_BANANA_API_KEY.length });
+        break;
+      }
+      L.warn("imageGen", "nano failed", { attempt: i + 1, err: nano.error });
+      if (i < 3) await new Promise((r) => setTimeout(r, 2000));
     }
   } else {
-    L.warn("imageGen", "skipping nano-banana — key missing or too short", {
+    L.warn("imageGen", "skipping nano-banana — key missing", {
       keyLen: NANO_BANANA_API_KEY.length,
     });
   }
@@ -582,7 +592,7 @@ export async function handleImageCommand(
   }
 
   const hasAnyProvider =
-    (NANO_BANANA_API_KEY && NANO_BANANA_API_KEY.length >= 12) ||
+    (NANO_BANANA_API_KEY && NANO_BANANA_API_KEY.length >= 4) ||
     (!!CLOUDFLARE_AI_API_TOKEN && !!CLOUDFLARE_AI_ACCOUNT_ID) ||
     !!GEMINI_API_KEY;
   if (!hasAnyProvider) {

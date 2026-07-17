@@ -217,23 +217,35 @@ async function fetchNonce(
   ua: string, overallSignal: AbortSignal,
 ): Promise<NonceResult | null> {
   const url = `${VEO3_BASE_URL}${VEO3_GENERATOR_PATH}`;
-  // POST في الـ POC، لكن GET بيرجع نفس الصفحة. نستخدم GET لأنه
-  // الـ idiomatic + بيدّينا الـ cookies من غير side-effect.
-  const res = await timedFetch(url, {
-    method: "GET",
-    headers: { "user-agent": ua, "accept": "text/html,*/*" },
-  }, TIMEOUT_VIDEO_HTTP_STEP, overallSignal);
-  if (!res.ok) {
-    L.warn("videoGen", "fetchNonce non-200", { status: res.status });
-    return null;
+  // User POC uses POST; some WP installs only set session cookies on POST.
+  // Try POST first, then GET.
+  for (const method of ["POST", "GET"] as const) {
+    try {
+      const res = await timedFetch(url, {
+        method,
+        headers: {
+          "user-agent": ua,
+          "accept": "text/html,*/*",
+          ...(method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}),
+        },
+        body: method === "POST" ? "" : undefined,
+      }, TIMEOUT_VIDEO_HTTP_STEP, overallSignal);
+      if (!res.ok) {
+        L.warn("videoGen", "fetchNonce non-200", { status: res.status, method });
+        continue;
+      }
+      const body = await res.text();
+      const m = body.match(/"nonce":"([a-f0-9]{6,32})"/i);
+      if (!m) {
+        L.warn("videoGen", "fetchNonce no nonce", { bodyLen: body.length, method });
+        continue;
+      }
+      return { nonce: m[1], cookie: extractCookies(res) };
+    } catch (e) {
+      L.warn("videoGen", "fetchNonce error", { method, err: String(e).slice(0, 80) });
+    }
   }
-  const body = await res.text();
-  const m = body.match(/"nonce":"([a-f0-9]{6,32})"/i);
-  if (!m) {
-    L.warn("videoGen", "fetchNonce no nonce in body", { bodyLen: body.length });
-    return null;
-  }
-  return { nonce: m[1], cookie: extractCookies(res) };
+  return null;
 }
 
 // extractSceneId — يقرأ الرد على full-video-generate.
@@ -257,6 +269,10 @@ function extractSceneId(text: string): string | null {
 // عن طريق فحصها هنا.
 function initialResponseSignalsTerminalError(text: string): string | null {
   const t = text.toLowerCase();
+  // Free tier: "Limit Reached: You have already generated your maximum allowance of 2 videos."
+  if (/limit\s*reached|maximum\s*allowance|rate-limit-exceed|already\s+generated/.test(t)) {
+    return "source_daily_limit";
+  }
   if (/in.?progress/.test(t))     return "in_progress_other_user";
   if (/rate.?limit/.test(t))      return "rate_limit";
   if (/\b(error|failed|retry)\b/.test(t)) return text.slice(0, 120);
@@ -547,8 +563,10 @@ export async function handleVideoCommand(
     const e = result.error || "";
     if (e === "timeout") friendly = `⏱ انتهى الوقت قبل اكتمال الفيديو (أكثر من 5 دقائق). حاول مرة أخرى بوصف أقصر.`;
     else if (e.includes("no_nonce")) friendly = `⚠️ مصدر الفيديو غير متاح حالياً. جرّب بعد قليل.`;
+    else if (e.includes("source_daily_limit") || e.includes("maximum allowance") || e.includes("Limit Reached"))
+      friendly = `⛔ *مصدر الفيديو وصل للحد المجاني اليومي* (حوالي فيديوهين/يوم لكل السيرفر).\n\nجرّب لاحقاً أو غداً — أو استخدم /img للصور.`;
     else if (e.includes("rate_limit") || e.includes("In Progress") || e.includes("in_progress"))
-      friendly = `⏳ الخدمة مشغولة الآن. انتظر دقيقة وأعد المحاولة.`;
+      friendly = `⏳ الخدمة مشغولة الآن. انتظر دقيقة أو دقيقتين وأعد المحاولة.`;
     else if (e.includes("no_scene_id")) friendly = `⚠️ لم يبدأ التوليد — أعد المحاولة بوصف إنجليزي أوضح.`;
     L.warn("videoGen", "user-facing fail", { err: e.slice(0, 120) });
 
