@@ -56,6 +56,9 @@ import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badg
 import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
 import { recordInterest } from "./interests.js";
 import { maybeGroupDeliveryWhisper } from "./groupClub.js";
+import { recordLibraryDownload } from "./library.js";
+import { buildQualityBlock } from "./quality.js";
+import { seriesAfter } from "./curated.js";
 import { getRelatedBooks, pickReadingTip, buildDiscoverFooter } from "./discover.js";
 import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
@@ -1481,18 +1484,41 @@ _حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُ
 
   const streakLine = formatStreakLine(streak) ?? undefined;
 
-  const related = await getRelatedBooks(bookName, userId, 2).catch(() => [] as string[]);
+  const series = seriesAfter(bookName, 2);
+  const relatedBase = await getRelatedBooks(bookName, userId, 2).catch(() => [] as string[]);
+  const related: string[] = [];
+  const seenR = new Set<string>();
+  for (const t of [...series, ...relatedBase]) {
+    const k = t.trim().toLowerCase();
+    if (!k || seenR.has(k) || k === bookName.trim().toLowerCase()) continue;
+    seenR.add(k);
+    related.push(t);
+    if (related.length >= 2) break;
+  }
   const tip = pickReadingTip(bookName + userId);
   recordInterest(userId, bookName).catch(() => {});
+  recordLibraryDownload(userId, bookName, { sizeMB, fromCache }).catch(() => {});
   maybeGroupDeliveryWhisper(bot, chatId, bookName).catch(() => {});
 
   let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
+  msg += buildQualityBlock({
+    bookName,
+    sourceUrl,
+    sizeMB,
+    fromCache,
+    isSuspect: _isSuspect,
+    isPrem,
+  });
   if (related.length > 0) {
-    msg += `\n\n✨ *قد يعجبك أيضاً — اضغط الزر بالأسفل*`;
+    const seriesNote = series.length > 0 ? "سلسلة مقترحة · " : "";
+    msg += `
+
+✨ *${seriesNote}قد يعجبك — اضغط الزر*`;
   }
-  // نصيحة قراءة قصيرة (بدون تنسيق معقّد)
   const tipPlain = tip.replace(/[_*`\[]/g, "").slice(0, 120);
-  if (tipPlain) msg += `\n\n💬 _${tipPlain}_`;
+  if (tipPlain) msg += `
+
+💬 _${tipPlain}_`;
 
   await bot.sendMessage(
     chatId, msg,

@@ -23,6 +23,8 @@ import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
+import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList } from "./curated.js";
 import { buildGroupClubMessage, kbGroupClub, getGroupClubBook, maybePostWeeklyClub } from "./groupClub.js";
 import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { pickFresh } from "./uiVariants.js";

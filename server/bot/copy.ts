@@ -28,6 +28,11 @@ export function buildHelpMessage(): string {
     `◦ يعرض: عدد الكتب · سلسلتك · ذوقك · أسبوعك · شاراتك\n` +
     `◦ الأمر: \`/profile\`\n\n` +
 
+    `📚 *مكتبتك الشخصية*\n` +
+    `◦ \`/library\` أو زر «مكتبتي» — كل ما حمّلته\n` +
+    `◦ \`/continue\` — أكمل من آخر كتاب\n` +
+    `◦ \`/lists\` — قوائم كتب مختارة\n\n` +
+
     `📊 *4) رصيدي اليوم*\n` +
     `◦ كم تحميلاً يتبقّى لك اليوم\n` +
     `◦ الأمر: \`/stats\`\n\n` +
@@ -80,8 +85,8 @@ export function kbHelp(): { inline_keyboard: { text: string; callback_data: stri
         { text: "📖  كتاب اليوم", callback_data: "botd:show" },
       ],
       [
-        { text: "🎲  كتاب مفاجأة", callback_data: "rg:any" },
-        { text: "👤  ملفي", callback_data: "my_profile" },
+        { text: "📚  مكتبتي", callback_data: "my_library" },
+        { text: "📖  قوائم", callback_data: "curated_menu" },
       ],
       [
         { text: "⭐  Premium", callback_data: "premium_buy" },

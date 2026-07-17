@@ -36,15 +36,15 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       ],
       [
         { text: "👤  ملفي", callback_data: "my_profile" },
-        { text: "📊  أسبوعي أنا", callback_data: "my_week" },
+        { text: "📚  مكتبتي", callback_data: "my_library" },
       ],
       [
-        { text: "📊  رصيدي اليوم", callback_data: "my_stats" },
-        { text: "📚  آخر تحميلاتي", callback_data: "my_history" },
+        { text: "📊  أسبوعي أنا", callback_data: "my_week" },
+        { text: "▶️  أكمل رحلتي", callback_data: "lib_continue" },
       ],
       [
         { text: "🔖  أمنياتي", callback_data: "wishlist_view" },
-        { text: "🏆  الأكثر طلباً", callback_data: "top_books" },
+        { text: "📖  قوائم مختارة", callback_data: "curated_menu" },
       ],
       [
         { text: "📅  هذا الأسبوع", callback_data: "weekly_refresh" },
@@ -104,6 +104,11 @@ export function kbAfterSuccess(
       { text: "🔁  أعد إرسال الملف", callback_data: safeCb(`retry:${retryK}`) },
     ]);
   }
+
+  rows.push([
+    { text: "📚  مكتبتي", callback_data: "my_library" },
+    { text: "▶️  أكمل لاحقاً", callback_data: "lib_continue" },
+  ]);
 
   if (isPrem) {
     rows.push([

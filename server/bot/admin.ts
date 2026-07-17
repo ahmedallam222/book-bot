@@ -19,6 +19,7 @@ import { getUserBadges, BADGES }     from "./badges.js";
 import { buildRetentionProfileBlock } from "./retention.js";
 import { buildInterestProfileLine } from "./interests.js";
 import { buildPersonalWeekProfileLine } from "./personalWeek.js";
+import { getLastBook } from "./library.js";
 import { getReferralState }          from "./referral.js";
 import { ARABIC_SOURCES }            from "./sources.js";
 import type { SourceStat }           from "./analytics.js";
@@ -143,10 +144,11 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
-  const [retentionBlock, interestLine, weekLine] = await Promise.all([
+  const [retentionBlock, interestLine, weekLine, lastBook] = await Promise.all([
     buildRetentionProfileBlock(userId).catch(() => ""),
     buildInterestProfileLine(userId).catch(() => ""),
     buildPersonalWeekProfileLine(userId).catch(() => ""),
+    getLastBook(userId).catch(() => null),
   ]);
 
   return (
@@ -158,6 +160,7 @@ export async function buildProfileMessage(userId: string, name: string): Promise
     `${premBlock}${refBlock}\n\n` +
     (interestLine ? `${interestLine}\n` : "") +
     (weekLine ? `${weekLine}\n` : "") +
+    (lastBook ? `🕯 *آخر كتاب:* «${escMd(lastBook)}» · /continue\n` : "") +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
     `*أوامر سريعة:*\n` +

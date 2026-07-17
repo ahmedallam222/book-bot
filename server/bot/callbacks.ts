@@ -32,6 +32,8 @@ import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfD
 import { replyKeyboardMain } from "./replyKeyboard.js";
 import { completeOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge } from "./library.js";
+import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries } from "./curated.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
@@ -426,6 +428,88 @@ export function registerCallbackHandler(
         }
       } catch (e) {
         L.error("cb", "wlj failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
+
+    // ── library / curated ──
+    if (data === "my_library") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const text = await buildLibraryMessage(userId);
+        const kb = await kbLibrary(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+      } catch (e) {
+        L.error("cb", "my_library failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data === "lib_continue") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { text, title } = await buildContinueMessage(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
+      } catch (e) {
+        L.error("cb", "lib_continue failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data.startsWith("libst:")) {
+      const idx = parseInt(data.slice(6), 10);
+      try {
+        const title = await libraryTitleAt(userId, idx);
+        if (title) {
+          const st = await cycleLibStatus(userId, title);
+          await bot.answerCallbackQuery(query.id, { text: statusBadge(st) }).catch(() => {});
+          const text = await buildLibraryMessage(userId);
+          const kb = await kbLibrary(userId);
+          if (query.message?.message_id) {
+            await bot.editMessageText(text, {
+              chat_id: chatId, message_id: query.message.message_id,
+              parse_mode: "Markdown", reply_markup: kb,
+            }).catch(() => {});
+          }
+        } else {
+          await bot.answerCallbackQuery(query.id).catch(() => {});
+        }
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        L.error("cb", "libst failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data === "curated_menu") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+        parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
+      }).catch(() => {});
+      return;
+    }
+    if (data.startsWith("clist:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const id = data.slice(6);
+      const list = getCuratedList(id);
+      if (list) {
+        await bot.sendMessage(chatId, buildCuratedListMessage(list), {
+          parse_mode: "Markdown", reply_markup: kbCuratedList(list),
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (data.startsWith("series:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const key = data.slice(7);
+      try {
+        const entry = await getSession(key);
+        const bookName = entry?.bookName || "";
+        const next = seriesAfter(bookName, 4);
+        await bot.sendMessage(chatId, buildSeriesMessage(bookName || "كتابك", next), {
+          parse_mode: "Markdown",
+          reply_markup: kbSeries(next),
+        }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "series failed", { err: String(e).slice(0, 100) });
       }
       return;
     }

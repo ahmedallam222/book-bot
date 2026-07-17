@@ -9,6 +9,7 @@ import {
   booksForGenreId,
   inferGenre,
 } from "./interests.js";
+import { seriesAfter } from "./curated.js";
 
 function cleanTitle(raw: string): string {
   return (raw.split(/\s*[—–-]\s*/)[0] || raw).trim().slice(0, 80);
@@ -74,7 +75,8 @@ export async function getRelatedBooks(
   userId: string,
   limit = 2,
 ): Promise<string[]> {
-  const local = relatedFromCatalog(bookName, 6);
+  const series = seriesAfter(bookName, 3);
+  const local = [...series, ...relatedFromCatalog(bookName, 6)];
   const primary = await getPrimaryGenre(userId);
   const personalized = primary ? booksForGenreId(primary).map(cleanTitle) : [];
 

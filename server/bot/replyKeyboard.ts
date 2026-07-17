@@ -21,6 +21,8 @@ import {
   getBookOfDay,
 } from "./bookOfDay.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
+import { buildCuratedMenuMessage, kbCuratedMenu } from "./curated.js";
 import { buildResetTime } from "./text.js";
 
 /** نصوص الأزرار — تطابق تام مع ضغط المستخدم */
@@ -33,6 +35,9 @@ export const RK = {
   BALANCE:  "📊 رصيدي اليوم",
   HELP:     "❓ كيف أستخدم رفيق؟",
   MYWEEK:   "📊 أسبوعي",
+  LIBRARY:  "📚 مكتبتي",
+  LISTS:    "📖 قوائم",
+  CONTINUE: "▶️ أكمل رحلتي",
   MENU:     "🏠 القائمة",
 } as const;
 
@@ -49,8 +54,9 @@ export function replyKeyboardMain(): TelegramBot.ReplyKeyboardMarkup {
       [{ text: RK.SEARCH }, { text: RK.RANDOM }],
       [{ text: RK.CHECKIN }, { text: RK.PROFILE }],
       [{ text: RK.TODAY }, { text: RK.BALANCE }],
-      [{ text: RK.MYWEEK }, { text: RK.HELP }],
-      [{ text: RK.MENU }],
+      [{ text: RK.LIBRARY }, { text: RK.CONTINUE }],
+      [{ text: RK.LISTS }, { text: RK.MYWEEK }],
+      [{ text: RK.HELP }, { text: RK.MENU }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -159,6 +165,23 @@ export async function tryHandleReplyKeyboard(
       ).catch(() => {});
       return true;
     }
+
+    case RK.LIBRARY: {
+      const text = await buildLibraryMessage(userId);
+      const kb = await kbLibrary(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+      return true;
+    }
+    case RK.CONTINUE: {
+      const { text, title } = await buildContinueMessage(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
+      return true;
+    }
+    case RK.LISTS:
+      await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+        parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
+      });
+      return true;
 
     case RK.MYWEEK:
       await sendPersonalWeekReport(bot, chatId, userId);
