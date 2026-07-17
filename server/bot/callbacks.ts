@@ -432,7 +432,7 @@ export function registerCallbackHandler(
             };
         await bot.sendMessage(chatId,
           `📊 *رصيدك اليوم*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
-          `📥 حمّلت النهارده:  *${dlCount}* كتاب\n${indicator} فاضلك:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
+          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} يتبقّى لك:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
           `_يتجدد بعد ${buildResetTime()}_ 🕐`,
           { parse_mode: "Markdown", reply_markup: statsKb }
         );
@@ -503,7 +503,7 @@ export function registerCallbackHandler(
               inline_keyboard: [
                 [{
                   text: "📤  مشاركة الرابط",
-                  switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجانية\nhttps://t.me/${botUser}?start=ref_${userId}`,
+                  switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجّانية\nhttps://t.me/${botUser}?start=ref_${userId}`,
                 }],
                 [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
               ],

@@ -240,7 +240,7 @@ export const PERSONALITY_LINES: readonly string[] = [
 export const PERSONALITY_LINE_CHANCE = 28;
 
 export const SUCCESS_CTAS: readonly string[] = [
-  "👇 _الخطوة الجاية: ملخّص سريع أو احفظه في الأمنيات_",
+  "👇 _الخطوة التالية: ملخّص سريع أو احفظه في الأمنيات_",
   "👇 _الملخص يختصر عليك ساعات… بضغطة_",
   "👇 _احفظه الآن، واقرأه لاحقاً براحة_",
   "👇 _ماذا بعد؟ ملخص · أمنية · كتاب آخر_",

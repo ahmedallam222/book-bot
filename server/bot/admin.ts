@@ -50,17 +50,17 @@ export function buildWelcome(
       `🌿 *أهلاً ${escMd(name)} — أنا رفيق*\n` +
       `${DIV}\n` +
       `أساعدك تجيب *كتب PDF* بسهولة.\n\n` +
-      `*ابدأ دلوقتي:*\n` +
+      `*ابدأ الآن:*\n` +
       `① اكتب *اسم الكتاب* في الشات\n` +
-      `② استنى ثواني وأنا بدوّر\n` +
-      `③ يوصلك الملف جاهز للقراءة\n\n` +
+      `② انتظر لحظات بينما أبحث\n` +
+      `③ يصلك الملف جاهزاً للقراءة\n\n` +
       `*أزرار مهمة:*\n` +
       `◦ ✅ سجّل حضورك — مرة في اليوم (اختياري)\n` +
-      `◦ 🎲 كتاب مفاجأة — لو مش عارف تطلب إيه\n` +
+      `◦ 🎲 كتاب مفاجأة — إن لم تعرف ماذا تطلب\n` +
       `◦ ❓ كيف أستخدم رفيق؟ — شرح بسيط\n\n` +
       `${balanceLine}\n` +
       `🌍 أدور في *${sourceCount}* مصدر عربي\n\n` +
-      `_جرّب: اكتب عنوان أي كتاب تحبه._ 📖`
+      `_جرّب: اكتب عنوان أيّ كتاب تحبّه._ 📖`
     );
   }
 
@@ -69,8 +69,8 @@ export function buildWelcome(
     `${DIV}\n` +
     `${balanceLine}\n` +
     `🌍 أدور لك في *${sourceCount}* مصدر\n\n` +
-    `*عايز كتاب؟* اكتب اسمه في الشات.\n` +
-    `*مش متأكد؟* اضغط «كتاب مفاجأة» أو «كيف أستخدم رفيق؟».\n\n` +
+    `*أتريد كتاباً؟* اكتب عنوانه في المحادثة.\n` +
+    `*ألست متأكّداً؟* اضغط «كتاب مفاجأة» أو «كيف أستخدم رفيق؟».\n\n` +
     `_رفيق جاهز._ ✨`
   );
 }
@@ -102,9 +102,9 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       "🔥";
     streakBlock = `${fire} *أيام النشاط المتتالية:* ${streak.active}${streak.max > streak.active ? ` _(أطول: ${streak.max})_` : ""}`;
   } else if (streak.max > 0) {
-    streakBlock = `🔥 *أيام النشاط:* ابدأ من جديد _(أطول سلسلة سابقة: ${streak.max})_`;
+    streakBlock = `🔥 *أيّام النشاط:* ابدأ من جديد _(أطول سلسلة سابقة: ${streak.max})_`;
   } else {
-    streakBlock = `🔥 *أيام النشاط المتتالية:* لسه ما بدأت — سجّل حضورك أو حمّل كتاباً متى حابب`;
+    streakBlock = `🔥 *أيّام النشاط المتتالية:* لم تبدأ بعد — سجّل حضورك أو حمّل كتاباً متى شئت`;
   }
 
   // ── Premium block ──
@@ -123,7 +123,7 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   // ── Badges block ──
   let badgesBlock: string;
   if (badges.length === 0) {
-    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— هتتفتح تدريجياً وأنت بتستخدم رفيق_`;
+    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— تُفتح تدريجياً وأنت تستخدم رفيق_`;
   } else {
     // FIX (PR #103): escMd على اسم كل شارة. الأسماء الحالية كلها نظيفة،
     // لكن أي شارة جديدة فيها `_` أو `*` كانت ستكسر `/profile` بنفس
@@ -146,15 +146,15 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   return (
     `👤 *ملفي الشخصي — ${escMd(name)}*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
-    `هنا ملخص حسابك في رفيق:\n\n` +
-    `📥 *كتب حمّلتها (كل الوقت):* ${totalDl}\n` +
+    `هذا ملخّص حسابك في رفيق:\n\n` +
+    `📥 *الكتب التي حمّلتها (إجمالاً):* ${totalDl}\n` +
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
     `*أوامر سريعة:*\n` +
     `◦ /daily — سجّل حضورك اليوم\n` +
-    `◦ /stats — كام تحميل فاضلك النهارده\n` +
+    `◦ /stats — كم تحميلاً يتبقّى لك اليوم\n` +
     `◦ /invite — ادعُ صديقاً`
   );
 }
@@ -657,7 +657,7 @@ export async function handleAdminCallback(
             { parse_mode: "Markdown" }
           ).catch(() => {});
           // FIX (maintenance-announce): لما المشرف يطفي الصيانة، البوت يعلن
-          // تلقائياً في كل الجروبات المعروفة. fire-and-forget عشان ما يوقفش
+          // تلقائياً في كل المجموعةات المعروفة. fire-and-forget عشان ما يوقفش
           // الـ callback handler لو الإرسال طوّل.
           announceMaintenanceEnd(bot).catch((e) =>
             L.error("admin", "announceMaintenanceEnd failed", { err: String(e).slice(0, 100) })

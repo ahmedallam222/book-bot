@@ -115,7 +115,7 @@ export async function handleRandomCommand(
     await bot.sendMessage(chatId,
       `🎲 *اختر نوع الكتاب*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_سأختار لك شيئاً بلطف — بلا ضغط_`,
+      `_سأختار لك كتاباً بلطف — بلا ضغط_`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } }
     ).catch(() => {});
     return;
@@ -167,8 +167,8 @@ async function handleRandomByGenre(
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [[
-          { text: "🎲 كتاب تاني", callback_data: `rg:${genreKey}` },
-          { text: "🔙 اختر نوع",  callback_data: "rg:menu" },
+          { text: "🎲 كتاب آخر", callback_data: `rg:${genreKey}` },
+          { text: "🔙 اختر التصنيف",  callback_data: "rg:menu" },
         ]],
       },
     }

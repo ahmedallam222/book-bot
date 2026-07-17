@@ -87,7 +87,7 @@ export function registerCommands(
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
         await bot.sendMessage(chatId,
-          `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
+          `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -139,7 +139,7 @@ export function registerCommands(
     if (!isAdmin(userId)) {
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
-        await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
+        await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -207,8 +207,8 @@ export function registerCommands(
           };
       await bot.sendMessage(chatId,
         `📊 *رصيدك اليوم*${premBadge}\n━━━━━━━━━━━━━━━━\n\n${statBar}\n\n` +
-        `📥 حمّلت النهارده: *${dlCount}*\n` +
-        `${indicator} فاضلك: *${limit <= 0 ? "∞" : remaining}* تحميل\n\n` +
+        `📥 حمّلت اليوم: *${dlCount}*\n` +
+        `${indicator} يتبقّى لك: *${limit <= 0 ? "∞" : remaining}* تحميل\n\n` +
         `_الرصيد يتجدد بعد ${buildResetTime()} (بتوقيت القاهرة)_`,
         { parse_mode: "Markdown", reply_markup: statsKb });
     } catch (e) {
@@ -272,7 +272,7 @@ export function registerCommands(
         disable_web_page_preview: true,
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجانية\nhttps://t.me/${botUser}?start=ref_${userId}` }],
+            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجّانية\nhttps://t.me/${botUser}?start=ref_${userId}` }],
             [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
           ],
         },
@@ -610,7 +610,7 @@ export function registerCommands(
       `⚡ أولوية في الطابور\n` +
       `🔄 تجديد تلقائي كل منتصف ليل\n\n` +
       `💫 *السعر: ${PREMIUM_STARS_PRICE} Stars شهرياً*\n\n` +
-      `_اضغط الزر للدفع عبر Telegram Stars_ 👇`,
+      `_اضغط الزرّ للدفع عبر Telegram Stars_ 👇`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -779,7 +779,7 @@ export function registerMessageHandler(
     const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
     if (!userId) return;
 
-    // FIX: نسجّل الجروب في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
+    // FIX: نسجّل المجموعة في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
     // انتهاء الصيانة. fire-and-forget عشان ما يأخّرش الـ message handling.
     if (isGroup) {
       recordGroup(chatId, msg.chat.title || "").catch(() => {});
@@ -835,7 +835,7 @@ export function registerMessageHandler(
 
     const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
     if (maintenance === "1" && !isAdmin(userId)) {
-      await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
+      await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
         { parse_mode: "Markdown" }).catch(() => {});
       return;
     }

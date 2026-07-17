@@ -15,7 +15,7 @@ import { L } from "./logger.js";
 //   streak:max:{userId}    int — أعلى رقم وصلت إليه (للعرض في /profile)
 //
 // المفتاح الأساسي = telegramUserId (نفس مفتاح daily_limits / premium).
-// آمن من تغيير اليوزرنيم، الخروج من الجروب، مسح المحادثة.
+// آمن من تغيير اليوزرنيم، الخروج من المجموعة، مسح المحادثة.
 // ══════════════════════════════════════════════
 
 const STREAK_CUR_KEY  = (uid: string) => `streak:cur:${uid}`;
@@ -233,13 +233,13 @@ export function formatStreakLine(s: StreakUpdate): string | null {
 export function buildMilestoneMessage(milestone: number): string {
   switch (milestone) {
     case 3:
-      return `🔥 *ثلاثة أيام متتالية!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_عادة لطيفة بدأت… من غير ما نثقل عليك._ ✨`;
+      return `🔥 *ثلاثة أيام متتالية!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_عادة لطيفة قد بدأت… من دون أن نثقّل عليك._ ✨`;
     case 7:
       return `🔥🔥 *أسبوع كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_شغف القراءة هنا حقيقي — أنت في الـ 5% الأعلى_ 🌟`;
     case 14:
       return `🔥🔥🔥 *أسبوعين!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_مستوى استثنائي — حتى القرّاء المحترفون يعتبرونك مرجع_ 🏆`;
     case 30:
-      return `🌟 *شهر كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_شهر كامل مع رفيق — لو حابب، ادعُ صديقاً بلطف_ 👑`;
+      return `🌟 *شهر كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_شهر كامل مع رفيق — إن أحببت، ادعُ صديقاً بلطف_ 👑`;
     case 60:
       return `🌟🌟 *شهرين متتاليين!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_مستوى نادر جداً — أنت في الـ 0.1% الأعلى_ 💎`;
     case 100:
@@ -254,5 +254,5 @@ export function buildMilestoneMessage(milestone: number): string {
  * Threshold: نُظهرها فقط لو الـ broken ≥ 3 (لا نُزعج بسلاسل صغيرة).
  */
 export function buildBrokenStreakMessage(broken: number): string {
-  return `🌿 *انقطعت سلسلة ${broken} يوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_عادي جداً. البداية من جديد بهدوء… ورَفيق لسه معاك._ ✨`;
+  return `🌿 *انقطعت سلسلة ${broken} يوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_أمر طبيعي. ابدأ من جديد بهدوء… ورفيق ما زال معك._ ✨`;
 }

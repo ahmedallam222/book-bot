@@ -75,10 +75,10 @@ export function kbAfterSuccess(
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
       { text: "📘  ملخّص سريع", callback_data: safeCb(`sum:${summaryK}`) },
-      { text: "🔖  احفظه عندي",     callback_data: safeCb(`wishlist_add:${retryK}`) },
+      { text: "🔖  احفظه",     callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
     [
-      { text: "🔍  كتاب تاني", callback_data: "new_search" },
+      { text: "🔍  كتاب آخر", callback_data: "new_search" },
       { text: "🎲  مفاجأة",   callback_data: "rg:any" },
     ],
   ];
@@ -86,12 +86,12 @@ export function kbAfterSuccess(
   if (sourceUrl) {
     const fbKey = storeFeedbackUrl(sourceUrl, bookName);
     rows.push([
-      { text: "⚠️  مش الكتاب ده؟", callback_data: safeCb(`bad_file:${fbKey}`) },
-      { text: "🔁  ابعت الملف تاني",      callback_data: safeCb(`retry:${retryK}`) },
+      { text: "⚠️  ليس هذا الكتاب؟", callback_data: safeCb(`bad_file:${fbKey}`) },
+      { text: "🔁  أعد إرسال الملف",      callback_data: safeCb(`retry:${retryK}`) },
     ]);
   } else {
     rows.push([
-      { text: "🔁  ابعت الملف تاني", callback_data: safeCb(`retry:${retryK}`) },
+      { text: "🔁  أعد إرسال الملف", callback_data: safeCb(`retry:${retryK}`) },
     ]);
   }
 
@@ -132,7 +132,7 @@ export function kbAfterFail(
   }
 
   rows.push([
-    { text: "🔁  حاول تاني",  callback_data: safeCb(`retry:${retryK}`) },
+    { text: "🔁  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
     { text: "🔍  عنوان مختلف",      callback_data: "new_search"               },
   ]);
   rows.push([
@@ -148,7 +148,7 @@ export function kbNoResults(bookName: string): TelegramBot.InlineKeyboardMarkup 
   return {
     inline_keyboard: [
       [
-        { text: "🔁  حاول تاني",  callback_data: safeCb(`retry:${retryK}`) },
+        { text: "🔁  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
         { text: "🔍  عنوان مختلف",      callback_data: "new_search"               },
       ],
       [

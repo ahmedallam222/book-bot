@@ -393,7 +393,7 @@ async function downloadImage(imgUrl: string): Promise<Buffer | { error: string }
 function buildImageKeyboard(hash: string): TelegramBot.InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "🔄 توليد تاني", callback_data: `img:re:${hash}` },
+      { text: "🔄 إعادة التوليد", callback_data: `img:re:${hash}` },
       { text: "✨ نسخة مختلفة", callback_data: `img:va:${hash}` },
       { text: "📥 HD",         callback_data: `img:hd:${hash}` },
     ]],
@@ -529,7 +529,7 @@ async function runGeneration(
   const seconds = (elapsedMs / 1000).toFixed(1);
   const providerTag = result.provider ? ` · ${result.provider}` : "";
   const caption =
-    `🎨 *صورتك جاهزة — بلطف* (${seconds}s${providerTag})\n\n` +
+    `🎨 *صورتك جاهزة* (${seconds}s${providerTag})\n\n` +
     `📝 \`${escMd(prompt.slice(0, 200))}\`${remainingLine}`;
 
   const downloaded = result.buffer
@@ -673,7 +673,7 @@ export async function handleImageCommand(
 // data formats:
 //   img:re:<hash>  → regenerate نفس الـ prompt
 //   img:va:<hash>  → variation (prompt + modifier)
-//   img:hd:<hash>  → ابعت الصورة كـ document (uncompressed)
+//   img:hd:<hash>  → أرسل الصورة كـ document (uncompressed)
 //
 export async function handleImageCallback(
   bot:      TelegramBot,
@@ -705,7 +705,7 @@ export async function handleImageCallback(
     return;
   }
 
-  // ── HD download — ابعت الصورة كـ document (uncompressed) ──
+  // ── HD download — أرسل الصورة كـ document (uncompressed) ──
   if (action === "hd") {
     await bot.answerCallbackQuery(queryId, { text: "📥 جاري تجهيز HD..." }).catch(() => {});
     const dl = await downloadImage(meta.url);

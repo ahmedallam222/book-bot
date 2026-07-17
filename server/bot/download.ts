@@ -653,7 +653,7 @@ async function expandMktbtypdfUrl(url: string): Promise<string | null> {
     // كل كتاب بيظهر في الـ landing بـ form واحد بس. لو طلبنا `external=1` على
     // كتاب محلي بنرجع "Book file not found"، والعكس صحيح.
     // الحل: خذ الرابط من الـ HTML كما هو (نفضّل external لو موجود لأن CDN
-    // بيكون أسرع، نفـ fallback للـ bare لو مش موجود).
+    // بيكون أسرع، نفـ fallback للـ bare إن لم موجود).
     const extM =
       html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i);
     const bareM =
