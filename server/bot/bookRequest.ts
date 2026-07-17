@@ -1455,7 +1455,11 @@ async function sendSuccessMessage(
   const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
   await bot.sendMessage(
     chatId, msg,
-    { parse_mode: "Markdown", reply_markup: kbAfterSuccess(bookName, sourceUrl) }
+    {
+      parse_mode: "Markdown",
+      reply_markup: kbAfterSuccess(bookName, sourceUrl, { isPrem, fromCache }),
+      disable_web_page_preview: true,
+    },
   );
 
   // ── Engagement signals — fire-and-forget لتجنب تأخير الـ user-facing flow ──

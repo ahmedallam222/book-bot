@@ -9,7 +9,12 @@ import {
   NO_RESULTS_HEADLINES,
   PERSONALITY_LINES,
   PERSONALITY_LINE_CHANCE,
+  SUCCESS_CTAS,
+  SUCCESS_FOOTERS,
+  PROGRESS_DIVIDERS,
+  STAGE_NAME_POOLS,
   pickRandom,
+  pickFresh,
   chance,
 } from "./uiVariants.js";
 
@@ -25,6 +30,9 @@ import {
 
 /** Primary section divider */
 export const DIV = "━━━━━━━━━━━━━━━━";
+export function divLine(): string {
+  return pickFresh(PROGRESS_DIVIDERS, "div");
+}
 /** Soft secondary divider */
 export const DIV_SOFT = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
 
@@ -54,10 +62,10 @@ const PROGRESS_STEPS_COUNT = 7;
 
 /** Visual stage map: ● completed/current  ○ upcoming */
 function stageMap(step: number): string {
-  const n = STAGE_NAMES.length;
+  const n = STAGE_NAME_POOLS.length;
   const s = Math.max(0, Math.min(step, n - 1));
-  const dots = STAGE_NAMES.map((_, i) => (i <= s ? "●" : "○")).join(" ");
-  const name = STAGE_NAMES[s];
+  const dots = Array.from({ length: n }, (_, i) => (i <= s ? "●" : "○")).join(" ");
+  const name = pickFresh(STAGE_NAME_POOLS[s], `stage:${s}`);
   return `\`${dots}\`  _${name}_`;
 }
 
@@ -72,16 +80,19 @@ function balanceBar(used: number, limit: number): { bar: string; emoji: string; 
 
 // ── شريط تقدّم سينمائي ───────────────────────
 
-export function buildProgress(step: number, bookName: string, extraLine?: string): string {
+export function buildProgress(step: number, bookName: string, extraLine?: string, elapsedSec?: number): string {
   const variantPool = PROGRESS_VARIANTS[step] ?? PROGRESS_VARIANTS[0];
-  const s = pickRandom(variantPool);
+  const s = pickFresh(variantPool, `prog:${step}`);
   const bar = PROGRESS_BARS[step] ?? PROGRESS_BARS[0];
   const pct = Math.round((step / (PROGRESS_STEPS_COUNT - 1)) * 100);
   const title = escMd(bookName.slice(0, 52));
+  const timeBit = (typeof elapsedSec === "number" && elapsedSec >= 3)
+    ? ` · ⏱ _${elapsedSec}ث_`
+    : "";
 
   let msg =
-    `${s.icon} *${s.label}*\n` +
-    `${DIV}\n` +
+    `${s.icon} *${s.label}*${timeBit}\n` +
+    `${divLine()}\n` +
     `${bar}  *${pct}%*\n` +
     `${stageMap(step)}\n\n` +
     `📖  _«${title}»_`;
@@ -95,6 +106,16 @@ export function buildProgress(step: number, bookName: string, extraLine?: string
 // ── نصائح ذكية ───────────────────────────────
 
 const TIPS_FREE = [
+
+  "🪄 _اكتب العنوان فقط — البوت يفهم اللهجة_",
+  "⚡ _الكتب التي طلبتها سابقاً تصل أسرع_",
+  "📘 _بعد التحميل: جرّب زر الملخّص الذكي_",
+  "👥 _في المجموعات: اكتب اسم الكتاب مباشرة_",
+  "🔔 _/last يعيد آخر كتاب طلبته_",
+  "🧠 _أضف المؤلف بعد العنوان لدقّة أعلى_",
+  "🌙 _/random يفاجئك بكتاب يناسب الذوق_",
+  "⭐ _Premium = أولوية طابور + حد أعلى_",
+
   "💡 _أضف اسم المؤلف بعد العنوان — يضاعف دقّة النتائج_",
   "🎲 _جرّب /random لكتاب مفاجأة يناسب ذوقك_",
   "🔖 _/wishlist يحفظ ما تريد قراءته لاحقاً_",
@@ -120,7 +141,7 @@ const TIPS_PREMIUM = [
 
 export function tip(isPrem = false): string {
   const pool = isPrem ? TIPS_PREMIUM : TIPS_FREE;
-  return pool[Math.floor(Math.random() * pool.length)];
+  return pickFresh(pool, isPrem ? "tip_p" : "tip_f");
 }
 
 // ── editMsg / deleteMsg ───────────────────────
@@ -167,8 +188,9 @@ export function buildSuccessMsg(
   isPrem     = false,
   streakLine?: string,
 ): string {
-  const sizeStr   = sizeMB ? ` · *${sizeMB} MB*` : "";
-  const cacheStr  = fromCache ? `\n${pickRandom(CACHE_HIT_TAGLINES)}` : "";
+  const sizeStr   = sizeMB && sizeMB !== "?" ? ` · *${sizeMB} MB*` : "";
+  const cacheStr  = fromCache ? `
+${pickFresh(CACHE_HIT_TAGLINES, "cache")}` : "";
   const premBadge = isPrem ? " ⭐" : "";
   const { bar, emoji, remaining } = balanceBar(dlCount, limit);
 
@@ -180,25 +202,46 @@ export function buildSuccessMsg(
   }
 
   const tagline = isPrem
-    ? pickRandom(SUCCESS_TAGLINES_PREMIUM)
-    : pickRandom(SUCCESS_TAGLINES);
+    ? pickFresh(SUCCESS_TAGLINES_PREMIUM, "ok_prem")
+    : pickFresh(SUCCESS_TAGLINES, "ok");
 
   const personality = chance(PERSONALITY_LINE_CHANCE)
-    ? `\n\n${pickRandom(PERSONALITY_LINES)}`
+    ? `
+${pickFresh(PERSONALITY_LINES, "persona")}`
     : "";
 
-  const streakPart = streakLine ? `\n${streakLine}` : "";
+  const streakPart = streakLine ? `
+${streakLine}` : "";
   const title = escMd(bookName.slice(0, 52));
+  const cta = pickFresh(SUCCESS_CTAS, "cta");
+  const footer = pickFresh(SUCCESS_FOOTERS, "footer");
 
   const premHint = (!isPrem && remaining <= 2 && limit > 0)
-    ? `\n\n⭐ *Premium:* ${PREMIUM_LIMIT} تحميلاً/يوم · أولوية طابور · بـ ${PREMIUM_STARS_PRICE} Stars — /premium`
-    : (isPrem ? `\n\n⭐ _Premium نشط — أولوية و${limit} تحميلاً/يوم_` : "");
+    ? `
 
+⭐ *Premium:* ${PREMIUM_LIMIT} تحميلاً/يوم · أولوية طابور · بـ ${PREMIUM_STARS_PRICE} Stars
+→ /premium`
+    : (isPrem ? `
+
+⭐ _Premium نشط — أولوية + ${limit} تحميلاً/يوم_` : "");
+
+  // Clean “card” layout after PDF delivery — reads like a mini app card
   return (
-    `${tagline}${premBadge}\n` +
-    `${DIV}\n` +
-    `📗  _«${title}»_${sizeStr}${cacheStr}\n\n` +
-    `${balanceLine}${streakPart}${personality}${premHint}`
+    `${tagline}${premBadge}
+` +
+    `${divLine()}
+` +
+    `📗  *«${title}»*${sizeStr}${cacheStr}
+
+` +
+    `${balanceLine}${streakPart}
+
+` +
+    `${cta}` +
+    `${personality}${premHint}
+
+` +
+    `${footer}`
   );
 }
 
@@ -215,7 +258,7 @@ export function buildNoResults(
   const title = escMd(bookName.slice(0, 52));
   return (
     apology +
-    `${pickRandom(NO_RESULTS_HEADLINES)}\n` +
+    `${pickFresh(NO_RESULTS_HEADLINES, "nores")}\n` +
     `${DIV}\n` +
     `📖  _«${title}»_\n\n` +
     `*جرّب تحسين البحث:*\n` +
@@ -289,7 +332,7 @@ export function buildPaidBookMessage(
   const title = escMd(bookName.slice(0, 52));
   return (
     apology +
-    `${pickRandom(PAID_BOOK_HEADLINES)}\n` +
+    `${pickFresh(PAID_BOOK_HEADLINES, "paid")}\n` +
     `${DIV}\n` +
     `📖  _«${title}»_\n\n` +
     `يبدو أن هذا العمل *لا يتوفّر كـ PDF مجّاني* في المصادر المتاحة.\n\n` +

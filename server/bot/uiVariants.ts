@@ -1,99 +1,134 @@
 // ══════════════════════════════════════════════════════════════════
-// UI VARIANTS — pools of varied messages so the bot doesn't feel
-// repetitive across multiple book requests. All long-form Arabic
-// messages (especially wait/reassurance) are written in formal
-// Modern Standard Arabic (الفصحى) at the user's request — no
-// Egyptian or Gulf dialect.
+// UI VARIANTS — near-infinite rotation so the bot never feels stale.
+// Formal Modern Standard Arabic (الفصحى). Anti-repeat pickers avoid
+// consecutive identical lines within the same process.
 // ══════════════════════════════════════════════════════════════════
 
-// ── helpers ────────────────────────────────────────────────────
 export function pickRandom<T>(pool: readonly T[]): T {
   if (pool.length === 0) throw new Error("pickRandom: empty pool");
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-/** Returns true with `pct` percent probability. Used to fire
- *  occasional personality lines without being noisy. */
+/** Avoids repeating the same pool index for a given key (last-N window). */
+const recentByKey = new Map<string, number[]>();
+const RECENT_WINDOW = 4;
+
+export function pickFresh<T>(pool: readonly T[], key: string): T {
+  if (pool.length === 0) throw new Error("pickFresh: empty pool");
+  if (pool.length === 1) return pool[0];
+  const recent = recentByKey.get(key) ?? [];
+  let idx = Math.floor(Math.random() * pool.length);
+  let guard = 0;
+  while (recent.includes(idx) && guard++ < 12) {
+    idx = Math.floor(Math.random() * pool.length);
+  }
+  const next = [...recent, idx].slice(-RECENT_WINDOW);
+  recentByKey.set(key, next);
+  return pool[idx];
+}
+
 export function chance(pct: number): boolean {
   return Math.random() * 100 < pct;
 }
 
-// ══════════════════════════════════════════════════════════════════
-// PROGRESS step variants — each step has 5-6 icon+label pairs.
-// Every editMsg(buildProgress(...)) call will randomly select one,
-// so users see varied phrasing across requests.
-//
-// NOTE: kept terse (≤ 5 words after the icon) so they fit on one
-// line on small screens. All in formal Arabic.
-// ══════════════════════════════════════════════════════════════════
-
 interface StepVariant { icon: string; label: string; }
 
-export const PROGRESS_VARIANTS: ReadonlyArray<readonly StepVariant[]> = [
-  // Step 0 — initial
-  [
-    { icon: "🔭", label: "أتفقّد المكتبة الرقميّة"     },
-    { icon: "🌌", label: "أبدأ رحلة البحث"             },
-    { icon: "📚", label: "تستيقظ مكتبتي الواسعة"        },
-    { icon: "🔍", label: "أتجوّل بين الرفوف الإلكترونيّة" },
-    { icon: "🌠", label: "أُرسل إشاراتي إلى آلاف الكتب"  },
-    { icon: "🧭", label: "أرسم خارطة البحث"             },
-  ],
-  // Step 1 — searching
-  [
-    { icon: "🔎", label: "أُفتّش في المصادر العربيّة"      },
-    { icon: "🌐", label: "أتصفّح الشبكة بحثاً عن نسختك"   },
-    { icon: "📡", label: "أبعث إشاراتي إلى مصادر متعدّدة" },
-    { icon: "📖", label: "أقلّب صفحات الفهارس"             },
-    { icon: "🗂️", label: "أراجع أرشيفات المكتبات"          },
-  ],
-  // Step 2 — fuzzy/retry
-  [
-    { icon: "🧠", label: "أُعمِل الفكر بصياغة مختلفة"      },
-    { icon: "🎯", label: "أُجرّب أقرب صياغة"                },
-    { icon: "💡", label: "أُعيد المحاولة بطريقة أذكى"      },
-    { icon: "🔁", label: "أُكرّر البحث بمنهج آخر"           },
-    { icon: "✨", label: "أبحث في الزوايا غير المألوفة"      },
-  ],
-  // Step 3 — found candidates
-  [
-    { icon: "📡", label: "وجدتُ أثراً، أتحقّق منه"          },
-    { icon: "📍", label: "اقتنصتُ بعض الإشارات"             },
-    { icon: "🛰️", label: "وصلتني نتائج واعدة"              },
-    { icon: "🎣", label: "أصطاد أفضل الروابط"               },
-    { icon: "🔬", label: "أمحّص ما عُثر عليه"               },
-  ],
-  // Step 4 — quality testing
-  [
-    { icon: "🔬", label: "أختبر جودة الروابط"               },
-    { icon: "⚖️", label: "أُوازن بين النتائج"               },
-    { icon: "🧪", label: "أُحلّل المرشّحين"                 },
-    { icon: "🎓", label: "أُقيّم مصداقيّة كلّ ملف"          },
-    { icon: "🛡️", label: "أتحقّق من سلامة المحتوى"         },
-  ],
-  // Step 5 — downloading
-  [
-    { icon: "⚡",  label: "أُحمّل الكتاب من أقرب مصدر"      },
-    { icon: "📥", label: "يجري تحميل الملف الآن"            },
-    { icon: "🚂", label: "في طريقي إلى المصدر الأنسب"       },
-    { icon: "💎", label: "أُحضِر النسخة الأجود"             },
-    { icon: "🌊", label: "تتدفّق البيانات بسرعة"            },
-  ],
-  // Step 6 — uploading to Telegram
-  [
-    { icon: "🚀", label: "في الطريق إليك الآن"              },
-    { icon: "📤", label: "تبقّت ثوانٍ قليلة"                },
-    { icon: "🎁", label: "أُغلِّف لك هديّتك"                 },
-    { icon: "✨", label: "ها هو في الأفق"                    },
-    { icon: "🦋", label: "وَصَل، أُحضِره إليك"               },
-    { icon: "📬", label: "أُسلّمك الكتاب فوراً"             },
-  ],
-] as const;
+function expandSteps(base: readonly StepVariant[], extras: readonly StepVariant[]): readonly StepVariant[] {
+  return [...base, ...extras];
+}
 
-// ══════════════════════════════════════════════════════════════════
-// SUCCESS taglines — replaces the fixed "✨ وصل كتابك!" headline.
-// Mix of warm welcoming + more energetic options. All formal.
-// ══════════════════════════════════════════════════════════════════
+const S0: StepVariant[] = [
+  { icon: "🔭", label: "أتفقّد المكتبة الرقميّة" },
+  { icon: "🌌", label: "أبدأ رحلة البحث" },
+  { icon: "📚", label: "تستيقظ مكتبتي الواسعة" },
+  { icon: "🔍", label: "أتجوّل بين الرفوف الإلكترونيّة" },
+  { icon: "🌠", label: "أُرسل إشاراتي إلى آلاف الكتب" },
+  { icon: "🧭", label: "أرسم خارطة البحث" },
+  { icon: "🪄", label: "أُشعل شعلة البحث" },
+  { icon: "🛎️", label: "أُنادى على أمناء المكتبة" },
+  { icon: "🌙", label: "أفتح أبواب الأرشيف" },
+  { icon: "🗝️", label: "أدور مفاتيح الفهارس" },
+  { icon: "🪟", label: "أُطلّ على مكتبات بعيدة" },
+  { icon: "📡", label: "أُطلق نبضة استكشاف" },
+];
+const S1: StepVariant[] = [
+  { icon: "🔎", label: "أُفتّش في المصادر العربيّة" },
+  { icon: "🌐", label: "أتصفّح الشبكة بحثاً عن نسختك" },
+  { icon: "📡", label: "أبعث إشاراتي إلى مصادر متعدّدة" },
+  { icon: "📖", label: "أقلّب صفحات الفهارس" },
+  { icon: "🗂️", label: "أراجع أرشيفات المكتبات" },
+  { icon: "🧵", label: "أتتبّع خيوط العنوان" },
+  { icon: "🧩", label: "أُركّب قطع اللغز" },
+  { icon: "🪞", label: "أُقارن النسخ المحتملة" },
+  { icon: "🌿", label: "أبحث في حدائق المعرفة" },
+  { icon: "🏛️", label: "أمرّ على المكتبات الكبرى" },
+  { icon: "📎", label: "أجمع الإشارات الموثوقة" },
+  { icon: "🔦", label: "أُضيء زوايا البحث" },
+];
+const S2: StepVariant[] = [
+  { icon: "🧠", label: "أُعمِل الفكر بصياغة مختلفة" },
+  { icon: "🎯", label: "أُجرّب أقرب صياغة" },
+  { icon: "💡", label: "أُعيد المحاولة بطريقة أذكى" },
+  { icon: "🔁", label: "أُكرّر البحث بمنهج آخر" },
+  { icon: "✨", label: "أبحث في الزوايا غير المألوفة" },
+  { icon: "🪄", label: "أُصحّح مسار البحث" },
+  { icon: "📐", label: "أُعيد ضبط زاوية الاستعلام" },
+  { icon: "🧬", label: "أُحلّل بنية العنوان" },
+  { icon: "🎪", label: "أُوسّع دائرة الاحتمالات" },
+  { icon: "🪙", label: "أُجرّب مفتاحاً جديداً" },
+];
+const S3: StepVariant[] = [
+  { icon: "📡", label: "وجدتُ أثراً، أتحقّق منه" },
+  { icon: "📍", label: "اقتنصتُ بعض الإشارات" },
+  { icon: "🛰️", label: "وصلتني نتائج واعدة" },
+  { icon: "🎣", label: "أصطاد أفضل الروابط" },
+  { icon: "🔬", label: "أمحّص ما عُثر عليه" },
+  { icon: "🏆", label: "ظهرت مرشّحات قويّة" },
+  { icon: "📌", label: "ثبّتتُ أفضل المسارات" },
+  { icon: "🧲", label: "جذبتُ روابط ذات صلة" },
+  { icon: "🧿", label: "رصدتُ نسخاً محتملة" },
+  { icon: "📦", label: "جمعتُ حزمة مرشّحين" },
+];
+const S4: StepVariant[] = [
+  { icon: "🔬", label: "أختبر جودة الروابط" },
+  { icon: "⚖️", label: "أُوازن بين النتائج" },
+  { icon: "🧪", label: "أُحلّل المرشّحين" },
+  { icon: "🎓", label: "أُقيّم مصداقيّة كلّ ملف" },
+  { icon: "🛡️", label: "أتحقّق من سلامة المحتوى" },
+  { icon: "🪪", label: "أُطابق العنوان مع الملف" },
+  { icon: "🧼", label: "أستبعد النسخ الرديئة" },
+  { icon: "🧯", label: "أمنع الملفات المشبوهة" },
+  { icon: "🧿", label: "أُدقّق قبل الإرسال" },
+  { icon: "📏", label: "أقيس ملاءمة النسخة" },
+];
+const S5: StepVariant[] = [
+  { icon: "⚡", label: "أُحمّل الكتاب من أقرب مصدر" },
+  { icon: "📥", label: "يجري تحميل الملف الآن" },
+  { icon: "🚂", label: "في طريقي إلى المصدر الأنسب" },
+  { icon: "💎", label: "أُحضِر النسخة الأجود" },
+  { icon: "🌊", label: "تتدفّق البيانات بسرعة" },
+  { icon: "🏗️", label: "أبني مساراً آمناً للملف" },
+  { icon: "🧊", label: "أُثبّت التحميل دون انقطاع" },
+  { icon: "🧰", label: "أُجهّز الملف للإرسال" },
+  { icon: "🪢", label: "أربط المصدر بطلبك" },
+  { icon: "🎯", label: "أقتنص النسخة المطابقة" },
+];
+const S6: StepVariant[] = [
+  { icon: "🚀", label: "في الطريق إليك الآن" },
+  { icon: "📤", label: "تبقّت ثوانٍ قليلة" },
+  { icon: "🎁", label: "أُغلِّف لك هديّتك" },
+  { icon: "✨", label: "ها هو في الأفق" },
+  { icon: "🦋", label: "وَصَل، أُحضِره إليك" },
+  { icon: "📬", label: "أُسلّمك الكتاب فوراً" },
+  { icon: "🎀", label: "أضع اللمسة الأخيرة" },
+  { icon: "🕊️", label: "أُرسله بلطف إلى محادثتك" },
+  { icon: "🔔", label: "دقائق… بل ثوانٍ" },
+  { icon: "🌈", label: "ينزل الكتاب إلى يدك" },
+];
+
+export const PROGRESS_VARIANTS: ReadonlyArray<readonly StepVariant[]> = [
+  S0, S1, S2, S3, S4, S5, S6,
+] as const;
 
 export const SUCCESS_TAGLINES: readonly string[] = [
   "✨ *وصل كتابك!*",
@@ -106,6 +141,20 @@ export const SUCCESS_TAGLINES: readonly string[] = [
   "📖 *كتابك جاهز للقراءة*",
   "🦋 *وصلت السحب — هاك الكتاب*",
   "💎 *حصلتَ على نسخة جيّدة*",
+  "🪄 *تمّ — الكتاب بين يديك*",
+  "🏆 *بحث ناجح… تفضّل!*",
+  "🌙 *ليلة قراءة سعيدة*",
+  "☕ *كتابك جاهز — استرخِ واقرأ*",
+  "🧭 *وصلنا إلى النسخة المناسبة*",
+  "🕊️ *أُرسل إليك بهدوء*",
+  "🎬 *المشهد الأخير: الكتاب عندك*",
+  "📎 *تمّ إرفاق نسختك*",
+  "🔐 *نسخة موثّقة وجاهزة*",
+  "🌿 *قراءة موفّقة تبدأ الآن*",
+  "🪐 *من رفوف بعيدة… إلى محادثتك*",
+  "🔔 *تنبيه لطيف: كتابك وصل*",
+  "🪄 *سحريّة البحث اكتملت*",
+  "📘 *الملف جاهز للقراءة*",
 ] as const;
 
 export const SUCCESS_TAGLINES_PREMIUM: readonly string[] = [
@@ -115,12 +164,13 @@ export const SUCCESS_TAGLINES_PREMIUM: readonly string[] = [
   "🚀 *وصل بأولويّة Premium*",
   "💎 *كتابك بين يديك — درجة أولى*",
   "📖 *كتابك جاهز — معالجة سريعة*",
+  "⚡ *Premium: سرعة أعلى… ونتيجة أوضح*",
+  "🏅 *مسار أولوية — الكتاب جاهز*",
+  "👑 *خدمة مميّزة — تفضّل نسختك*",
+  "🛸 *مسار سريع Premium اكتمل*",
+  "🧿 *أولوية + جودة — هاك الكتاب*",
+  "💫 *تجربة Premium كما ينبغي*",
 ] as const;
-
-// ══════════════════════════════════════════════════════════════════
-// CACHE-HIT taglines — the "you got it instantly" feeling.
-// Replace "⚡ من الأرشيف — وصلك في ثوانٍ".
-// ══════════════════════════════════════════════════════════════════
 
 export const CACHE_HIT_TAGLINES: readonly string[] = [
   "⚡ _من الأرشيف — وصلك في ثوانٍ_",
@@ -128,12 +178,14 @@ export const CACHE_HIT_TAGLINES: readonly string[] = [
   "🌟 _نسخة جاهزة — تفضّل!_",
   "⏱️ _قياسيّ! وصل بسرعة فائقة_",
   "🔥 _الذاكرة سريعة — هاك الكتاب_",
+  "🧊 _نسخة باردة وجاهزة من الكاش_",
+  "🪄 _لم نحتج بحثاً طويلاً هذه المرّة_",
+  "📎 _ملف معروف مسبقاً — إرسال فوري_",
+  "🚀 _اختصار الطريق: أرشيف ذكي_",
+  "🎯 _مطابقة فورية من الذاكرة_",
+  "🪙 _وفّرنا وقت البحث — استمتع_",
+  "📡 _استجابة لحظيّة من المخزون_",
 ] as const;
-
-// ══════════════════════════════════════════════════════════════════
-// LONG-WAIT REASSURANCE — fires when a step lingers > 15 / 30 sec.
-// User asked for ALL formal Arabic (الفصحى) here. No dialect.
-// ══════════════════════════════════════════════════════════════════
 
 export const WAIT_REASSURANCE_15S: readonly string[] = [
   "⏳ _لا يزال البحث جارياً — يحتاج هذا الكتاب جهداً إضافيّاً_",
@@ -143,6 +195,11 @@ export const WAIT_REASSURANCE_15S: readonly string[] = [
   "📡 _أتواصل مع مكتبات بعيدة المدى_",
   "🌊 _البحث في عمق الأرشيفات الرقميّة يستغرق وقتاً_",
   "⚙️ _آليّات البحث تعمل بكامل طاقتها_",
+  "🧭 _أُعيد ضبط الاتجاه نحو نسخة أفضل_",
+  "🪞 _أُقارن النتائج لأختار الأنسب_",
+  "🧵 _أتتبّع خيطاً واعداً… لحظات_",
+  "🛰️ _إشارة من مصدر بعيد وصلت للتو_",
+  "🔬 _أدقّق قبل أن أُرسل أي ملف_",
 ] as const;
 
 export const WAIT_REASSURANCE_30S: readonly string[] = [
@@ -152,12 +209,13 @@ export const WAIT_REASSURANCE_30S: readonly string[] = [
   "🪶 _الجودة تتطلّب وقتاً، فلتطمئنّ_",
   "🛰️ _أتواصل مع مصادر إضافيّة بعيدة_",
   "📚 _أتنقّل بين أرشيفات متعدّدة، اقترب الإنجاز_",
+  "🛡️ _أرفض النسخ الرديئة عمداً — الجودة أولاً_",
+  "🧰 _أُجهّز مساراً أنظف للتحميل_",
+  "🌙 _ما زلتُ هنا… لم أنقطع عن طلبك_",
+  "🧲 _أقترب من نسخة مطابقة للعنوان_",
+  "💎 _أبحث عن النسخة الأجدر بك_",
+  "🔔 _ثوانٍ إضافية… ثمّ تكتمل الصورة_",
 ] as const;
-
-// ══════════════════════════════════════════════════════════════════
-// PERSONALITY LINES — appended to ~10% of successful deliveries.
-// Formal, polite, complimentary. Never pushy.
-// ══════════════════════════════════════════════════════════════════
 
 export const PERSONALITY_LINES: readonly string[] = [
   "🌹 _ملاحظة: ذوقك في الكتب يدلّ على عقل راقٍ_",
@@ -168,39 +226,91 @@ export const PERSONALITY_LINES: readonly string[] = [
   "💫 _ملاحظة: كتاب يستحقّ التأمّل والتدبّر_",
   "🌿 _ملاحظة: قراءة موفّقة، ودمت قارئاً_",
   "📜 _ملاحظة: من خير الجلساء — كتاب نافع_",
+  "🧭 _ملاحظة: كل كتاب باب… وقد فتحتَ باباً حسناً_",
+  "🌙 _ملاحظة: ليلة قراءة كهذه تُغيّر مزاج اليوم_",
+  "🪞 _ملاحظة: العنوان الذي اخترته يشي بفضول جميل_",
+  "🕊️ _ملاحظة: اقرأ برفق… والمتعة ستأتي وحدها_",
+  "🪙 _ملاحظة: المعرفة استثمار هادئ ومضمون_",
+  "🎭 _ملاحظة: الروايات مرايا… استمتع بالانعكاس_",
+  "🧠 _ملاحظة: عقل يقرأ… عقل يتّسع_",
+  "🌈 _ملاحظة: بعد الصفحة الأولى، يبدأ السحر_",
 ] as const;
 
-// Probability for personality line append (percentage 0-100).
-export const PERSONALITY_LINE_CHANCE = 10;
+/** Higher chance so the bot feels more “alive” without being noisy */
+export const PERSONALITY_LINE_CHANCE = 28;
 
-// ══════════════════════════════════════════════════════════════════
-// REACTION POOLS — Telegram bot reactions (👀 / 🎉 / 😢 / etc.)
-// Each outcome has a small pool the bot picks from randomly.
-// Limited to free-tier reactions:
-//   https://core.telegram.org/bots/api#setmessagereaction
-// ══════════════════════════════════════════════════════════════════
+export const SUCCESS_CTAS: readonly string[] = [
+  "👇 _جرّب «ملخّص ذكي» أو احفظه في الأمنيات_",
+  "👇 _الملخص يختصر عليك ساعات… بضغطة_",
+  "👇 _احفظه الآن، واقرأه لاحقاً براحة_",
+  "👇 _ماذا بعد؟ ملخص · أمنية · كتاب آخر_",
+  "👇 _ماذا بعد؟ ملخص سريع أو كتاب مفاجأة_",
+  "👇 _زرّ الملخص يمنحك صورة واضحة في دقائق_",
+  "👇 _أضف للأمنيات إن أردت العودة إليه_",
+  "👇 _أو اطلب كتاباً جديداً فوراً_",
+] as const;
 
-export const REACTION_RECEIVED:  readonly string[] = ["👀", "✍️", "🤔", "👌"];
-export const REACTION_SUCCESS:   readonly string[] = ["🎉", "🔥", "🤩", "🥳", "❤️", "⚡", "🏆", "💯", "👏", "🤝"];
-export const REACTION_CACHE_HIT: readonly string[] = ["⚡", "🔥", "💯", "🤩"];
-export const REACTION_NO_RESULT: readonly string[] = ["😢", "🤔", "🥱"];
-export const REACTION_ERROR:     readonly string[] = ["😱", "🤯", "😨"];
-export const REACTION_PAID_BOOK: readonly string[] = ["🤔", "😐", "😢"];
+export const SUCCESS_FOOTERS: readonly string[] = [
+  "✨ _خلاصة الكتب — ابحث · اقرأ · لخّص_",
+  "📚 _مكتبتك الذكية داخل تيليجرام_",
+  "🪄 _من البحث إلى الملف… في محادثة واحدة_",
+  "🌙 _قراءة سعيدة — وأنا هنا إن احتجت_",
+  "🧭 _ابحث ثانية أو اكتشف مفاجأة من الأزرار_",
+] as const;
 
-// ══════════════════════════════════════════════════════════════════
-// PAID BOOK / NO RESULTS — varied openings (kept brief).
-// ══════════════════════════════════════════════════════════════════
+export const REACTION_RECEIVED:  readonly string[] = ["👀", "✍️", "🤔", "👌", "🫡", "🧠"];
+export const REACTION_SUCCESS:   readonly string[] = ["🎉", "🔥", "🤩", "🥳", "❤️", "⚡", "🏆", "💯", "👏", "🤝", "😍", "🙏"];
+export const REACTION_CACHE_HIT: readonly string[] = ["⚡", "🔥", "💯", "🤩", "🚀", "✨"];
+export const REACTION_NO_RESULT: readonly string[] = ["😢", "🤔", "🥱", "😕"];
+export const REACTION_ERROR:     readonly string[] = ["😱", "🤯", "😨", "😬"];
+export const REACTION_PAID_BOOK: readonly string[] = ["🤔", "😐", "😢", "🫤"];
 
 export const PAID_BOOK_HEADLINES: readonly string[] = [
   "📕 *كتاب مدفوع أو غير متوفّر مجّاناً*",
   "📕 *لم أعثر على نسخة مجّانيّة من هذا الكتاب*",
   "📕 *هذا الكتاب لا يتوفّر له PDF مجّاني*",
   "📕 *النسخة الإلكترونيّة المجّانية غير متاحة*",
+  "📕 *المصادر المجّانية لم تُظهر هذا العنوان*",
+  "📕 *قد يكون الكتاب محمياً أو للبيع فقط*",
+  "📕 *تعذّر إيجاد PDF مجاني موثوق*",
+  "📕 *النتيجة تشير إلى نسخة غير مجّانية*",
 ] as const;
 
 export const NO_RESULTS_HEADLINES: readonly string[] = [
-  "😔 *لم أجد PDF متاحاً*",
-  "😔 *لم تُسفر مصادري عن نتيجة*",
-  "😔 *البحث لم يُثمر هذه المرّة*",
-  "😔 *لا أملك نتيجة موثوقة الآن*",
+  "😔 *لم أجد نتيجة مناسبة*",
+  "🔎 *انتهى البحث دون نسخة موثوقة*",
+  "📭 *لا PDF جاهز لهذا العنوان حالياً*",
+  "🧭 *بحثتُ… ولم أظفر بنسخة آمنة*",
+  "🌫️ *الضباب كثيف حول هذا العنوان*",
+  "📚 *المكتبات لم تُخرج نسخة مطابقة*",
+  "🧩 *القطع ناقصة — لم تكتمل النتيجة*",
+  "🪞 *لم أجد مرآة واضحة لهذا الاسم*",
+  "🛰️ *الإشارات ضعيفة… بلا ملف صالح*",
+  "🧤 *أمسكتُ بأثر، لكن ليس بملف جاهز*",
+] as const;
+
+export const QUEUE_ACCEPTED_LINES: readonly string[] = [
+  "⏳ *طلبك في الطريق…*",
+  "📋 *أضفتُ طلبك إلى الطابور*",
+  "🎫 *تمّ تسجيل طلبك*",
+  "🛎️ *استلمتُ طلبك — سأعالجه*",
+  "🧭 *اتّجهتُ نحو كتابك*",
+] as const;
+
+export const PROGRESS_DIVIDERS: readonly string[] = [
+  "━━━━━━━━━━━━━━━━",
+  "────────────────",
+  "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+  "• • • • • • • • • •",
+  "═ ═ ═ ═ ═ ═ ═ ═",
+] as const;
+
+export const STAGE_NAME_POOLS: readonly (readonly string[])[] = [
+  ["تهيئة", "استيقاظ", "افتتاح", "انطلاق"],
+  ["بحث", "تنقيب", "استكشاف", "مسح"],
+  ["إعادة ضبط", "تحسين", "تصحيح مسار", "توسيع"],
+  ["نتائج", "التقاط", "تجميع", "فرز أولي"],
+  ["فحص جودة", "تدقيق", "تصفية", "مواءمة"],
+  ["تحميل", "جلب", "استحضار", "سحب"],
+  ["إرسال", "تسليم", "إنهاء", "وصول"],
 ] as const;

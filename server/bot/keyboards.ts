@@ -62,37 +62,57 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
 // ── بعد النجاح ────────────────────────────────────────────
 export function kbAfterSuccess(
   bookName: string,
-  sourceUrl: string
+  sourceUrl?: string,
+  opts?: { isPrem?: boolean; fromCache?: boolean },
 ): TelegramBot.InlineKeyboardMarkup {
   const retryK   = storeRetryKey(bookName);
   const summaryK = storeSummaryKey(bookName, sourceUrl || undefined);
+  const isPrem = !!opts?.isPrem;
+
+  // Post-delivery UX (mini-app clarity):
+  //  primary: summary + wishlist
+  //  discover: another book + surprise
+  //  quality: wrong file / resend
+  //  nav: premium (free) or profile + home
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
-      { text: "📘  ملخّص ذكي",     callback_data: safeCb(`sum:${summaryK}`) },
-      { text: "🎲  كتاب عشوائي",   callback_data: "rg:any" },
+      { text: "📘  ملخّص ذكي", callback_data: safeCb(`sum:${summaryK}`) },
+      { text: "🔖  احفظه",     callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
     [
-      { text: "🔍  كتاب آخر",     callback_data: "new_search" },
-      { text: "🔖  احفظه",         callback_data: safeCb(`wishlist_add:${retryK}`) },
-    ],
-    [
-      { text: "🔁  أعد الإرسال",  callback_data: safeCb(`retry:${retryK}`) },
+      { text: "🔍  كتاب آخر", callback_data: "new_search" },
+      { text: "🎲  مفاجأة",   callback_data: "rg:any" },
     ],
   ];
 
   if (sourceUrl) {
     const fbKey = storeFeedbackUrl(sourceUrl, bookName);
-    rows[2].push({ text: "⚠️  ملف خاطئ؟", callback_data: safeCb(`bad_file:${fbKey}`) });
+    rows.push([
+      { text: "⚠️  الملف غير مطابق؟", callback_data: safeCb(`bad_file:${fbKey}`) },
+      { text: "🔁  أعد الإرسال",      callback_data: safeCb(`retry:${retryK}`) },
+    ]);
+  } else {
+    rows.push([
+      { text: "🔁  أعد الإرسال", callback_data: safeCb(`retry:${retryK}`) },
+    ]);
   }
 
-  rows.push([
-    { text: "🎲  مفاجأة",           callback_data: "rg:any"    },
-    { text: "🏠  القائمة",          callback_data: "main_menu" },
-  ]);
+  if (isPrem) {
+    rows.push([
+      { text: "👤  ملفي",     callback_data: "my_profile" },
+      { text: "🏠  الرئيسية", callback_data: "main_menu" },
+    ]);
+  } else {
+    rows.push([
+      { text: "⭐  Premium",  callback_data: "premium_buy" },
+      { text: "🏠  الرئيسية", callback_data: "main_menu" },
+    ]);
+  }
+
   return { inline_keyboard: rows };
 }
 
-// ── بعد الفشل ─────────────────────────────────────────────
+// ──لفشل ─────────────────────────────────────────────
 export function kbAfterFail(
   bookName: string,
   results:  BookResult[],
