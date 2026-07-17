@@ -340,6 +340,9 @@ export function adminPanelKeyboard(isMaint: boolean): {
       ],
       [
         { text: "🔥 Retention", callback_data: "admin_retention" },
+        { text: "📚 مكتبة/ذوق", callback_data: "admin_lib_taste" },
+      ],
+      [
         { text: "🔭 Funnel", callback_data: "admin_funnel" },
       ],
       [
@@ -370,4 +373,74 @@ export function adminPanelKeyboard(isMaint: boolean): {
       ],
     ],
   };
+}
+
+// ── مكتبة + ذوق (إحصاءات للإدارة) ─────────────
+export async function buildAdminLibraryTasteMessage(): Promise<string> {
+  const day = cairoDateString();
+  const [
+    libRecords,
+    stReading,
+    stDone,
+    stHave,
+    stWant,
+    continueNudge,
+    readingUsers,
+    onbCount,
+  ] = await Promise.all([
+    safeInt("tel:lib:record"),
+    safeInt("tel:lib:status:reading"),
+    safeInt("tel:lib:status:done"),
+    safeInt("tel:lib:status:have"),
+    safeInt("tel:lib:status:want"),
+    safeInt("tel:retention:continue_nudge"),
+    redis.scard("lib:reading_users").catch(() => 0),
+    safeInt("tel:onboard:complete"),
+  ]);
+
+  // sample genre distribution from a few interest keys
+  const genreHits: Record<string, number> = {};
+  try {
+    let cursor = "0";
+    let sampled = 0;
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", "ret:interest:*", "COUNT", 40);
+      cursor = next;
+      for (const key of keys) {
+        if (sampled >= 60) break;
+        const top = await redis.zrevrange(key, 0, 0).catch(() => [] as string[]);
+        if (top[0]) {
+          genreHits[top[0]] = (genreHits[top[0]] || 0) + 1;
+          sampled++;
+        }
+      }
+    } while (cursor !== "0" && sampled < 60);
+  } catch { /* */ }
+
+  const GENRE_AR: Record<string, string> = {
+    novel: "روايات", selfhelp: "تطوير ذات", religion: "دين",
+    history: "تاريخ", science: "علوم", psych: "نفس",
+    philosophy: "فلسفة", poetry: "شعر", other: "متنوّع",
+  };
+  const genreLines = Object.entries(genreHits)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([g, n], i) => `${i + 1}. ${GENRE_AR[g] || g}: *${n}*`)
+    .join("\n") || "_لا عيّنة كافية بعد_";
+
+  return (
+    `📚 *مكتبة + ذوق — رفيق*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `📅 ${escMd(day)}\n\n` +
+    `*المكتبة (عدادات تراكمية):*\n` +
+    `◦ تسجيلات تحميل في المكتبة: *${libRecords}*\n` +
+    `◦ مستخدمون لديهم «أقرؤه» الآن: *${readingUsers}*\n` +
+    `◦ تغيّرات حالة — أقرأ: *${stReading}* · أنهيت: *${stDone}*\n` +
+    `◦ لديه: *${stHave}* · لاحقاً: *${stWant}*\n\n` +
+    `*تذكير أكمل قراءتك:*\n` +
+    `◦ رسائل مُرسلة: *${continueNudge}*\n\n` +
+    `*ذوق عيّنة (أولى اهتمامات ~60 مستخدماً):*\n` +
+    `${genreLines}\n\n` +
+    `_العيّنة تقريبية عبر SCAN · العدّادات من Redis._`
+  );
 }

@@ -544,6 +544,124 @@ export function registerCommands(
     await sendWishlist(bot, chatId, userId); // FIX-4: token محذوف
   });
 
+
+  // ── /library /continue /lists /prefs /pulse ───
+  bot.onText(/^\/(?:library|مكتبتي|lib)(?:@\w+)?(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const q = (match?.[1] || "").trim();
+      const text = await buildLibraryMessage(userId, q || undefined);
+      const kb = await kbLibrary(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch (e) {
+      L.error("cmd", "/library error", { err: String(e).slice(0, 80) });
+      await bot.sendMessage(chatId, "⚠️ تعذّر فتح المكتبة.").catch(() => {});
+    }
+  });
+
+  bot.onText(/^\/(?:continue|أكمل|اكمل|resume)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const { text, title } = await buildContinueMessage(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
+    } catch (e) {
+      L.error("cmd", "/continue error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:lists|list|قوائم)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    try {
+      const { getPrimaryGenre } = await import("./interests.js");
+      const { buildCuratedMenuForUser, kbCuratedMenuForUser } = await import("./curated.js");
+      const g = userId ? await getPrimaryGenre(userId) : null;
+      await bot.sendMessage(chatId, buildCuratedMenuForUser(g), {
+        parse_mode: "Markdown",
+        reply_markup: kbCuratedMenuForUser(g),
+      });
+    } catch (e) {
+      L.error("cmd", "/lists error", { err: String(e).slice(0, 80) });
+      try {
+        await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+          parse_mode: "Markdown",
+          reply_markup: kbCuratedMenu(),
+        });
+      } catch { /* */ }
+    }
+  });
+
+  bot.onText(/^\/(?:prefs|notifications|إشعارات|اشعارات)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const text = await buildPrefsMessage(userId);
+      const prefs = await getAllPrefs(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+    } catch (e) {
+      L.error("cmd", "/prefs error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:pulse|moment|لحظة|لحظتي|micro)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!msg.from?.id) return;
+    try {
+      const { text, kb } = buildMicroMessage();
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch (e) {
+      L.error("cmd", "/pulse error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+
+
+  bot.onText(/^\/(?:taste|ذوق|اهتمام|onboard)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const name = msg.from?.first_name || "صديقي";
+    try {
+      const { buildTasteResetMessage, kbOnboarding } = await import("./onboarding.js");
+      await bot.sendMessage(chatId, buildTasteResetMessage(), {
+        parse_mode: "Markdown",
+        reply_markup: kbOnboarding(),
+      });
+    } catch (e) {
+      L.error("cmd", "/taste error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+
+  bot.onText(/^\/lang(?:@\w+)?(?:\s+(\w+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const { setUserLocale, getUserLocale, isLocale, t, localeFromTelegram } = await import("./i18n.js");
+      const arg = (match?.[1] || "").toLowerCase();
+      if (arg && isLocale(arg)) {
+        await setUserLocale(userId, arg);
+        await bot.sendMessage(chatId, t(arg, arg === "en" ? "locale.set.en" : "locale.set.ar"));
+        return;
+      }
+      // auto from telegram
+      if (!arg && msg.from?.language_code) {
+        const auto = localeFromTelegram(msg.from.language_code);
+        await setUserLocale(userId, auto);
+        await bot.sendMessage(chatId, t(auto, auto === "en" ? "locale.set.en" : "locale.set.ar") + "\n" + t(auto, "locale.hint"));
+        return;
+      }
+      const cur = await getUserLocale(userId);
+      await bot.sendMessage(chatId, t(cur, "locale.hint") + `\n(current: ${cur})`);
+    } catch (e) {
+      L.error("cmd", "/lang error", { err: String(e).slice(0, 80) });
+    }
+  });
+
   // ── /help ──────────────────────────────────────
   bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
@@ -1021,6 +1139,7 @@ export function registerMessageHandler(
     if (!finalBookName || finalBookName.trim().length < 2) return;
     finalBookName = lightNormalizeQuery(finalBookName) || finalBookName;
 
+    bot.sendChatAction(chatId, "typing").catch(() => {});
     await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
   });
 }

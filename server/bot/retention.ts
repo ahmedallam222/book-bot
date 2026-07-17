@@ -21,6 +21,7 @@ import {
   WARM_EVENING_NOTES,
 } from "./brand.js";
 import { bookOfDayMorningBlock, kbBookOfDayAsync } from "./bookOfDay.js";
+import { sendContinueReadingNudges } from "./continueReading.js";
 import { sendSundayWeekReports, getPersonalWeekStats } from "./personalWeek.js";
 import { getTopInterests } from "./interests.js";
 import { getPref } from "./notifPrefs.js";
@@ -653,6 +654,10 @@ async function runRetentionTick(): Promise<void> {
   }
   if (hour >= 10 && hour <= 13) {
     await runGroupClubWeeklyPosts(_bot).catch(() => {});
+  }
+  // تذكير «أكمل قراءتك» — بعد الظهر بلطف (15–18 القاهرة)
+  if (hour >= 15 && hour <= 18) {
+    await sendContinueReadingNudges(_bot).catch(() => {});
   }
   if (hour >= 17 && hour <= 20) {
     await sendSundayWeekReports(_bot).catch(() => {});

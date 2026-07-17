@@ -592,7 +592,7 @@ export async function handleImageCommand(
     const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
     if (maintenance === "1") {
       await bot.sendMessage(chatId,
-        `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+        `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً! ⏳`,
         { parse_mode: "Markdown" }).catch(() => {});
       return;
     }
@@ -739,7 +739,7 @@ export async function handleImageCallback(
     const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
     if (maintenance === "1") {
       await bot.sendMessage(chatId,
-        `🔧 البوت في وضع الصيانة. سنعود قريباً.`).catch(() => {});
+        `🔧 رفيق في صيانة خفيفة. سنعود قريباً.`).catch(() => {});
       return;
     }
   }

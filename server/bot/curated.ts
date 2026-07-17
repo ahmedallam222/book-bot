@@ -144,6 +144,138 @@ export const CURATED_LISTS: CuratedList[] = [
       "مقدمة ابن خلدون",
     ],
   },
+
+  {
+    id: "philosophy_core",
+    title: "فلسفة للمبتدئ الجاد",
+    blurb: "مداخل واضحة ثم نصوص خالدة — بلا استعراض.",
+    emoji: "💭",
+    books: [
+      "عالم صوفي",
+      "هكذا تكلم زرادشت",
+      "الجمهورية",
+      "تأملات",
+      "أسطورة سيزيف",
+      "ما وراء الخير والشر",
+      "محاورات أفلاطون",
+      "الوجود والعدم",
+    ],
+  },
+  {
+    id: "poetry_ar",
+    title: "شعر عربي",
+    blurb: "من المعلقات إلى المعاصر — ذوق لغوي رفيع.",
+    emoji: "✒️",
+    books: [
+      "ديوان المتنبي",
+      "ديوان محمود درويش",
+      "ديوان نزار قباني",
+      "الأغاني",
+      "لزوم ما لا يلزم",
+      "ديوان أحمد شوقي",
+      "ديوان جبران خليل جبران",
+      "طوق الحمامة",
+    ],
+  },
+  {
+    id: "history_ar",
+    title: "تاريخ وحضارة",
+    blurb: "سرد وتفكير تاريخي — من ابن خلدون إلى العصر الحديث.",
+    emoji: "🏛",
+    books: [
+      "مقدمة ابن خلدون",
+      "البداية والنهاية",
+      "تاريخ الطبري",
+      "فجر الأندلس",
+      "قصة الحضارة",
+      "سابيينس",
+      "لماذا تفشل الأمم",
+      "الدولة العثمانية",
+    ],
+  },
+  {
+    id: "women_voices",
+    title: "أصوات نسائية",
+    blurb: "روايات وأعمال لكاتبات عربيات وعالميات مؤثرة.",
+    emoji: "🌙",
+    books: [
+      "ذاكرة الجسد",
+      "بنات الرياض",
+      "أماريتا",
+      "حجر الضحك",
+      "طوق الحمام",
+      "هيبتا",
+      "القاهرة الصغيرة",
+      "مدن الملح",
+    ],
+  },
+  {
+    id: "young_easy",
+    title: "قراءة خفيفة / يافعين",
+    blurb: "إيقاع سريع ولغة ميسّرة — مناسبة للبداية.",
+    emoji: "🌈",
+    books: [
+      "الأمير الصغير",
+      "هاري بوتر وحجر الفيلسوف",
+      "شيفرة بلال",
+      "أرض زيكولا",
+      "قصر الكلب",
+      "صاحب الظل الطويل",
+      "أليس في بلاد العجائب",
+      "حكايات ألف ليلة وليلة",
+    ],
+  },
+  {
+    id: "focus_deep",
+    title: "تركيز وعمل عميق",
+    blurb: "للإنتاج الهادئ دون صخب تحفيزي.",
+    emoji: "🎯",
+    books: [
+      "العمل العميق",
+      "العادات الذرية",
+      "التفكير السريع والبطيء",
+      "قوة العادة",
+      "الجوهرية",
+      "أربع ساعات عمل في الأسبوع",
+      "الإنتاجية بلا إجهاد",
+      "فن اللامبالاة",
+    ],
+  },
+  {
+    id: "egypt_modern",
+    title: "أدب مصري حديث",
+    blurb: "من نجيب محفوظ إلى أصوات معاصرة.",
+    emoji: "🇪🇬",
+    books: [
+      "بين القصرين",
+      "قصر الشوق",
+      "السكرية",
+      "ملحمة الحرافيش",
+      "اللص والكلاب",
+      "عمارة يعقوبيان",
+      "الفيل الأزرق",
+      "يوتوبيا",
+      "عزازيل",
+      "واحة الغروب",
+    ],
+  },
+  {
+    id: "faith_deep",
+    title: "تزكية وتهذيب",
+    blurb: "قلب وعمل — مختارات روحية مهذّبة.",
+    emoji: "🕊",
+    books: [
+      "مدارج السالكين",
+      "إحياء علوم الدين",
+      "الوابل الصيب",
+      "تزكية النفس",
+      "لا تحزن",
+      "لأنك الله",
+      "الرحيق المختوم",
+      "رياض الصالحين",
+    ],
+  },
+
 ];
 
 /** سلاسل: بعد قراءة X جرّب … */
@@ -192,6 +324,40 @@ export const SERIES_MAP: { keys: string[]; next: string[] }[] = [
     keys: ["مقدمة ابن خلدون"],
     next: ["سابيينس", "قصة الحضارة", "تاريخ الطبري"],
   },
+
+  {
+    keys: ["سيكولوجية المال", "سيكولوجيه المال"],
+    next: ["الأب الغني والأب الفقير", "أغنى رجل في بابل", "أسرار عقل المليونير"],
+  },
+  {
+    keys: ["سابيينس", "sapiens"],
+    next: ["هومو ديوس", "21 درسا للقرن 21", "مقدمة ابن خلدون"],
+  },
+  {
+    keys: ["العمل العميق", "deep work"],
+    next: ["العادات الذرية", "الجوهرية", "التفكير السريع والبطيء"],
+  },
+  {
+    keys: ["بين القصرين", "قصر الشوق", "السكرية"],
+    next: ["ملحمة الحرافيش", "اللص والكلاب", "زقاق المدق"],
+  },
+  {
+    keys: ["عزازيل"],
+    next: ["واحة الغروب", "الفيل الأزرق", "يوتوبيا"],
+  },
+  {
+    keys: ["لأنك الله", "لانك الله"],
+    next: ["لا تحزن", "تأملات في السعادة الحقيقية", "حصن المسلم"],
+  },
+  {
+    keys: ["ديوان المتنبي", "المتنبي"],
+    next: ["ديوان محمود درويش", "لزوم ما لا يلزم", "طوق الحمامة"],
+  },
+  {
+    keys: ["عالم صوفي"],
+    next: ["الجمهورية", "تأملات", "أسطورة سيزيف"],
+  },
+
 ];
 
 export function getCuratedList(id: string): CuratedList | undefined {
@@ -256,7 +422,7 @@ export function buildCuratedListMessage(list: CuratedList): string {
 
 export function kbCuratedList(list: CuratedList): TelegramBot.InlineKeyboardMarkup {
   const rows: TelegramBot.InlineKeyboardButton[][] = [];
-  for (const b of list.books.slice(0, 10)) {
+  for (const b of list.books.slice(0, 12)) {
     const k = storeRetryKey(b);
     const label = b.length > 32 ? b.slice(0, 31) + "…" : b;
     rows.push([{ text: `📥  ${label}`, callback_data: `retry:${k}` }]);
@@ -297,4 +463,96 @@ export function kbSeries(next: string[]): TelegramBot.InlineKeyboardMarkup {
     { text: "🏠  الرئيسية", callback_data: "main_menu" },
   ]);
   return { inline_keyboard: rows };
+}
+
+// ── Personalization (v3) ──────────────────────
+
+const GENRE_TO_LIST: Record<string, string[]> = {
+  novel:       ["arab_novels", "egypt_modern", "world_classics", "women_voices"],
+  selfhelp:    ["self_power", "focus_deep", "start_read", "business_core"],
+  religion:    ["faith_core", "faith_deep", "start_read"],
+  history:     ["history_ar", "mind_science", "faith_core"],
+  science:     ["mind_science", "focus_deep", "history_ar"],
+  psych:       ["self_power", "mind_science", "focus_deep"],
+  philosophy:  ["philosophy_core", "mind_science", "world_classics"],
+  poetry:      ["poetry_ar", "arab_novels"],
+  other:       ["start_read", "comfort_reads", "self_power"],
+};
+
+/** قوائم موصى بها حسب ذوق المستخدم */
+export function listsForGenre(genreId: string | null): CuratedList[] {
+  const ids = GENRE_TO_LIST[genreId || "other"] || GENRE_TO_LIST.other;
+  const out: CuratedList[] = [];
+  for (const id of ids) {
+    const l = getCuratedList(id);
+    if (l) out.push(l);
+  }
+  // fill with remaining lists so menu stays rich
+  for (const l of CURATED_LISTS) {
+    if (!out.find((x) => x.id === l.id)) out.push(l);
+  }
+  return out;
+}
+
+export function buildCuratedMenuForUser(genreId: string | null): string {
+  const lists = listsForGenre(genreId).slice(0, 14);
+  const top = lists.slice(0, 3);
+  const rest = lists.slice(3);
+  const topLines = top
+    .map((l, i) => `${i + 1}. ${l.emoji} *${escMd(l.title)}* — _موصى لك_`)
+    .join("\n");
+  const restLines = rest
+    .map((l) => `◦ ${l.emoji} ${escMd(l.title)}`)
+    .join("\n");
+  return (
+    `📖 *قوائم ${BOT_NAME} المختارة*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    (genreId
+      ? `_مرتّبة حسب ذوقك التقريبي._\n\n*لك أولاً:*\n${topLines}\n\n*المزيد:*\n${restLines}\n\n`
+      : `مجموعات منتقاة — اضغط قائمة ثم حمّل.\n\n` +
+        lists.map((l, i) => `${i + 1}. ${l.emoji} *${escMd(l.title)}*`).join("\n") +
+        `\n\n`) +
+    `_ليست إعلاناً · اختيارات للقراءة على مهل_`
+  );
+}
+
+export function kbCuratedMenuForUser(genreId: string | null): TelegramBot.InlineKeyboardMarkup {
+  const lists = listsForGenre(genreId).slice(0, 14);
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+  for (let i = 0; i < lists.length; i += 2) {
+    const a = lists[i];
+    const row: TelegramBot.InlineKeyboardButton[] = [
+      {
+        text: `${a.emoji} ${a.title.slice(0, 18)}`,
+        callback_data: `clist:${a.id}`,
+      },
+    ];
+    if (lists[i + 1]) {
+      const b = lists[i + 1];
+      row.push({
+        text: `${b.emoji} ${b.title.slice(0, 18)}`,
+        callback_data: `clist:${b.id}`,
+      });
+    }
+    rows.push(row);
+  }
+  rows.push([{ text: "🏠  الرئيسية", callback_data: "main_menu" }]);
+  return { inline_keyboard: rows };
+}
+
+/** 3 كتب سريعة من قوائم مرتبطة بذوق */
+export function sampleBooksForGenre(genreId: string, limit = 3): string[] {
+  const lists = listsForGenre(genreId);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const l of lists) {
+    for (const b of l.books) {
+      const k = b.trim();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
 }

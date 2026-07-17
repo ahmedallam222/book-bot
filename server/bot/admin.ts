@@ -13,7 +13,7 @@ import {
 import { getImageGenStats } from "./imageGen.js";
 import {
   buildAdminHomeMessage, buildAdminLiveMessage, buildAdminRetentionMessage,
-  buildAdminMonthMessage, buildAdminImagesMessage, adminPanelKeyboard,
+  buildAdminMonthMessage, buildAdminImagesMessage, buildAdminLibraryTasteMessage, adminPanelKeyboard,
 } from "./adminDashboard.js";
 import {
   handleControlCallback, handleControlPendingText, kbUserControl,
@@ -155,11 +155,17 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
-  const [retentionBlock, interestLine, weekLine, lastBook] = await Promise.all([
+  const [retentionBlock, interestLine, weekLine, lastBook, libCount] = await Promise.all([
     buildRetentionProfileBlock(userId).catch(() => ""),
     buildInterestProfileLine(userId).catch(() => ""),
     buildPersonalWeekProfileLine(userId).catch(() => ""),
     getLastBook(userId).catch(() => null),
+    (async () => {
+      try {
+        const { getLibrary } = await import("./library.js");
+        return (await getLibrary(userId, 80)).length;
+      } catch { return 0; }
+    })(),
   ]);
 
   return (
@@ -171,13 +177,14 @@ export async function buildProfileMessage(userId: string, name: string): Promise
     `${premBlock}${refBlock}\n\n` +
     (interestLine ? `${interestLine}\n` : "") +
     (weekLine ? `${weekLine}\n` : "") +
+    (libCount ? `📚 *مكتبتي:* ${libCount} عنواناً · /library\n` : "") +
     (lastBook ? `🕯 *آخر كتاب:* «${escMd(lastBook)}» · /continue\n` : "") +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
     `*أوامر سريعة:*\n` +
-    `◦ /daily — سجّل حضورك اليوم\n` +
-    `◦ /myweek — تقرير أسبوعك\n` +
-    `◦ /stats — كم تحميلاً يتبقّى لك اليوم\n` +
+    `◦ /daily — حضور · /library — مكتبتي\n` +
+    `◦ /myweek · /mymonth · /history\n` +
+    `◦ /taste — ذوقك · /stats — رصيدك\n` +
     `◦ /invite — ادعُ صديقاً`
   );
 }
@@ -242,12 +249,15 @@ export async function handleAdminPendingAction(
 // ── عرض تفاصيل مستخدم بـ ID ──────────────────
 async function showUserDetail(bot: TelegramBot, chatId: number, targetId: string): Promise<void> {
   try {
-    const [prem, limit, dlCount, history, expiry] = await Promise.all([
+    const [prem, limit, dlCount, history, expiry, libItems, interests, lastBook] = await Promise.all([
       isPremium(targetId),
       getUserDailyLimit(targetId),
       storage.getDailyDownloadCount(targetId).catch(() => 0),
       storage.getUserSearchHistory(targetId, 5).catch(() => [] as { query: string; createdAt: Date | null }[]),
       getPremiumExpiry(targetId),
+      (async () => { try { const { getLibrary } = await import("./library.js"); return await getLibrary(targetId, 8); } catch { return []; } })(),
+      (async () => { try { const { getTopInterests } = await import("./interests.js"); return await getTopInterests(targetId, 3); } catch { return []; } })(),
+      (async () => { try { const { getLastBook } = await import("./library.js"); return await getLastBook(targetId); } catch { return null; } })(),
     ]);
 
     const premLabel  = prem
@@ -265,8 +275,13 @@ async function showUserDetail(bot: TelegramBot, chatId: number, targetId: string
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
       `◦ نوع الحساب: *${premLabel}*\n` +
       `◦ الحد اليومي: *${limitLabel}*\n` +
-      `◦ حمّل اليوم: *${dlCount}*\n\n` +
-      `*آخر الكتب:*\n${histLines}`,
+      `◦ حمّل اليوم: *${dlCount}*\n` +
+      (lastBook ? `◦ آخر كتاب: _${escMd(String(lastBook).slice(0, 40))}_\n` : "") +
+      `◦ مكتبة: *${(libItems as any[]).length}* عنوان\n` +
+      (interests && (interests as any[]).length
+        ? `◦ ذوق: ${(interests as any[]).map((x: any) => x.label).join(" · ")}\n`
+        : "") +
+      `\n*آخر الكتب:*\n${histLines}`,
       {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [
@@ -509,7 +524,19 @@ export async function handleAdminCallback(
         break;
       }
 
-      case "admin_retention": {
+            case "admin_lib_taste": {
+        const text = await buildAdminLibraryTasteMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_lib_taste" },
+            { text: "🔙 اللوحة", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+case "admin_retention": {
         const text = await buildAdminRetentionMessage();
         await bot.sendMessage(chatId, text, {
           parse_mode: "Markdown",
@@ -882,25 +909,65 @@ export async function buildHistoryMessage(
   bot: TelegramBot, chatId: number, userId: string
 ): Promise<void> {
   try {
-    const history = await storage.getUserSearchHistory(userId, 7);
+    const history = await storage.getUserSearchHistory(userId, 10);
     if (!history.length) {
       await bot.sendMessage(chatId,
-        `📚 *سجل كتبك*\n\n_لم تطلب أي كتاب بعد!_\n\nابحث عن كتاب وسيظهر هنا.`,
-        { parse_mode: "Markdown" }
+        `📚 *سجلّك في رفيق*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `_لم تطلب أي كتاب بعد._\n\n` +
+        `اكتب عنواناً في المحادثة، أو جرّب:\n` +
+        `◦ /today — كتاب اليوم\n` +
+        `◦ /lists — قوائم مختارة\n` +
+        `◦ /random — مفاجأة`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "📖  كتاب اليوم", callback_data: "botd:show" },
+                { text: "🎲  مفاجأة", callback_data: "rg:any" },
+              ],
+              [{ text: "🏠  الرئيسية", callback_data: "main_menu" }],
+            ],
+          },
+        },
       ).catch(() => {});
       return;
     }
-    const lines = history.map((h, i) =>
-      `${i + 1}\\. _${escMd(h.query.slice(0, 55))}_`
-    ).join("\n");
+
+    // unique titles preserving order
+    const seen = new Set<string>();
+    const titles: string[] = [];
+    for (const h of history) {
+      const q = (h.query || "").trim();
+      if (!q || seen.has(q.toLowerCase())) continue;
+      seen.add(q.toLowerCase());
+      titles.push(q);
+      if (titles.length >= 8) break;
+    }
+
+    const lines = titles
+      .map((q, i) => `${i + 1}. _${escMd(q.slice(0, 55))}_`)
+      .join("\n");
+
+    const rows: TelegramBot.InlineKeyboardButton[][] = [];
+    for (const q of titles.slice(0, 6)) {
+      const { storeRetryKey } = await import("./session.js");
+      const k = storeRetryKey(q);
+      const label = q.length > 28 ? q.slice(0, 27) + "…" : q;
+      rows.push([{ text: `📥  ${label}`, callback_data: `retry:${k}` }]);
+    }
+    rows.push([
+      { text: "📚  مكتبتي", callback_data: "my_library" },
+      { text: "🏠  الرئيسية", callback_data: "main_menu" },
+    ]);
+
     await bot.sendMessage(chatId,
-      `📚 *آخر كتبك*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[
-          { text: "🏠 القائمة", callback_data: "main_menu" },
-        ]]},
-      }
+      `📚 *آخر طلباتك*\n` +
+      `━━━━━━━━━━━━━━━━\n\n` +
+      `${lines}\n\n` +
+      `_اضغط عنواناً لإعادة البحث والتحميل._`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } },
     ).catch(() => {});
   } catch (e) {
     L.error("admin", `buildHistoryMessage error`, { err: String(e).slice(0, 100) });

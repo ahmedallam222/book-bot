@@ -32,13 +32,13 @@ import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfD
 import { replyKeyboardMain } from "./replyKeyboard.js";
 import { completeOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
-import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge } from "./library.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge, exportLibraryText } from "./library.js";
 import { togglePref, isPrefKey, buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
-import { answerMicro, skipMicro } from "./microHabit.js";
+import { answerMicro, skipMicro, buildMicroMessage } from "./microHabit.js";
 import { voteClubBook } from "./groupClub.js";
 import { buildShareCardMessage, kbShareCard } from "./shareCard.js";
 import { sendPersonalMonthReport } from "./personalMonth.js";
-import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries } from "./curated.js";
+import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries, buildCuratedMenuForUser, kbCuratedMenuForUser } from "./curated.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
@@ -383,21 +383,40 @@ export function registerCallbackHandler(
     // ── switch ────────────────────────────────────
 
     // ── onboarding genre pick ──
+    if (data === "onb_restart") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { buildOnboardingMessage, kbOnboarding, buildTasteResetMessage } = await import("./onboarding.js");
+        const name = query.from.first_name || "صديقي";
+        await bot.sendMessage(
+          chatId,
+          buildTasteResetMessage() + "\n\nاختر مجالاً:",
+          { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "onb_restart failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
     if (data.startsWith("onb:")) {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       const genre = data.slice(4) || "skip";
       try {
-        const text = await completeOnboarding(userId, genre === "skip" ? "skip" : genre);
+        const res = await completeOnboarding(userId, genre === "skip" ? "skip" : genre);
+        const text = res.text;
+        const kb = res.kb;
         if (query.message?.message_id) {
           await bot.editMessageText(text, {
             chat_id: chatId,
             message_id: query.message.message_id,
             parse_mode: "Markdown",
+            reply_markup: kb,
           }).catch(async () => {
-            await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+            await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
           });
         } else {
-          await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+          await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
         }
       } catch (e) {
         L.error("cb", "onb failed", { err: String(e).slice(0, 100) });
@@ -438,6 +457,66 @@ export function registerCallbackHandler(
     }
 
 
+
+    // ── micro habit (كان import بلا handler — إصلاح) ──
+    if (data === "micro_open") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { text, kb } = buildMicroMessage();
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "micro_open failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+    if (data === "micro:skip" || data.startsWith("micro:")) {
+      try {
+        if (data === "micro:skip" || data === "micro:skip:x") {
+          const msg = await skipMicro(userId);
+          await bot.answerCallbackQuery(query.id, { text: "حسناً" }).catch(() => {});
+          if (query.message?.message_id) {
+            await bot.editMessageText(msg, {
+              chat_id: chatId,
+              message_id: query.message.message_id,
+              parse_mode: "Markdown",
+            }).catch(async () => {
+              await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" }).catch(() => {});
+            });
+          }
+          return;
+        }
+        const parts = data.split(":");
+        const qid = parts[1] || "";
+        const oid = parts[2] || "";
+        const msg = await answerMicro(userId, qid, oid);
+        await bot.answerCallbackQuery(query.id, { text: "+5" }).catch(() => {});
+        if (query.message?.message_id) {
+          await bot.editMessageText(msg, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "Markdown",
+          }).catch(async () => {
+            await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" }).catch(() => {});
+          });
+        }
+      } catch (e) {
+        L.error("cb", "micro failed", { err: String(e).slice(0, 80) });
+        await bot.answerCallbackQuery(query.id, { text: "تعذّر" }).catch(() => {});
+      }
+      return;
+    }
+    if (data === "lib_export") {
+      try {
+        const body = await exportLibraryText(userId, 30);
+        await bot.sendMessage(chatId, body).catch(() => {});
+        await bot.answerCallbackQuery(query.id, { text: "📋 أُرسلت القائمة" }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_export failed", { err: String(e).slice(0, 80) });
+        await bot.answerCallbackQuery(query.id, { text: "تعذّر" }).catch(() => {});
+      }
+      return;
+    }
+
     // ── library / curated ──
     if (data.startsWith("share:")) {
       await bot.answerCallbackQuery(query.id).catch(() => {});
@@ -475,7 +554,66 @@ export function registerCallbackHandler(
       }
       return;
     }
-    if (data === "my_library") {
+    
+    
+    if (data.startsWith("lib_done:")) {
+      await bot.answerCallbackQuery(query.id, { text: "✅ أنهيتُه" }).catch(() => {});
+      try {
+        const key = data.slice("lib_done:".length);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة.").catch(() => {});
+          return;
+        }
+        const { setLibStatus } = await import("./library.js");
+        await setLibStatus(userId, title, "done");
+        await bot.sendMessage(
+          chatId,
+          `✅ *أحسنت — سُجّل أنهيتُه*\n«${title.slice(0, 60)}»\n\n_مكتبتك: /library_`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_done failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+if (data.startsWith("lib_reading:")) {
+      await bot.answerCallbackQuery(query.id, { text: "📖 أقرؤه" }).catch(() => {});
+      try {
+        const key = data.slice("lib_reading:".length);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة — افتح مكتبتي.").catch(() => {});
+          return;
+        }
+        const { setLibStatus } = await import("./library.js");
+        await setLibStatus(userId, title, "reading");
+        await bot.sendMessage(
+          chatId,
+          `📖 *سُجّل في مكتبتي: أقرؤه*\n«${title.slice(0, 60)}»\n\n_/library لعرض المكتبة_`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_reading failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+    if (data === "my_history") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { buildHistoryMessage } = await import("./admin.js");
+        await buildHistoryMessage(bot, chatId, userId);
+      } catch (e) {
+        L.error("cb", "my_history failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+if (data === "my_library") {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       try {
         const text = await buildLibraryMessage(userId);
@@ -522,9 +660,17 @@ export function registerCallbackHandler(
     }
     if (data === "curated_menu") {
       await bot.answerCallbackQuery(query.id).catch(() => {});
-      await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
-        parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
-      }).catch(() => {});
+      try {
+        const { getPrimaryGenre } = await import("./interests.js");
+        const g = await getPrimaryGenre(userId);
+        await bot.sendMessage(chatId, buildCuratedMenuForUser(g), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenuForUser(g),
+        }).catch(() => {});
+      } catch {
+        await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
+        }).catch(() => {});
+      }
       return;
     }
     if (data.startsWith("clist:")) {

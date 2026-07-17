@@ -182,13 +182,13 @@ export async function handleBookRequest(
   const isBannedUser = (bannedResult?.[1] as number) === 1 ||
     BANNED_USERS.has(userId);
   if (isBannedUser) {
-    await bot.sendMessage(chatId, `🚫 تم حظرك من استخدام هذا البوت.`).catch(() => {});
+    await bot.sendMessage(chatId, `🚫 تم حظرك من استخدام رفيق.`).catch(() => {});
     return;
   }
 
   // ── Maintenance ───────────────────────────────
   if ((maintenanceResult?.[1] as string) === "1" && !isAdmin(userId)) {
-    await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`, { parse_mode: "Markdown" }).catch(() => {});
+    await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً! ⏳`, { parse_mode: "Markdown" }).catch(() => {});
     return;
   }
 
@@ -264,12 +264,19 @@ export async function handleBookRequest(
   const pos    = result.position ?? 1;
   const isHighPriority = priority === "high"; // يشمل admins + premium
 
+  // SPEED UX: عند المركز 1 نختصر الرسالة (الطابور فاضي فعلياً)
+  const safeName = bookName.slice(0, 60).replace(/[_*`\[]/g, "");
+  const queueText = pos <= 1
+    ? (
+        `⏳ *بدأ البحث*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `📗 «${safeName}»\n` +
+        `_أجهّز الملف… ثوانٍ معدودة._`
+      )
+    : buildQueueAccepted(bookName, pos, isHighPriority);
   await bot.sendMessage(
     chatId,
-    buildQueueAccepted(bookName, pos, isHighPriority),
-    // BUG-4 FIX: كان يُرسَل بدون reply_markup → المستخدم لا يرى أزرار الإلغاء/الحالة inline
-    // kbQueued معرَّفة في keyboards.ts منذ البداية لكن لم تكن تُستخدَم أبداً هنا
-    // الآن: المستخدم يرى زر "إلغاء طلبي" و"حالة الطابور" مباشرة تحت رسالة القبول
+    queueText,
     { parse_mode: "Markdown", reply_markup: kbQueued(pos) }
   ).catch(() => {});
 
@@ -329,23 +336,15 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     ).catch(() => {});
   }
 
-  // FIX: msgId=0 آمن — editMsg وdeleteMsg كلاهما يتحققان من msgId قبل العمل
+  // SPEED: cache-first — لا نرسل رسالة تقدّم إن وُجد file_id جاهز
+  // يوفّر ~1-2 round-trip تيليجرام على أغلب الطلبات الشائعة.
   let msgId = 0;
-  // Typing indicator while we send the initial progress message —
-  // makes the bot feel responsive even before the first edit fires.
   bot.sendChatAction(chatId, "typing").catch(() => {});
-  try {
-    const qm = await bot.sendMessage(chatId, buildProgress(0, bookName), { parse_mode: "Markdown" });
-    msgId = qm.message_id;
-    armProgressWatchdog(token, chatId, msgId, 0, bookName);
-  } catch {}
-
   storage.getOrCreateUser(userId).catch(() => {});
 
   try {
     const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
-      await deleteMsg(token, chatId, msgId);
       if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_CACHE_HIT).catch(() => {});
       await trace.finish("sent_from_cache");
       trackFunnelOnce(job.id, {
@@ -356,17 +355,33 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
         sendSuccess:   true,
       });
       await sendAnnouncement(bot, chatId, userId);
-      // PR G — auto-summary trigger after cache hit. The
-      // sourceUrl is whatever the cached entry held (may be empty
-      // for legacy file_id-only cache); runSummaryFlow falls back
-      // to text-only providers when no PDF URL is available.
       if (job.wantsSummary) {
         const cachedEntry = await storage.getCachedBook(bookName).catch(() => null);
         await maybeAutoSummary(bot, chatId, userId, bookName, cachedEntry?.sourceUrl ?? undefined, true);
       }
       return;
     }
-    const fullSearchResult = await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
+
+    // Cache miss — أظهر التقدّم ثم ابحث
+    bot.sendChatAction(chatId, "typing").catch(() => {});
+    try {
+      const qm = await bot.sendMessage(chatId, buildProgress(0, bookName), { parse_mode: "Markdown" });
+      msgId = qm.message_id;
+      armProgressWatchdog(token, chatId, msgId, 0, bookName);
+    } catch {}
+
+    // typing pulse during long search (non-blocking)
+    const typingPulse = setInterval(() => {
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+    }, 4000);
+    typingPulse.unref?.();
+
+    let fullSearchResult: { sent: boolean; sourceUrl?: string };
+    try {
+      fullSearchResult = await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
+    } finally {
+      clearInterval(typingPulse);
+    }
     await sendAnnouncement(bot, chatId, userId);
     if (job.wantsSummary && fullSearchResult?.sent) {
       await maybeAutoSummary(bot, chatId, userId, bookName, fullSearchResult.sourceUrl, true);
@@ -464,16 +479,16 @@ async function serveFromCache(
   trace: RequestTrace
 ): Promise<boolean> {
   // BUG-7 FIX: await A || await B ينتظر A كاملاً قبل B — نُشغّل الاثنين بالتوازي
+  // SPEED: always parallel dual-key lookup (raw + normalized)
   const normalizedName = normalizeForCache(bookName);
   let cached: Awaited<ReturnType<typeof storage.getCachedBook>>;
-  if (normalizedName === bookName) {
-    cached = await storage.getCachedBook(bookName).catch(() => null);
-  } else {
-    const [a, b] = await Promise.all([
-      storage.getCachedBook(bookName).catch(() => null),
-      storage.getCachedBook(normalizedName).catch(() => null),
-    ]);
-    cached = a ?? b;
+  {
+    const keys = normalizedName === bookName
+      ? [bookName]
+      : [bookName, normalizedName];
+    // also try canonicalize path if storage supports same key as normalize
+    const looks = await Promise.all(keys.map((k) => storage.getCachedBook(k).catch(() => null)));
+    cached = looks.find(Boolean) ?? null;
   }
   if (!cached) return false;
 
@@ -1517,10 +1532,15 @@ _حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُ
     isPrem,
   });
   if (related.length > 0) {
-    const seriesNote = series.length > 0 ? "سلسلة مقترحة · " : "";
+    const seriesNote = series.length > 0 ? "سلسلة · " : "";
+    const rlines = related
+      .map((t, i) => `  ${i + 1}. ${t.replace(/[_*`\[]/g, "").slice(0, 48)}`)
+      .join("\n");
     msg += `
 
-✨ *${seriesNote}قد يعجبك — اضغط الزر*`;
+✨ *${seriesNote}قد يعجبك:*
+${rlines}
+_اضغط الزر أدناه للتحميل_`;
   }
   const tipPlain = tip.replace(/[_*`\[]/g, "").slice(0, 120);
   if (tipPlain) msg += `

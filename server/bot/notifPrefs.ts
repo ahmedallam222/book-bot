@@ -10,16 +10,17 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { escMd } from "./text.js";
 
-export type PrefKey = "morning" | "evening" | "sunday" | "club";
+export type PrefKey = "morning" | "evening" | "sunday" | "club" | "continue";
 
 const KEY = (uid: string) => `ret:pref:${uid}`;
-const ALL: PrefKey[] = ["morning", "evening", "sunday", "club"];
+const ALL: PrefKey[] = ["morning", "evening", "sunday", "club", "continue"];
 
 const LABELS: Record<PrefKey, string> = {
   morning: "رسالة الصباح",
   evening: "تذكير المساء",
   sunday:  "تقرير الأحد",
   club:    "همسات نادي الجروب",
+  continue: "تذكير أكمل قراءتك",
 };
 
 export async function getPref(userId: string, key: PrefKey): Promise<boolean> {

@@ -30,6 +30,7 @@ export function buildHelpMessage(): string {
 
     `📚 *مكتبتك الشخصية*\n` +
     `◦ \`/library\` أو زر «مكتبتي» — كل ما حمّلته\n` +
+    `◦ \`/history\` — آخر طلباتك مع إعادة تحميل\n` +
     `◦ \`/continue\` — أكمل من آخر كتاب\n` +
     `◦ \`/lists\` — قوائم · \`/share\` — بطاقة مشاركة\n` +
     `◦ \`/prefs\` — تفضيلات الإشعارات\n` +
@@ -56,6 +57,12 @@ export function buildHelpMessage(): string {
 
     `📖 *9) كتاب اليوم*\n` +
     `◦ زر «كتاب اليوم» أو \`/today\` — اقتراح يومي اختياري\n\n` +
+
+    `🕊 *لحظة يومية*\n` +
+    `◦ \`/pulse\` أو زر «لحظة» — سؤال خفيف اختياري + نقاط\n\n` +
+
+    `🎭 *ذوقك*\n` +
+    `◦ \`/taste\` — غيّر اهتماماتك واحصل على قوائم أقرب لك\n\n` +
 
     `👥 *10) نادي المجموعات*\n` +
     `◦ في المجموعة: اكتب العنوان مباشرةً\n` +
@@ -91,6 +98,10 @@ export function kbHelp(): { inline_keyboard: { text: string; callback_data: stri
         { text: "📖  قوائم", callback_data: "curated_menu" },
       ],
       [
+        { text: "🕊  لحظة", callback_data: "micro_open" },
+        { text: "📅  شهري", callback_data: "my_month" },
+      ],
+      [
         { text: "⭐  Premium", callback_data: "premium_buy" },
         { text: "🏠  الرئيسية", callback_data: "main_menu" },
       ],
@@ -103,7 +114,11 @@ export function kbAfterDaily(): { inline_keyboard: { text: string; callback_data
     inline_keyboard: [
       [
         { text: "🎲  كتاب مفاجأة", callback_data: "rg:any" },
-        { text: "🔍  ابحث عن كتاب", callback_data: "new_search" },
+        { text: "📖  كتاب اليوم", callback_data: "botd:show" },
+      ],
+      [
+        { text: "📚  مكتبتي", callback_data: "my_library" },
+        { text: "🕊  لحظة", callback_data: "micro_open" },
       ],
       [
         { text: "📊  أسبوعي", callback_data: "my_week" },
@@ -119,14 +134,18 @@ export function kbAfterProfile(): { inline_keyboard: { text: string; callback_da
     inline_keyboard: [
       [
         { text: "✅  سجّل حضورك", callback_data: "daily_quest" },
+        { text: "📚  مكتبتي", callback_data: "my_library" },
+      ],
+      [
+        { text: "📜  سجلّي", callback_data: "my_history" },
         { text: "📊  أسبوعي", callback_data: "my_week" },
       ],
       [
-        { text: "📊  رصيدي اليوم", callback_data: "my_stats" },
+        { text: "🎭  ذوقي", callback_data: "onb_restart" },
         { text: "🎁  ادعُ صديقاً", callback_data: "invite_view" },
       ],
       [
-        { text: "🔍  ابحث", callback_data: "new_search" },
+        { text: "📊  رصيدي", callback_data: "my_stats" },
         { text: "🏠  الرئيسية", callback_data: "main_menu" },
       ],
     ],

@@ -221,5 +221,42 @@ export async function buildMemoryContext(userId: string): Promise<string> {
     }
   } catch { /* non-fatal */ }
 
+  // 3. Active multi-step plan (v3)
+  try {
+    const planRaw = await redis.get(`admin:agent:plan:${userId}`);
+    if (planRaw) {
+      const plan = JSON.parse(planRaw) as {
+        goal: string;
+        steps: { id: number; text: string; status: string }[];
+        notes?: string;
+      };
+      const stepLines = (plan.steps || [])
+        .map(s => `  ${s.id}. [${s.status}] ${s.text}`)
+        .join("\n");
+      parts.push(
+        `🎯 خطة الجلسة النشطة:\nالهدف: ${plan.goal}\n${stepLines}` +
+        (plan.notes ? `\nملاحظات: ${plan.notes}` : ""),
+      );
+    }
+  } catch { /* non-fatal */ }
+
+  
+  // 4. Open incidents (v4)
+  try {
+    const raw = await redis.lrange("admin:agent:incidents", 0, 12);
+    const open: string[] = [];
+    for (const r of raw) {
+      try {
+        const inc = JSON.parse(r) as { title?: string; status?: string; severity?: string };
+        if (inc && (inc.status === "open" || inc.status === "monitoring")) {
+          open.push(`• [${inc.severity || "?"}] ${inc.title || "?"}`);
+        }
+      } catch { /* */ }
+    }
+    if (open.length > 0) {
+      parts.push(`🚨 حوادث مفتوحة/قيد المراقبة:\n${open.slice(0, 6).join("\n")}`);
+    }
+  } catch { /* non-fatal */ }
+
   return parts.length > 0 ? "\n\n# ذاكرتك\n" + parts.join("\n\n") : "";
 }

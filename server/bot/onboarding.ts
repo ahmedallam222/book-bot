@@ -1,10 +1,18 @@
 // ══════════════════════════════════════════════
-// ONBOARDING — ترحيب خرافي باختيار ذوق (مرّة واحدة)
+// ONBOARDING — مسار ذكي (ذوق → 3 كتب للتجربة)
 // ══════════════════════════════════════════════
 
 import TelegramBot from "node-telegram-bot-api";
-import { isOnboarded, setInterestBoost, GENRE_LABELS } from "./interests.js";
+import {
+  isOnboarded,
+  setInterestBoost,
+  GENRE_LABELS,
+  getPrimaryGenre,
+} from "./interests.js";
 import { BOT_NAME } from "./brand.js";
+import { sampleBooksForGenre, listsForGenre } from "./curated.js";
+import { storeRetryKey } from "./session.js";
+import { redis } from "./redis.js";
 
 const GENRE_BUTTONS: { id: string; text: string }[] = [
   { id: "novel", text: "📖 روايات" },
@@ -18,12 +26,13 @@ const GENRE_BUTTONS: { id: string; text: string }[] = [
 ];
 
 export function buildOnboardingMessage(name: string): string {
+  const n = (name || "").trim() || "صديقي";
   return (
-    `🌟 *مرحباً ${name} — لنجعل ${BOT_NAME} يعرف ذوقك*\n` +
+    `🌟 *مرحباً ${n} — لنجعل ${BOT_NAME} يعرف ذوقك*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
-    `اختر *مجالاً تحبّه* (يمكنك تجاهل الرسالة):\n` +
-    `سأقترح لك كتباً أقرب إلى اهتمامك في «كتاب اليوم» والمفاجآت.\n\n` +
-    `_خطوة اختيارية · تستغرق ثانية واحدة._`
+    `*الخطوة 1 من 2:* اختر مجالاً تحبّه.\n` +
+    `سأقرّب «كتاب اليوم» والمفاجآت والقوائم من اهتمامك.\n\n` +
+    `_اختياري تماماً · ثانية واحدة · يمكنك التخطّي._`
   );
 }
 
@@ -49,25 +58,91 @@ export async function shouldShowOnboarding(userId: string): Promise<boolean> {
   return !(await isOnboarded(userId));
 }
 
+/** بعد اختيار الذوق — رسالة + أزرار 3 كتب + قائمة مرتبطة */
 export async function completeOnboarding(
   userId: string,
   genreId: string | "skip",
-): Promise<string> {
+): Promise<{ text: string; kb: TelegramBot.InlineKeyboardMarkup }> {
   if (genreId === "skip") {
     await setInterestBoost(userId, "other", 1);
-    return (
-      `حسناً 🌿\n` +
-      `_سأتعلّم ذوقك تدريجياً من الكتب التي تطلبها.\n` +
-      `اكتب عنوان أي كتاب الآن._`
-    );
+    try { const { redis } = await import("./redis.js"); await redis.incr("tel:onboard:complete"); } catch { /* */ }
+    return {
+      text:
+        `حسناً 🌿\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `سأتعلّم ذوقك تدريجياً من الكتب التي تطلبها.\n\n` +
+        `*ابدأ الآن:*\n` +
+        `◦ اكتب *عنوان كتاب* في المحادثة\n` +
+        `◦ أو جرّب «كتاب مفاجأة» / «قوائم»\n\n` +
+        `_يمكنك لاحقاً: /taste لتغيير الذوق._`,
+      kb: {
+        inline_keyboard: [
+          [
+            { text: "🎲  مفاجأة", callback_data: "rg:any" },
+            { text: "📖  قوائم", callback_data: "curated_menu" },
+          ],
+          [{ text: "🔍  ابحث", callback_data: "new_search" }],
+        ],
+      },
+    };
   }
+
   await setInterestBoost(userId, genreId, 8);
+  try { const { redis } = await import("./redis.js"); await redis.incr("tel:onboard:complete"); } catch { /* */ }
+  // remember last chosen genre for soft tips
+  try {
+    await redis.set(`ret:onb_genre:${userId}`, genreId, "EX", 400 * 86400);
+  } catch { /* */ }
+
   const label = GENRE_LABELS[genreId] || genreId;
-  return (
+  const samples = sampleBooksForGenre(genreId, 3);
+  const lists = listsForGenre(genreId).slice(0, 1);
+  const listId = lists[0]?.id;
+
+  const sampleLines = samples.length
+    ? samples.map((b, i) => `${i + 1}. «${b}»`).join("\n")
+    : "◦ اكتب أي عنوان تحبّه";
+
+  const text =
     `✨ *تم — ذوقك: ${label}*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
-    `سأقرّب إليك «كتاب اليوم» والمفاجآت من هذا المجال.\n` +
-    `يمكنك تغيير مسارك ببساطة عبر ما تحمّله لاحقاً.\n\n` +
-    `*ابدأ الآن:* اكتب عنوان كتاب، أو اضغط «كتاب مفاجأة».`
+    `*الخطوة 2:* جرّب أحد هذه العناوين (أو اكتب عنوانك):\n` +
+    `${sampleLines}\n\n` +
+    `سأقرّب «كتاب اليوم» والمفاجآت من هذا المجال.\n` +
+    `_غيّر ذوقك متى شئت: /taste_`;
+
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+  for (const b of samples) {
+    const k = storeRetryKey(b);
+    const labelB = b.length > 30 ? b.slice(0, 29) + "…" : b;
+    rows.push([{ text: `📥  ${labelB}`, callback_data: `retry:${k}` }]);
+  }
+  if (listId) {
+    rows.push([{ text: "📖  قائمة كاملة لهذا الذوق", callback_data: `clist:${listId}` }]);
+  }
+  rows.push([
+    { text: "🎲  مفاجأة", callback_data: "rg:any" },
+    { text: "📖  كل القوائم", callback_data: "curated_menu" },
+  ]);
+  rows.push([{ text: "🔄  غيّر الذوق", callback_data: "onb_restart" }]);
+
+  return { text, kb: { inline_keyboard: rows } };
+}
+
+/** إعادة فتح اختيار الذوق */
+export function buildTasteResetMessage(): string {
+  return (
+    `🎭 *تغيير الذوق — ${BOT_NAME}*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `اختر مجالاً جديداً وسأحدّث اقتراحاتك.\n` +
+    `_لا يُحذف تاريخ تحميلاتك._`
   );
+}
+
+export async function getOnboardingGenre(userId: string): Promise<string | null> {
+  try {
+    return (await redis.get(`ret:onb_genre:${userId}`)) || (await getPrimaryGenre(userId));
+  } catch {
+    return null;
+  }
 }

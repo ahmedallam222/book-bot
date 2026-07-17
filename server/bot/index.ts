@@ -10,6 +10,7 @@ import { startRetentionWorker } from "./retention.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
 import { startFailureRetryWorker }    from "./failureRetry.js";
 import { startAdminAgent }            from "./adminAgent/index.js";
+import { registerBotMenu }            from "./botMenu.js";
 import { storage }                    from "../storage.js";
 import { announceMaintenanceEnd }     from "./maintenanceAnnounce.js";
 import { listPremiumUsers }           from "./userSettings.js";
@@ -103,6 +104,7 @@ export async function startBot(): Promise<void> {
     _botUsername = me.username || "";
     _botId       = me.id;
     L.info("bot", `Bot started: @${_botUsername} (${_botId})`);
+    registerBotMenu(_bot).catch(() => {});
   } catch (e) {
     L.error("bot", `getMe failed: ${String(e).slice(0, 80)}`);
   }

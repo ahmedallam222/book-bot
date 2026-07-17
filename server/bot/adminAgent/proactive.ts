@@ -27,6 +27,8 @@ import {
   type SourceStat,
 } from "../analytics.js";
 import { getQueueStats } from "../queue.js";
+import { getDeliveryStats } from "../deliveryMetrics.js";
+import { cairoDateString } from "../text.js";
 
 // ── Thresholds ────────────────────────────────────────────
 
@@ -47,6 +49,10 @@ const THRESHOLDS = {
   CHECK_INTERVAL_MS:       60 * 60 * 1000,
   /** Delay before first check (ms). Let the bot stabilize. */
   INITIAL_DELAY_MS:        5 * 60 * 1000,
+  /** Alert if delivery p95 exceeds this (ms) with enough samples. */
+  DELIVERY_P95_MAX_MS:     120_000,
+  /** Min delivery samples before evaluating p95. */
+  MIN_DELIVERY_SAMPLES:    8,
 } as const;
 
 const ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h
@@ -202,6 +208,39 @@ async function runHealthCheck(): Promise<ProactiveAlert[]> {
           L.warn("proactive", `auto-pause failed for ${src.domain}: ${String(e).slice(0, 80)}`);
         }
       }
+    }
+
+    // ── 4. Delivery latency (v3) ──
+    try {
+      const day = cairoDateString();
+      const del = await getDeliveryStats(day);
+      if (
+        del.samples >= THRESHOLDS.MIN_DELIVERY_SAMPLES &&
+        del.p95Ms > THRESHOLDS.DELIVERY_P95_MAX_MS
+      ) {
+        alerts.push({
+          type: "delivery_slow", severity: "warning", ts,
+          message:
+            `تسليم بطيء اليوم — p95 *${(del.p95Ms / 1000).toFixed(1)}ث* ` +
+            `(حد ${(THRESHOLDS.DELIVERY_P95_MAX_MS / 1000).toFixed(0)}ث)\n` +
+            `نجاح تسليم: ${del.successRate}% · عينات: ${del.samples}`,
+          data: { p95Ms: del.p95Ms, p50Ms: del.p50Ms, successRate: del.successRate },
+        });
+      }
+      if (
+        del.samples >= THRESHOLDS.MIN_DELIVERY_SAMPLES &&
+        del.successRate < 50
+      ) {
+        alerts.push({
+          type: "delivery_low_success", severity: "warning", ts,
+          message:
+            `نسبة نجاح *التسليم* ${del.successRate}% (من outcomes) ` +
+            `— p50 ${(del.p50Ms / 1000).toFixed(1)}ث`,
+          data: { successRate: del.successRate, outcomes: del.outcomes },
+        });
+      }
+    } catch (e) {
+      L.warn("proactive", `delivery check failed: ${String(e).slice(0, 80)}`);
     }
 
     // ── Log the check ──

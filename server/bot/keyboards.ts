@@ -44,6 +44,9 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       ],
       [
         { text: "🔖  أمنياتي", callback_data: "wishlist_view" },
+        { text: "📜  سجلّي", callback_data: "my_history" },
+      ],
+      [
         { text: "📖  قوائم مختارة", callback_data: "curated_menu" },
       ],
       [
@@ -53,6 +56,10 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       [
         { text: "🎁  ادعُ صديقاً", callback_data: "invite_view" },
         { text: "⭐  Premium", callback_data: "premium_buy" },
+      ],
+      [
+        { text: "🕊  لحظة", callback_data: "micro_open" },
+        { text: "📅  شهري", callback_data: "my_month" },
       ],
       [
         { text: "❓  كيف أستخدم رفيق؟", callback_data: "help" },
@@ -85,6 +92,7 @@ export function kbAfterSuccess(
     ],
     [
       { text: "🔖  احفظه", callback_data: safeCb(`wishlist_add:${retryK}`) },
+      { text: "📖  أقرؤه", callback_data: safeCb(`lib_reading:${retryK}`) },
     ],
   ];
   for (const title of related) {

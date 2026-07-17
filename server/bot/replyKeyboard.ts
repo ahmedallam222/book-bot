@@ -21,6 +21,8 @@ import {
   getBookOfDay,
 } from "./bookOfDay.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { sendPersonalMonthReport } from "./personalMonth.js";
+import { buildMicroMessage } from "./microHabit.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildCuratedMenuMessage, kbCuratedMenu } from "./curated.js";
 import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
@@ -40,6 +42,9 @@ export const RK = {
   LISTS:    "📖 قوائم",
   CONTINUE: "▶️ أكمل رحلتي",
   PREFS:    "🔔 إشعارات",
+  PULSE:    "🕊 لحظة",
+  MYMONTH:  "📅 شهري",
+  HISTORY:  "📜 سجلّي",
   MENU:     "🏠 القائمة",
 } as const;
 
@@ -58,8 +63,9 @@ export function replyKeyboardMain(): TelegramBot.ReplyKeyboardMarkup {
       [{ text: RK.TODAY }, { text: RK.BALANCE }],
       [{ text: RK.LIBRARY }, { text: RK.CONTINUE }],
       [{ text: RK.LISTS }, { text: RK.MYWEEK }],
+      [{ text: RK.MYMONTH }, { text: RK.PULSE }],
       [{ text: RK.HELP }, { text: RK.PREFS }],
-      [{ text: RK.MENU }],
+      [{ text: RK.HISTORY }, { text: RK.MENU }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -119,6 +125,14 @@ export async function tryHandleReplyKeyboard(
         parse_mode: "Markdown",
         reply_markup: kbAfterDaily(),
       }).catch(() => {});
+      try {
+        const { redis } = await import("./redis.js");
+        const nudged = await redis.set(`ret:pulse_nudge:${userId}`, "1", "EX", 3 * 86400, "NX");
+        if (nudged === "OK" && res.message && !/سبق|مسجّل|سجّلت|Already/.test(res.message)) {
+          const { text, kb } = buildMicroMessage();
+          await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+        }
+      } catch { /* non-fatal */ }
       return true;
     }
 
@@ -137,10 +151,12 @@ export async function tryHandleReplyKeyboard(
     }
 
     case RK.TODAY: {
+      const { getBookOfDayForUser } = await import("./bookOfDay.js");
+      const { title } = await getBookOfDayForUser(userId);
       const body = await buildBookOfDayMessage(userId);
       await bot.sendMessage(chatId, body, {
         parse_mode: "Markdown",
-        reply_markup: kbBookOfDay(),
+        reply_markup: kbBookOfDay(title),
       }).catch(() => {});
       return true;
     }
@@ -180,11 +196,21 @@ export async function tryHandleReplyKeyboard(
       await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
       return true;
     }
-    case RK.LISTS:
-      await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
-        parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
-      });
+    case RK.LISTS: {
+      try {
+        const { getPrimaryGenre } = await import("./interests.js");
+        const { buildCuratedMenuForUser, kbCuratedMenuForUser } = await import("./curated.js");
+        const g = await getPrimaryGenre(userId);
+        await bot.sendMessage(chatId, buildCuratedMenuForUser(g), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenuForUser(g),
+        });
+      } catch {
+        await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
+        });
+      }
       return true;
+    }
 
     case RK.MYWEEK:
       await sendPersonalWeekReport(bot, chatId, userId);
@@ -194,6 +220,26 @@ export async function tryHandleReplyKeyboard(
       const text = await buildPrefsMessage(userId);
       const prefs = await getAllPrefs(userId);
       await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+      return true;
+    }
+
+    case RK.MYMONTH:
+      await sendPersonalMonthReport(bot, chatId, userId);
+      return true;
+
+    case RK.PULSE: {
+      const { text, kb } = buildMicroMessage();
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+      return true;
+    }
+
+    case RK.HISTORY: {
+      try {
+        const { buildHistoryMessage } = await import("./admin.js");
+        await buildHistoryMessage(bot, chatId, userId);
+      } catch {
+        await bot.sendMessage(chatId, "⚠️ تعذّر فتح السجل.").catch(() => {});
+      }
       return true;
     }
 

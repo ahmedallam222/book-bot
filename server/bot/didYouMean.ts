@@ -14,6 +14,8 @@ import { SUGGESTIONS, GENRE_MAP } from "./suggestions.js";
 import { storeRetryKey } from "./session.js";
 import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
 import { buildNoResults } from "./ui.js";
+import { sampleBooksForGenre } from "./curated.js";
+import { inferGenre } from "./interests.js";
 
 // أخطاء شائعة — منسوخة/موسَّعة من fuzzy.ts
 const COMMON_FIXES: Record<string, string> = {
@@ -52,6 +54,31 @@ const COMMON_FIXES: Record<string, string> = {
   "فن اللامبلاه": "فن اللامبالاة",
   "ارض زيكولا": "أرض زيكولا",
   "ارض زكولا": "أرض زيكولا",
+  "العادات الذريه": "العادات الذرية",
+  "عادات ذرية": "العادات الذرية",
+  "atomic habits": "العادات الذرية",
+  "الابق الغني": "الأب الغني والأب الفقير",
+  "الاب الغني": "الأب الغني والأب الفقير",
+  "سيكولوجيه المال": "سيكولوجية المال",
+  "psychology of money": "سيكولوجية المال",
+  "موسم الهجره": "موسم الهجرة إلى الشمال",
+  "موسم الهجرة": "موسم الهجرة إلى الشمال",
+  "اولاد حارتنا": "أولاد حارتنا",
+  "كليله ودمنه": "كليلة ودمنة",
+  "نهج البلاغه": "نهج البلاغة",
+  "لانك الله": "لأنك الله",
+  "deep work": "العمل العميق",
+  "العمل العميق": "العمل العميق",
+  "animal farm": "مزرعة الحيوان",
+  "مزرعة الحيوان": "مزرعة الحيوان",
+  "الاخوة كارامازوف": "الإخوة كارامازوف",
+  "الايام طه حسين": "الأيام",
+  "الحرافيش": "ملحمة الحرافيش",
+  "ملحمة الحرافيش": "ملحمة الحرافيش",
+  "بين القصرين": "بين القصرين",
+  "دعاء الكروان": "دعاء الكروان",
+  "في ظلال القرآن": "في ظلال القرآن",
+  "لا تحزن": "لا تحزن",
 };
 
 function cleanTitle(raw: string): string {
@@ -209,7 +236,13 @@ export async function buildDidYouMeanMessage(
   bookName: string,
   apologetic = false,
 ): Promise<{ text: string; suggestions: string[] }> {
-  const suggestions = await resolveDidYouMean(bookName, 4);
+  let suggestions = await resolveDidYouMean(bookName, 4);
+  if (suggestions.length < 3) {
+    for (const s of genreFallbackSuggestions(bookName, 4)) {
+      if (!suggestions.includes(s) && s !== bookName) suggestions.push(s);
+      if (suggestions.length >= 5) break;
+    }
+  }
   const base = buildNoResults(bookName, false, apologetic);
 
   if (suggestions.length === 0) {
@@ -233,4 +266,15 @@ export async function buildDidYouMeanMessage(
     `_اضغط الزر المطابق أدناه للبحث مباشرةً._`;
 
   return { text, suggestions };
+}
+
+
+/** اقتراحات من التصنيف المستنتج عند قلة النتائج */
+export function genreFallbackSuggestions(query: string, limit = 3): string[] {
+  try {
+    const g = inferGenre(query);
+    return sampleBooksForGenre(g === "other" ? "selfhelp" : g, limit);
+  } catch {
+    return [];
+  }
 }

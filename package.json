@@ -11,6 +11,8 @@
     "build":     "tsx script/build.ts",
     "start":     "node dist/index.cjs",
     "test":      "node script/run-tests.mjs",
+    "smoke":     "node script/smoke_rafiq.mjs",
+    "test:unit": "npx tsx tests/test-tool-helpers.mjs",
     "typecheck": "tsc --noEmit",
     "db:push":   "drizzle-kit push",
     "db:studio": "drizzle-kit studio"

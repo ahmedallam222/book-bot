@@ -41,6 +41,25 @@ function clean(t: string): string {
   return (t.split(/\s*[—–-]\s*/)[0] || t).trim().slice(0, 120);
 }
 
+
+/** SET: مستخدمون لديهم كتاب واحد على الأقل بحالة أقرؤه */
+export const READING_USERS_KEY = "lib:reading_users";
+
+export async function markUserHasReading(userId: string): Promise<void> {
+  try {
+    await redis.sadd(READING_USERS_KEY, userId);
+  } catch { /* */ }
+}
+
+export async function refreshReadingMembership(userId: string): Promise<void> {
+  try {
+    const st = await redis.hgetall(STKEY(userId));
+    const has = Object.values(st || {}).some((v) => v === "reading");
+    if (has) await redis.sadd(READING_USERS_KEY, userId);
+    else await redis.srem(READING_USERS_KEY, userId);
+  } catch { /* */ }
+}
+
 export async function recordLibraryDownload(
   userId: string,
   bookName: string,
@@ -52,7 +71,9 @@ export async function recordLibraryDownload(
   try {
     const pipe = redis.pipeline();
     pipe.zadd(ZKEY(userId), now, title);
-    pipe.hset(STKEY(userId), title, "have");
+    // إن لم تكن له حالة سابقة: "أقرؤه" — أقرب لنية التحميل
+    // (لا نكتب فوق reading/done/want)
+    pipe.hsetnx(STKEY(userId), title, "reading");
     pipe.set(LAST(userId), title, "EX", TTL);
     pipe.hset(
       META(userId),
@@ -67,6 +88,9 @@ export async function recordLibraryDownload(
     pipe.expire(STKEY(userId), TTL);
     pipe.expire(META(userId), TTL);
     await pipe.exec();
+    markUserHasReading(userId).catch(() => {});
+    redis.incr("tel:lib:record").catch(() => {});
+    redis.incr("tel:lib:status:reading").catch(() => {});
     // trim oldest beyond MAX_LIB
     const n = await redis.zcard(ZKEY(userId));
     if (n > MAX_LIB) {
@@ -118,10 +142,30 @@ export async function cycleLibStatus(
     const next = order[(idx + 1) % order.length];
     await redis.hset(STKEY(userId), title, next);
     await redis.expire(STKEY(userId), TTL);
+    redis.incr(`tel:lib:status:${next}`).catch(() => {});
+    refreshReadingMembership(userId).catch(() => {});
     return next;
   } catch {
     return "have";
   }
+}
+
+export async function setLibStatus(
+  userId: string,
+  title: string,
+  status: LibStatus,
+): Promise<void> {
+  const t = clean(title);
+  if (!t) return;
+  try {
+    await redis.hset(STKEY(userId), t, status);
+    await redis.expire(STKEY(userId), TTL);
+    // ensure it's in the zset
+    await redis.zadd(ZKEY(userId), Date.now(), t);
+    await redis.expire(ZKEY(userId), TTL);
+    redis.incr(`tel:lib:status:${status}`).catch(() => {});
+    refreshReadingMembership(userId).catch(() => {});
+  } catch { /* fail-open */ }
 }
 
 export function statusBadge(st: LibStatus): string {
@@ -154,30 +198,46 @@ export async function maybeBackfillLibrary(userId: string): Promise<number> {
   }
 }
 
-export async function buildLibraryMessage(userId: string): Promise<string> {
-  const added = await maybeBackfillLibrary(userId);
-  const items = await getLibrary(userId, 15);
+export async function buildLibraryMessage(userId: string, filter?: string): Promise<string> {
+  await maybeBackfillLibrary(userId);
+  let items = await getLibrary(userId, 40);
   const last = await getLastBook(userId);
+  const q = (filter || "").trim().toLowerCase();
+  if (q) {
+    items = items.filter((it) => it.title.toLowerCase().includes(q));
+  }
+  items = items.slice(0, 15);
 
   if (items.length === 0) {
+    if (q) {
+      return (
+        `📚 *مكتبتي — بحث*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `لا نتائج لـ «${escMd((filter || "").slice(0, 40))}».\n\n` +
+        `_جرّب كلمة أقصر أو افتح المكتبة بلا فلتر: /library_`
+      );
+    }
     return (
       `📚 *مكتبتي — ${BOT_NAME}*\n` +
       `━━━━━━━━━━━━━━━━\n\n` +
       `_فارغة بعد. حمّل أي كتاب وسيُحفظ هنا تلقائياً._\n\n` +
-      `*ماذا ستجد لاحقاً؟*\n` +
-      `◦ آخر كتبك مع حالة القراءة\n` +
-      `◦ زر «أكمل رحلتي» لآخر كتاب\n` +
+      `*ابدأ الآن:*\n` +
+      `◦ اكتب عنوان كتاب في المحادثة\n` +
+      `◦ أو «كتاب مفاجأة» / «كتاب اليوم»\n` +
+      `◦ أو /lists لقوائم جاهزة\n\n` +
+      `*لاحقًا ستجد:*\n` +
+      `◦ حالة القراءة (لديه / أقرؤه / أنهيت)\n` +
+      `◦ «أكمل رحلتي» لآخر كتاب\n` +
       `◦ إعادة التحميل بضغطة\n\n` +
-      `_اكتب عنوان كتاب للبدء._`
+      `_تلميح: /library كلمة_ للبحث داخل مكتبتك._`
     );
   }
 
-  let reading = 0,
-    done = 0,
-    have = 0;
+  let reading = 0, done = 0, have = 0, want = 0;
   for (const it of items) {
     if (it.status === "reading") reading++;
     else if (it.status === "done") done++;
+    else if (it.status === "want") want++;
     else have++;
   }
 
@@ -192,9 +252,12 @@ export async function buildLibraryMessage(userId: string): Promise<string> {
     `📚 *مكتبتي — ${BOT_NAME}*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
     (last ? `🕯 *آخر كتاب:* «${escMd(last)}»\n\n` : "") +
-    `📊 لديّ: *${have}* · أقرأ: *${reading}* · أنهيت: *${done}*\n\n` +
+    (q ? `🔎 فلتر: «${escMd((filter || "").slice(0, 40))}»\n\n` : "") +
+    `📊 لديّ: *${have}* · أقرأ: *${reading}* · أنهيت: *${done}*` +
+    (want ? ` · لاحقاً: *${want}*` : "") +
+    `\n\n` +
     `*آخر ${items.length} كتاباً:*\n${lines}\n\n` +
-    `_📥 تحميل · 🔄 غيّر الحالة · استخدم «أكمل رحلتي»_`
+    `_📥 تحميل · 🔄 غيّر الحالة · /library كلمة للبحث · /share للمشاركة_`
   );
 }
 
@@ -221,6 +284,10 @@ export async function kbLibrary(
   rows.push([
     { text: "▶️  أكمل رحلتي", callback_data: "lib_continue" },
     { text: "📖  قوائم مختارة", callback_data: "curated_menu" },
+  ]);
+  rows.push([
+    { text: "📋  انسخ قائمتي", callback_data: "lib_export" },
+    { text: "🕊  لحظة", callback_data: "micro_open" },
   ]);
   rows.push([{ text: "🏠  الرئيسية", callback_data: "main_menu" }]);
   return { inline_keyboard: rows };
@@ -290,4 +357,22 @@ export async function libraryTitleAt(
 ): Promise<string | null> {
   const items = await getLibrary(userId, 30);
   return items[index]?.title ?? null;
+}
+
+
+/** نص قابل للنسخ/المشاركة لقائمة المكتبة */
+export async function exportLibraryText(userId: string, limit = 25): Promise<string> {
+  await maybeBackfillLibrary(userId);
+  const items = await getLibrary(userId, limit);
+  if (items.length === 0) {
+    return `مكتبة فارغة بعد — حمّل كتاباً عبر ${BOT_NAME}.`;
+  }
+  const lines = items.map((it, i) => `${i + 1}. ${it.title} (${ST_LABEL[it.status]})`);
+  return (
+    `📚 مكتبتي في ${BOT_NAME}\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    lines.join("\n") +
+    `\n━━━━━━━━━━━━━━━━\n` +
+    `${items.length} كتاباً · اكتب العنوان في رفيق لإعادة التحميل`
+  );
 }
