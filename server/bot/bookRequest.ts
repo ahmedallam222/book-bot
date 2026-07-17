@@ -17,7 +17,10 @@ import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { isBlacklisted } from "./blacklist.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
+import { parseTelegramUrl } from "./telegramFallback.js";
 import { recordFailure, removeFailure, failureKey } from "./failureRetry.js";
+import { recordDelivery } from "./deliveryMetrics.js";
+import { lightNormalizeQuery } from "./queryNormalize.js";
 import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage, buildTooLargeMsg } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
@@ -140,6 +143,18 @@ export async function handleBookRequest(
       .get(`ulimit:${userId}`)
       .exec();
     if (pipelineRes) {
+  // Light dialect/typo normalize (conservative)
+  {
+    const normed = lightNormalizeQuery(bookName);
+    if (normed && normed !== bookName) {
+      L.info("bot", "query light-normalized", {
+        from: bookName.slice(0, 40), to: normed.slice(0, 40),
+      });
+      redis.incr("tel:query:light_normalized").catch(() => {});
+      bookName = normed;
+    }
+  }
+
       [bannedResult, maintenanceResult, premiumSetResult, premiumExpResult,
        premiumManualResult, limitOverrideResult] =
         pipelineRes as [Error|null, unknown][];
@@ -504,6 +519,7 @@ async function serveFromCache(
       // re-deliver the same book with an "وجدتُ الكتاب الآن" apology.
       removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
       await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
+      recordDelivery(Date.now() - t0, "ok_cache").catch(() => {});
       return true;
     } catch {
       L.warn("cache", `file_id expired for "${bookName}", trying sourceUrl`);
@@ -536,6 +552,7 @@ async function serveFromCache(
         // Clear any stale failure record — see comment on file_id path.
         removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
         await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
+      recordDelivery(Date.now() - t0, "ok_cache").catch(() => {});
         return true;
       }
     } catch (e) {
@@ -1213,18 +1230,29 @@ async function performFullSearch(
         // hit بيرسل الـ telegramFileId مباشرة بدون أيّ re-validation —
         // فلو كان غلط، يتسبب في "wrong-file delivered to many users"
         // (10 entries مسممة شُوهدت في production 2026-05-03).
+        // FIX-SPEED: cache file_id even for opaque Telegram/Hindawi URLs once
+        // pdfValidator has accepted the content for THIS book query. Skipping
+        // them forced multi-minute re-uploads on every request for bestsellers.
+        // Wrong-book risk is mitigated by: validation gate + isSuspectFile.
         const opaqueUrl = hasUninformativeFilename(pdfUrl);
-        if (sentFileId && !isSuspectFile && !opaqueUrl) {
+        if (sentFileId && !isSuspectFile) {
           storage.cacheBook({
             bookQuery: bookName, bookQueryNormalized: normalizeForCache(bookName),
             telegramFileId: sentFileId, fileName: `${bookName}.pdf`, bookName, sourceUrl: pdfUrl,
           }).catch(() => {});
-        } else if (sentFileId && opaqueUrl) {
-          redis.incr("tel:cache:opaque_url_skipped").catch(() => {});
-          L.info("cache", "Skipping cache write — opaque source URL (digit-only filename)", {
-            book: bookName.slice(0, 50),
-            url:  pdfUrl.slice(0, 80),
-          });
+          if (opaqueUrl) {
+            redis.incr("tel:cache:opaque_url_cached").catch(() => {});
+          }
+          // Instant re-send map for telegram channel messages
+          try {
+            const parsed = parseTelegramUrl(pdfUrl);
+            if (parsed && sentFileId) {
+              const fk = `tg:fid:${parsed.channelRef}:${parsed.msgId}`;
+              redis.setex(fk, 30 * 86400, sentFileId).catch(() => {});
+            }
+          } catch { /* optional */ }
+        } else if (sentFileId && isSuspectFile) {
+          redis.incr("tel:cache:suspect_skipped").catch(() => {});
         }
         Promise.all([
           storage.incrementDailyDownload(userId),
@@ -1257,6 +1285,7 @@ async function performFullSearch(
     const isSuspectFile = sentFilenameScore < 0.05;
 
     await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
+    recordDelivery(Date.now() - t0, "ok_send").catch(() => {});
     clearProgressWatchdog(msgId);
     if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_SUCCESS).catch(() => {});
     // Telemetry + Funnel
@@ -1288,6 +1317,7 @@ async function performFullSearch(
     // operators measure the impact of the download-cap mitigations.
     if (results.length > 0) {
       redis.incr("tel:dl:found_no_send").catch(() => {});
+      recordDelivery(Date.now() - t0, "fail_found_no_send").catch(() => {});
       L.warn("bot", "found_no_send — search returned results but no PDF was delivered", {
         book: bookName.slice(0, 50),
         results: results.length,
@@ -1354,7 +1384,7 @@ async function performFullSearch(
             validUrls.filter((u) => /^https?:\/\/t\.me\//i.test(u)).slice(0, 3),
           )
       : hasFallbackLinks
-        ? buildLinksOnly(bookName, validUrls)
+        ? buildLinksOnly(bookName, validUrls) + "\n\n_" + buildFoundNoSendHint({ domainCapHits, tooLargeHits, attempted: attemptedDownloads }) + "_"
         : buildNoResults(bookName, false, /* apologetic */ true);
 
     // Skip auto-retry if we have a *strong* paid-signal — those books
@@ -1388,6 +1418,28 @@ async function performFullSearch(
 }
 
 // ── Helpers ───────────────────────────────────
+
+
+function buildFoundNoSendHint(opts: {
+  domainCapHits: number;
+  tooLargeHits: number;
+  attempted: number;
+}): string {
+  const bits: string[] = [];
+  if (opts.tooLargeHits > 0) {
+    bits.push("بعض الملفات أكبر من حد تيليجرام للبوت (50MB)");
+  }
+  if (opts.domainCapHits > 0) {
+    bits.push("نتائج كثيرة من مصدر واحد كانت غير مطابقة للعنوان");
+  }
+  if (opts.attempted > 0) {
+    bits.push(`جرّبتُ ${opts.attempted} رابطاً موثوقاً`);
+  }
+  if (bits.length === 0) {
+    return "وجدتُ نتائج بحث لكن لم يمرّ أي PDF من فحوصات الجودة.";
+  }
+  return bits.join(" · ") + ".";
+}
 
 async function sendSuccessMessage(
   bot: TelegramBot, chatId: number, userId: string, dlCount: number, limit: number,

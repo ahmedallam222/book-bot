@@ -87,6 +87,8 @@ export interface FailedSearch {
   lastTs:        number;
   /** Retry count (0 on first record, bumped each pass). */
   attempts:      number;
+  /** URLs that already failed for this query — skip on retry. */
+  skippedUrls?:  string[];
 }
 
 export interface RetryPassResult {
@@ -300,6 +302,10 @@ async function retryOne(
 
   const verify = await findValidPdfUrls(allPdfUrls).catch(() => null);
   let validUrls: string[] = verify?.urls ?? [];
+  if (rec.skippedUrls?.length) {
+    const skip = new Set(rec.skippedUrls);
+    validUrls = validUrls.filter((u) => !skip.has(u));
+  }
 
   // Fallbacks: replicate the same chain bookRequest.ts uses so retries
   // see the same candidate set as a fresh search.

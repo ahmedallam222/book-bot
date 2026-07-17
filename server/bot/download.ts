@@ -1497,6 +1497,41 @@ async function telegramDownloadAndSend(
     return { ok: false };
   }
 
+  // FIX-SPEED: re-use bot file_id from a previous successful send of this
+  // channel message — skips multi-minute re-upload entirely.
+  try {
+    const fk = `tg:fid:${parsed.channelRef}:${parsed.msgId}`;
+    const cachedFid = await redis.get(fk);
+    if (cachedFid) {
+      try {
+        const sent = await bot.sendDocument(chatId, cachedFid, {
+          caption: buildCaption(bookName, searchResultTitle || ""),
+          parse_mode: "HTML",
+        });
+        L.info("download", "Instant file_id hit (telegram cache)", {
+          book: bookName.slice(0, 40),
+          channel: parsed.channelRef.slice(0, 30),
+          msgId: parsed.msgId,
+        });
+        redis.incr("tel:tg:fid_cache_hit").catch(() => {});
+        await recordUrlSuccess(pdfUrl);
+        return {
+          ok: true,
+          fileId: sent.document?.file_id || cachedFid,
+          sizeMB: "?",
+          sendMode: "local",
+        };
+      } catch (e) {
+        // file_id may be expired — drop and continue full path
+        redis.del(fk).catch(() => {});
+        redis.incr("tel:tg:fid_cache_stale").catch(() => {});
+        L.warn("download", "cached file_id stale — full download", {
+          err: String(e).slice(0, 80),
+        });
+      }
+    }
+  } catch { /* non-fatal */ }
+
   ensureTempDir();
   const tempPath = path.join(
     TEMP_DIR,
@@ -1595,9 +1630,13 @@ async function telegramDownloadAndSend(
     const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
     L.dlLocal(bookName, sizeMB, Date.now() - t0);
     await recordUrlSuccess(pdfUrl);
+    const cFid = (copied as any).document?.file_id;
+    if (cFid) {
+      redis.setex(`tg:fid:${parsed.channelRef}:${parsed.msgId}`, 30 * 86400, cFid).catch(() => {});
+    }
     return {
       ok: true,
-      fileId: (copied as any).document?.file_id,
+      fileId: cFid,
       sizeMB,
       sendMode: "local",
     };

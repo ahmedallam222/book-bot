@@ -69,6 +69,7 @@ export function kbAfterSuccess(
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
       { text: "📘  ملخّص ذكي",     callback_data: safeCb(`sum:${summaryK}`) },
+      { text: "🎲  كتاب عشوائي",   callback_data: "rg:any" },
     ],
     [
       { text: "🔍  كتاب آخر",     callback_data: "new_search" },

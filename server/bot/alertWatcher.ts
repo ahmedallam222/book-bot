@@ -9,6 +9,7 @@ import {
   FC_RATE_LIMITED_KEY,
   ADMIN_IDS,
 } from "./config.js";
+import { getDeliveryStats } from "./deliveryMetrics.js";
 
 // ══════════════════════════════════════════════
 // ALERT WATCHER — تنبيهات تلقائية للأدمن
@@ -17,25 +18,20 @@ import {
 //   • DLQ ≥ DLQ_ALERT_THRESHOLD        → تنبيه
 //   • نسبة النجاح < SUCCESS_THRESHOLD  → تنبيه
 //   • Firecrawl quota exceeded          → تنبيه (مرة واحدة/يوم)
+//   • Delivery p95 / success rate       → تنبيه
 //   • Daily digest at DAILY_DIGEST_HOUR_CAIRO → ملخص يومي للأدمن
 // ══════════════════════════════════════════════
 
 const DLQ_ALERT_THRESHOLD     = 20;
 const SUCCESS_ALERT_THRESHOLD = 50;
-// BUG-G FIX: كانت 10 — بهذا الحجم الصغير، إضافة فشل واحد تُغيّر النسبة بشكل كبير
-// (مثلاً: 10 محاولات، 6 نجاح = 60% → 7 فشل = 30% فجأة بسبب فشل واحد إضافي)
-// والتنبيه يُرسَل مرة واحدة/ساعة فيُزعج الأدمن دون سبب حقيقي.
-// الحل: رفع العتبة إلى 20 لأخذ عينة إحصائية أكثر موثوقية قبل التنبيه.
 const MIN_REQUESTS_TO_ALERT  = 20;
-const ALERT_COOLDOWN_SEC      = 3600; // ساعة بين كل تنبيه وآخر لنفس السبب
+const ALERT_COOLDOWN_SEC      = 3600;
 
 const LAST_DLQ_ALERT    = "alert:last:dlq";
 const LAST_SUCC_ALERT   = "alert:last:success";
 const LAST_FC_QUOTA_ALT = "alert:last:fc_quota";
 const LAST_FC_RATE_ALT  = "alert:last:fc_rate";
 
-// I2-style FIX: كانت getAdminIds() تُعيد تحليل env.ADMIN_IDS محلياً بـ parseInt() بدون validation
-// weekly.ts و guards.ts يستخدمان ADMIN_IDS من config — الآن alertWatcher موحَّد معهم
 async function sendToAdmins(bot: TelegramBot, text: string): Promise<void> {
   if (ADMIN_IDS.size === 0) {
     L.warn("alerts", "No ADMIN_IDS set — alert not sent");
@@ -49,8 +45,6 @@ async function sendToAdmins(bot: TelegramBot, text: string): Promise<void> {
 async function runCheck(bot: TelegramBot): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
 
-  // FIX-v10-B: كانت 4 await متسلسلة (4 × Redis round-trip في أسوأ حال)
-  // الآن: جلب كل البيانات الأساسية بالتوازي → وقت فحص أقل بكثير
   const [qs, stats, fcQuota, fcRate] = await Promise.all([
     getQueueStats().catch(() => ({ dlqSize: 0, highQueue: 0, normalQueue: 0, totalActiveJobs: 0 })),
     getDailyStats().catch(() => null),
@@ -60,10 +54,6 @@ async function runCheck(bot: TelegramBot): Promise<void> {
 
   // ── 1. فحص DLQ ────────────────────────────────
   if (qs.dlqSize >= DLQ_ALERT_THRESHOLD) {
-    // BUG-D FIX: كان GET → sendToAdmins → setex منفصلَين
-    // لو تأخّر runCheck أكثر من 5 دقائق وبدأت دورة جديدة قبل انتهائه:
-    //   كلا الاستدعاءَين يقرآن last=0 → كلاهما يُرسلان نفس التنبيه مرتين
-    // الحل: SET NX EX ذري — يكتب فقط إذا المفتاح غير موجود → واحد فقط ينجح
     const lockAcquired = await redis.set(LAST_DLQ_ALERT, String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
     if (lockAcquired === "OK") {
       await sendToAdmins(
@@ -77,9 +67,6 @@ async function runCheck(bot: TelegramBot): Promise<void> {
   }
 
   // ── 2. فحص نسبة النجاح ────────────────────────
-  // analytics.ts يكتب `requests` (إجمالي المحاولات) و`found` (وُجد كتاب)
-  // الكود السابق كان يقرأ `stats.success` و`stats.fail` — حقول غير موجودة
-  // → النسبة تكون NaN → التنبيه لا يُرسَل أبداً (Critical bug صامت).
   const requests = stats?.requests ?? 0;
   const found    = stats?.found    ?? 0;
   if (requests >= MIN_REQUESTS_TO_ALERT) {
@@ -116,17 +103,13 @@ async function runCheck(bot: TelegramBot): Promise<void> {
     }
   }
 
-  // ── 4. Daily digest (gated on Cairo hour + 23h SET-NX lock) ──
-  // Runs at most once per day; cheap no-op outside the configured hour.
-  // Errors are logged but don't break the rest of runCheck.
+  // ── 4. Daily digest ───────────────────────────
   await runDailyDigest(bot).catch((e) =>
     L.error("alerts", "Daily digest error", { err: String(e).slice(0, 100) }),
   );
 
   // ── 5. فحص Firecrawl rate limit ───────────────
   if (fcRate) {
-    // cooldown أقصر لأن rate limit مؤقت (120 ثانية) — تنبيه كل 10 دقائق كافٍ
-    // IMP-6 FIX: TTL=700 > cooldown(600s) → منع تنبيهات مكررة عند انتهاء الـ key قبل الـ cooldown
     const lockAcquired = await redis.set(LAST_FC_RATE_ALT, String(now), "EX", 700, "NX").catch(() => null);
     if (lockAcquired === "OK") {
       const sinceMs  = Date.now() - parseInt(fcRate, 10);
@@ -142,13 +125,41 @@ async function runCheck(bot: TelegramBot): Promise<void> {
       L.warn("alerts", "Firecrawl rate-limit alert sent to admins");
     }
   }
+
+  // ── 6. Delivery latency p95 + success (new metrics) ──
+  try {
+    const ds = await getDeliveryStats();
+    if (ds.samples >= 15 && ds.p95Ms > 90_000) {
+      const lock = await redis.set("alert:last:latency_p95", String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
+      if (lock === "OK") {
+        await sendToAdmins(
+          bot,
+          `⏱ *تنبيه: بطء التسليم*\n\n` +
+          `p95 = *${(ds.p95Ms / 1000).toFixed(1)}ث* (عتبة 90ث)\n` +
+          `p50 = ${(ds.p50Ms / 1000).toFixed(1)}ث · نجاح ${ds.successRate}% · عينات ${ds.samples}\n` +
+          `_/ops_delivery للتفاصيل_`,
+        );
+        L.warn("alerts", "latency p95 alert", { p95: ds.p95Ms, samples: ds.samples });
+      }
+    }
+    if (ds.samples >= 20 && ds.successRate > 0 && ds.successRate < 55) {
+      const lock = await redis.set("alert:last:delivery_success", String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
+      if (lock === "OK") {
+        await sendToAdmins(
+          bot,
+          `📉 *تنبيه: انخفاض نجاح التسليم*\n\n` +
+          `نسبة النجاح اليوم: *${ds.successRate}%*\n` +
+          `found_no_send: ${ds.outcomes.fail_found_no_send || 0} · no_results: ${ds.outcomes.fail_no_results || 0}`,
+        );
+      }
+    }
+  } catch { /* metrics optional */ }
 }
 
 /** يُستدعى مرة واحدة عند بدء البوت */
 export function startAlertWatcher(bot: TelegramBot): void {
-  const INTERVAL = 5 * 60 * 1000; // كل 5 دقائق
+  const INTERVAL = 5 * 60 * 1000;
 
-  // انتظر دقيقتين بعد البدء قبل أول فحص (يسمح لـ Redis بالاستقرار)
   setTimeout(() => {
     runCheck(bot).catch(() => {});
     setInterval(() => {

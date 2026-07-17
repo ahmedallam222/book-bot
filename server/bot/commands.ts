@@ -19,6 +19,12 @@ import { storage } from "../storage.js";
 import { escMd, normalizeArabic, buildResetTime } from "./text.js";
 import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
+import {
+  allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
+  isFreeTextGroup,
+} from "./groupPolicy.js";
+import { lightNormalizeQuery } from "./queryNormalize.js";
+import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
 import { storeRetryKey } from "./session.js";
 import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, GROUP_FREE_TEXT_CHAT_IDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
@@ -690,6 +696,30 @@ export function registerCommands(
     }
   });
 
+
+  // Ops: delivery latency p50/p95
+  bot.onText(/^\/ops_delivery(?:@\w+)?$/, async (msg) => {
+    const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) return;
+    const stats = await getDeliveryStats();
+    await bot.sendMessage(msg.chat.id, formatDeliveryStatsArabic(stats), { parse_mode: "Markdown" }).catch(() => {});
+  });
+
+
+  // Welcome when bot is added to free-text groups
+  bot.on("my_chat_member", async (upd) => {
+    try {
+      const chat = upd.chat;
+      if (!chat || (chat.type !== "group" && chat.type !== "supergroup")) return;
+      const ns = upd.new_chat_member?.status;
+      if (ns === "member" || ns === "administrator") {
+        await maybeSendGroupWelcome(bot, chat.id, true);
+      }
+    } catch (e) {
+      L.warn("commands", "my_chat_member welcome failed", { err: String(e).slice(0, 80) });
+    }
+  });
+
 } // ← إغلاق registerCommands
 
 // ══════════════════════════════════════════════
@@ -795,7 +825,22 @@ export function registerMessageHandler(
           redis.incr("tel:group:free_text_hit").catch(() => {});
         }
       }
-      if (!bookName) return;
+      if (!bookName) {
+        // Soft tip (rate-limited) so members learn free-text mode
+        if (isFreeTextGroup(chatId) && text.length >= 2) {
+          maybeSoftNotBookReply(bot, chatId, userId, msg.message_id).catch(() => {});
+        }
+        return;
+      }
+      const gate = await allowGroupBookRequest(chatId, userId);
+      if (!gate.ok) {
+        await bot.sendMessage(
+          chatId,
+          `⏳ *تمهل قليلاً* — وصلتَ لحد الطلبات في المجموعة.\nجرّب بعد ${Math.ceil(gate.retryAfterSec / 60)} دقائق.`,
+          { parse_mode: "Markdown", reply_to_message_id: msg.message_id, allow_sending_without_reply: true } as any,
+        ).catch(() => {});
+        return;
+      }
     } else {
       bookName = text;
     }
@@ -850,6 +895,7 @@ export function registerMessageHandler(
     }
 
     if (!finalBookName || finalBookName.trim().length < 2) return;
+    finalBookName = lightNormalizeQuery(finalBookName) || finalBookName;
 
     await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
   });

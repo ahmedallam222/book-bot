@@ -99,7 +99,7 @@ const TIPS_FREE = [
   "🎲 _جرّب /random لكتاب مفاجأة يناسب ذوقك_",
   "🔖 _/wishlist يحفظ ما تريد قراءته لاحقاً_",
   "📅 _/weekly — أكثر الكتب تحميلاً هذا الأسبوع_",
-  "👥 _في المجموعات: بوت + اسم الكتاب_",
+  "👥 _في المجموعات: اكتب اسم الكتاب مباشرة_",
   "⚡ _الكتب المحفوظة سابقاً تصلك في ثوانٍ_",
   "🌍 _أبحث في مكتبات عربية متعدّدة معاً_",
   "🎯 _اكتب العنوان فقط — بلا «رواية» أو «pdf»_",
@@ -190,11 +190,15 @@ export function buildSuccessMsg(
   const streakPart = streakLine ? `\n${streakLine}` : "";
   const title = escMd(bookName.slice(0, 52));
 
+  const premHint = (!isPrem && remaining <= 2 && limit > 0)
+    ? `\n\n⭐ *Premium:* ${PREMIUM_LIMIT} تحميلاً/يوم · أولوية طابور · بـ ${PREMIUM_STARS_PRICE} Stars — /premium`
+    : (isPrem ? `\n\n⭐ _Premium نشط — أولوية و${limit} تحميلاً/يوم_` : "");
+
   return (
     `${tagline}${premBadge}\n` +
     `${DIV}\n` +
     `📗  _«${title}»_${sizeStr}${cacheStr}\n\n` +
-    `${balanceLine}${streakPart}${personality}`
+    `${balanceLine}${streakPart}${personality}${premHint}`
   );
 }
 
@@ -218,7 +222,7 @@ export function buildNoResults(
     `◦ العنوان الرئيسي فقط\n` +
     `◦ أضف اسم المؤلف بعده\n` +
     `◦ راجع الإملاء والتشكيل\n\n` +
-    `_بعض الكتب مدفوعة أو غير منشورة رقمياً._`
+    `_بعض الكتب مدفوعة أو غير منشورة رقمياً — أو لم تمرّ فحوصات جودة الملف._`
   );
 }
 
