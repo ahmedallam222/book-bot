@@ -47,20 +47,20 @@ export function buildWelcome(
 
   if (isFirstTime) {
     return (
-      `🌿 *مرحباً… أنا رفيق*\n` +
+      `🌿 *أهلاً ${escMd(name)} — أنا رفيق*\n` +
       `${DIV}\n` +
-      `أهلاً *${escMd(name)}* — رفيقك في عالم الكتب.\n\n` +
-      `*ابدأ في 3 ثوانٍ:*\n` +
-      `① اكتب اسم أي كتاب\n` +
-      `② انتظر البحث الذكي\n` +
-      `③ استلم ملف PDF جاهزاً\n\n` +
-      `*اختصارات مفيدة:*\n` +
-      `◦ /random — كتاب مفاجأة\n` +
-      `◦ /wishlist — قائمة أمنيات\n` +
-      `◦ /help — الدليل الكامل\n\n` +
+      `أساعدك تجيب *كتب PDF* بسهولة.\n\n` +
+      `*ابدأ دلوقتي:*\n` +
+      `① اكتب *اسم الكتاب* في الشات\n` +
+      `② استنى ثواني وأنا بدوّر\n` +
+      `③ يوصلك الملف جاهز للقراءة\n\n` +
+      `*أزرار مهمة:*\n` +
+      `◦ ✅ سجّل حضورك — مرة في اليوم (اختياري)\n` +
+      `◦ 🎲 كتاب مفاجأة — لو مش عارف تطلب إيه\n` +
+      `◦ ❓ كيف أستخدم رفيق؟ — شرح بسيط\n\n` +
       `${balanceLine}\n` +
-      `🌍 *${sourceCount}* مصدراً عربياً تحت أمرك\n\n` +
-      `_اكتب عنواناً متى شئت… بلا استعجال._ 📖`
+      `🌍 أدور في *${sourceCount}* مصدر عربي\n\n` +
+      `_جرّب: اكتب عنوان أي كتاب تحبه._ 📖`
     );
   }
 
@@ -68,8 +68,10 @@ export function buildWelcome(
     `📚 *أهلاً ${escMd(name)}${premBadge}*\n` +
     `${DIV}\n` +
     `${balanceLine}\n` +
-    `🌍 *${sourceCount}* مصدراً عربياً جاهزاً\n\n` +
-    `_اكتب اسم الكتاب — ودع الباقي على رفيق._ ✨`
+    `🌍 أدور لك في *${sourceCount}* مصدر\n\n` +
+    `*عايز كتاب؟* اكتب اسمه في الشات.\n` +
+    `*مش متأكد؟* اضغط «كتاب مفاجأة» أو «كيف أستخدم رفيق؟».\n\n` +
+    `_رفيق جاهز._ ✨`
   );
 }
 
@@ -98,11 +100,11 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       streak.active >= 14 ? "🔥🔥🔥" :
       streak.active >= 7  ? "🔥🔥" :
       "🔥";
-    streakBlock = `${fire} *السلسلة:* ${streak.active} يوم${streak.max > streak.active ? ` _(أعلى: ${streak.max})_` : ""}`;
+    streakBlock = `${fire} *أيام النشاط المتتالية:* ${streak.active}${streak.max > streak.active ? ` _(أطول: ${streak.max})_` : ""}`;
   } else if (streak.max > 0) {
-    streakBlock = `🔥 *السلسلة:* ابدأ اليوم! _(أعلاك: ${streak.max} يوم)_`;
+    streakBlock = `🔥 *أيام النشاط:* ابدأ من جديد _(أطول سلسلة سابقة: ${streak.max})_`;
   } else {
-    streakBlock = `🔥 *السلسلة:* ابدأ اليوم — حمّل كتاباً وافتح أول milestone!`;
+    streakBlock = `🔥 *أيام النشاط المتتالية:* لسه ما بدأت — سجّل حضورك أو حمّل كتاباً متى حابب`;
   }
 
   // ── Premium block ──
@@ -121,7 +123,7 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   // ── Badges block ──
   let badgesBlock: string;
   if (badges.length === 0) {
-    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— حمّل كتباً واصنع سلسلة لفتحها_`;
+    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— هتتفتح تدريجياً وأنت بتستخدم رفيق_`;
   } else {
     // FIX (PR #103): escMd على اسم كل شارة. الأسماء الحالية كلها نظيفة،
     // لكن أي شارة جديدة فيها `_` أو `*` كانت ستكسر `/profile` بنفس
@@ -142,14 +144,18 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   const retentionBlock = await buildRetentionProfileBlock(userId).catch(() => "");
 
   return (
-    `👤 *ملفك — ${escMd(name)}*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-    `📥 *إجمالي التحميلات:* ${totalDl}\n` +
+    `👤 *ملفي الشخصي — ${escMd(name)}*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `هنا ملخص حسابك في رفيق:\n\n` +
+    `📥 *كتب حمّلتها (كل الوقت):* ${totalDl}\n` +
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
-    `_/daily للمهمة اليومية · /invite للدعوة · /stats للحد_`
+    `*أوامر سريعة:*\n` +
+    `◦ /daily — سجّل حضورك اليوم\n` +
+    `◦ /stats — كام تحميل فاضلك النهارده\n` +
+    `◦ /invite — ادعُ صديقاً`
   );
 }
 

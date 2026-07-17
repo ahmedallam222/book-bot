@@ -240,7 +240,7 @@ export const PERSONALITY_LINES: readonly string[] = [
 export const PERSONALITY_LINE_CHANCE = 28;
 
 export const SUCCESS_CTAS: readonly string[] = [
-  "👇 _جرّب «ملخّص ذكي» أو احفظه في الأمنيات_",
+  "👇 _الخطوة الجاية: ملخّص سريع أو احفظه في الأمنيات_",
   "👇 _الملخص يختصر عليك ساعات… بضغطة_",
   "👇 _احفظه الآن، واقرأه لاحقاً براحة_",
   "👇 _ماذا بعد؟ ملخص · أمنية · كتاب آخر_",
@@ -251,7 +251,7 @@ export const SUCCESS_CTAS: readonly string[] = [
 ] as const;
 
 export const SUCCESS_FOOTERS: readonly string[] = [
-  "✨ _رفيق — ابحث · اقرأ · لخّص_",
+  "✨ _رفيق: اكتب اسم الكتاب… واستلم PDF_",
   "📚 _رفيقك بين الصفحات داخل تيليجرام_",
   "🪄 _من البحث إلى الملف… في محادثة واحدة_",
   "🌙 _قراءة هادئة — رفيق هنا إن احتجت_",

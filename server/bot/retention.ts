@@ -114,36 +114,36 @@ function questMeta(type: QuestType): { title: string; description: string; targe
   switch (type) {
     case "checkin":
       return {
-        title: "وجودك يكفي",
-        description: "سجّل حضورك من /daily — بلا أي تحميل مطلوب",
+        title: "سجّل حضورك",
+        description: "اضغط الزر أو /daily — مجرد فتح البوت اليوم. مش محتاج تحمّل كتاب",
         target: 1,
         optional: false,
       };
     case "explore_random":
       return {
-        title: "لفتة اكتشاف",
-        description: "اختياري: جرّب /random مرة — لو حابب فقط",
+        title: "اكتشف كتاباً (اختياري)",
+        description: "لو حابب فقط: اضغط «كتاب مفاجأة» أو اكتب /random",
         target: 1,
         optional: true,
       };
     case "summary_soft":
       return {
-        title: "لمحة سريعة",
-        description: "اختياري: اطلب ملخّصاً لكتاب يهمّك",
+        title: "ملخّص كتاب (اختياري)",
+        description: "لو حابب فقط: بعد تحميل كتاب اضغط «ملخّص سريع»",
         target: 1,
         optional: true,
       };
     case "image_soft":
       return {
-        title: "لمسة إبداع",
-        description: "اختياري: /img بوصف بسيط لصورة",
+        title: "صورة بالذكاء (اختياري)",
+        description: "لو حابب فقط: اكتب /img ثم وصف الصورة",
         target: 1,
         optional: true,
       };
     case "curious_touch":
       return {
-        title: "فضول خفيف",
-        description: "اختياري: أي لمسة — بحث، مفاجأة، ملخص، أو صورة",
+        title: "أي نشاط بسيط (اختياري)",
+        description: "لو حابب فقط: ابحث عن كتاب أو جرب مفاجأة أو ملخص أو صورة",
         target: 1,
         optional: true,
       };
@@ -384,11 +384,11 @@ async function maybeComebackBonus(userId: string): Promise<string | null> {
     await addXp(userId, XP.COMEBACK);
     redis.incr("tel:retention:comeback").catch(() => {});
     return (
-      `🌿 *فرحتُ بعودتك*\n` +
-      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_غبتَ ${daysAway} أيام — وهذا طبيعي._\n` +
-      `🎁 +${XP.COMEBACK} XP ترحيباً هادئاً.\n` +
-      `_مفيش فوات… ${BOT_NAME} لسه هنا._`
+      `🌿 *أهلاً بعودتك*\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `غبت حوالي *${daysAway}* يوم — وده عادي تماماً.\n` +
+      `🎁 +${XP.COMEBACK} نقطة ترحيب.\n` +
+      `_مفيش حاجة ضاعت. اكتب اسم كتاب متى حابب._`
     );
   } catch {
     return null;
@@ -490,30 +490,71 @@ export function buildDailyStatusMessage(
   alreadyClaimed: boolean,
 ): string {
   const bar = questProgressBar(quest.progress, quest.target);
+
+  const header =
+    `✅ *تسجيل الحضور*
+` +
+    `━━━━━━━━━━━━━━━━
+
+`;
+
   const claimLine = alreadyClaimed
-    ? `✅ _سجّلتُ حضورك اليوم — كفاية وجميل_`
-    : `🌿 *+${XP.DAILY_CLAIM} XP* — مرحباً… حضورك اليوم وصل.`;
+    ? `سجّلتَ حضورك *اليوم* بالفعل. شكراً لرجوعك 🌿
+`
+    : `تم تسجيل حضورك اليوم (+${XP.DAILY_CLAIM} نقطة).
+` +
+      `_يعني: فتحت رفيق النهارده — مش مطلوب تحمّل كتب._
+`;
 
-  const optNote = quest.optional
-    ? `_لفتة اختيارية — مش مطلوبة للإحساس بالإنجاز_`
-    : `_حضورك وحده يكفي — بلا تحميل إجباري_`;
+  const how =
+    `
+*يعني إيه «النقاط» و«المستوى»؟*
+` +
+    `◦ النقاط تزيد لما تستخدم رفيق (حضور · تحميل · ملخص…)
+` +
+    `◦ المستوى يرتفع كل ما تجمع نقاط — للتسلية فقط
+`;
 
-  const tip = RETENTION_TIPS[Math.floor(Math.random() * RETENTION_TIPS.length)];
-
-  return (
-    `☀️ *يومك مع ${BOT_NAME}*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-    `${claimLine}\n\n` +
-    `🌱 *لفتة اليوم — ${escMd(quest.title)}*\n` +
-    `_${escMd(quest.description)}_\n` +
+  const bonus =
+    `
+*مكافأة اختيارية اليوم*
+` +
+    `🎯 ${escMd(quest.title)}
+` +
+    `_${escMd(quest.description)}_
+` +
     `${bar}  ${quest.progress}/${quest.target}` +
-    (quest.done ? ` ✅` : ``) +
-    `\n_إن أحببت الإتمام: +${quest.rewardXp} XP_\n` +
-    `${optNote}\n\n` +
-    `⭐ *المستوى ${xp.level}* · ${xp.xp} XP\n` +
-    `_يتبقّى ${xp.remaining} للمستوى التالي_\n\n` +
-    `💬 _${escMd(tip)}_`
-  );
+    (quest.done ? ` ✅ خلصت` : ``) +
+    `
+` +
+    (quest.done
+      ? `_أحسنت — لو حابب: +${quest.rewardXp} نقطة اتحسبوا._
+`
+      : (quest.optional
+          ? `_اختياري 100% — تقدر تتجاهله ومفيش مشكلة._
+`
+          : `_حضورُك من الرسالة دي يكفي._
+`));
+
+  const level =
+    `
+📊 *مستواك:* ${xp.level}  ·  النقاط: ${xp.xp}
+` +
+    `_باقي ${xp.remaining} نقطة للمستوى اللي بعده_
+`;
+
+  const next =
+    `
+*تقدر تعمل دلوقتي:*
+` +
+    `◦ اكتب اسم كتاب
+` +
+    `◦ أو اضغط «كتاب مفاجأة»
+` +
+    `◦ أو افتح «ملفي» تشوف تقدمك
+`;
+
+  return header + claimLine + how + bonus + level + next;
 }
 
 function questProgressBar(cur: number, max: number): string {
@@ -524,19 +565,26 @@ function questProgressBar(cur: number, max: number): string {
 
 export function buildQuestCompleteMessage(quest: DailyQuest): string {
   return (
-    `🌱 *لفتة لطيفة اكتملت*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-    `✅ ${escMd(quest.title)}\n` +
-    `🎁 +${quest.rewardXp} XP\n\n` +
-    `_من غير ضغط… وغدًا لفتة جديدة إن أحببت._`
+    `🎉 *خلّصت المكافأة الاختيارية*
+` +
+    `━━━━━━━━━━━━━━━━
+` +
+    `✅ ${escMd(quest.title)}
+` +
+    `🎁 +${quest.rewardXp} نقطة
+
+` +
+    `_تمام كده. بكرة فيه حاجة جديدة لو حابب — من غير ضغط._`
   );
 }
 
 export function buildLevelUpMessage(level: number): string {
   return (
-    `🌟 *ارتقيت بهدوء للمستوى ${level}*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-    `_مش سباق — نمو هادئ مع ${BOT_NAME}._`
+    `🌟 *مبروك — وصلت للمستوى ${level}*
+` +
+    `━━━━━━━━━━━━━━━━
+` +
+    `_ده مستوى داخل رفيق عشان المتعة، مش امتحان. كمّل على راحتك._`
   );
 }
 
@@ -549,13 +597,21 @@ export async function buildRetentionProfileBlock(userId: string): Promise<string
   ]);
   const vs = parseInt(vStreak || "0", 10) || 0;
   const qBar = questProgressBar(quest.progress, quest.target);
+  const claimToday = (await redis.get(DAILY_CLAIM(userId, cairoDateString())).catch(() => null)) === "1";
   return (
-    `⭐ *المستوى ${xp.level}* · ${xp.xp} XP _(يتبقّى ${xp.remaining})_\n` +
-    `🌱 *لفتة اليوم:* ${escMd(quest.title)} ${qBar} ${quest.progress}/${quest.target}` +
+    `📈 *تقدمك في رفيق*
+` +
+    `◦ المستوى: *${xp.level}*  ·  النقاط: *${xp.xp}* _(باقي ${xp.remaining} للتالي)_
+` +
+    `◦ حضور اليوم: ${claimToday ? "✅ مسجّل" : "⬜ لسه — من زر «سجّل حضورك»"}
+` +
+    `◦ مكافأة اختيارية: ${escMd(quest.title)} ${qBar} ${quest.progress}/${quest.target}` +
     (quest.done ? " ✅" : "") +
-    (vs > 1 ? `\n📅 أيام مع ${BOT_NAME}: ${vs}` : "") +
-    `\n🛡️ درع السلسلة: ${shield ? "متاح هذا الأسبوع" : "استُخدم هذا الأسبوع"}\n` +
-    `_/daily — حضور يومي دافئ_`
+    (vs > 1 ? `
+◦ أيام رجوع متتالية: *${vs}*` : "") +
+    `
+◦ حماية السلسلة هذا الأسبوع: ${shield ? "متاحة" : "استُخدمت"}
+`
   );
 }
 
@@ -622,10 +678,13 @@ async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
 
       const note = pickNote(WARM_DAILY_NOTES, `${day}:${uid}`);
       const text =
-        `🕊 *${BOT_NAME}*\n` +
-        `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-        `_${escMd(note)}_\n\n` +
-        `☀️ /daily · 🎲 /random · أو اكتب عنوان كتاب`;
+        `🕊 *رسالة من ${BOT_NAME}*\n` +
+        `━━━━━━━━━━━━━━━━\n` +
+        `${escMd(note)}\n\n` +
+        `*تقدر:*\n` +
+        `◦ تكتب اسم كتاب\n` +
+        `◦ أو تسجّل حضورك: /daily\n` +
+        `◦ أو تتجاهل الرسالة عادي`;
 
       try {
         await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown" });
@@ -678,11 +737,11 @@ async function sendGentleEveningNotes(bot: TelegramBot): Promise<void> {
 
         const note = pickNote(WARM_EVENING_NOTES, `${day}:${uid}:eve`);
         const text =
-          `🌙 *${BOT_NAME} · مساء هادئ*\n` +
-          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-          `_${escMd(note)}_\n\n` +
-          (cur >= 3 ? `🕯 _أيامك المتتالية: ${cur} — لو حابب تحافظ عليها بلطف: /daily_\n\n` : "") +
-          `لا ضغط. أنا هنا لو احتجتني.`;
+          `🌙 *مساء الخير من ${BOT_NAME}*\n` +
+          `━━━━━━━━━━━━━━━━\n` +
+          `${escMd(note)}\n\n` +
+          (cur >= 3 ? `لديك *${cur}* أيام نشاط متتالية. لو حابب تحافظ عليها: اكتب /daily أو اضغط «سجّل حضورك».\n\n` : "") +
+          `_مش مطلوب تحميل. تجاهل الرسالة براحتك._`;
 
         try {
           await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown" });
@@ -703,12 +762,12 @@ async function sendGentleEveningNotes(bot: TelegramBot): Promise<void> {
 
 // ── Tips ──────────────────────────────────────
 export const RETENTION_TIPS = [
-  "وجودك يكفي. التحميل لما تحتاجه فعلاً.",
-  "عادة صغيرة أهدأ من اندفاع يوم ثم صمت طويل.",
-  "الاكتشاف(/random) للفضول — مش للحصص.",
-  "الملخص يوفر وقتاً… لو حابب فقط.",
-  "الدرع الأسبوعي يحمي السلسلة بلطف لو غبت يوماً.",
-  "دعوة صديق = مشاركة رفيق، مش سباق.",
-  "بعض الأيام للقراءة، وبعضها للراحة. الاتنين مقبولين.",
-  "رفيق مش بيحسب عليك — بيرافقك.",
+  "«سجّل حضورك» = فتحت البوت اليوم. مش معناه لازم تحمّل كتاب.",
+  "اكتب اسم الكتاب في الشات… رفيق يدور ويبعت PDF.",
+  "«كتاب مفاجأة» يختار لك عنواناً عشوائياً — للفضول فقط.",
+  "بعد التحميل: «ملخّص سريع» يوفّر وقتك لو حابب.",
+  "ملفي = مكان تشوف تحميلاتك ومستواك وشاراتك.",
+  "رصيدي اليوم = كام كتاب لسه تقدر تحمّلهم النهارده.",
+  "بعض الأيام للقراءة وبعضها للراحة — الاتنين تمام عند رفيق.",
+  "دعوة صديق من «ادعُ صديقاً» ممكن تديك أيام Premium.",
 ] as const;

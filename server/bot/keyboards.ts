@@ -5,7 +5,7 @@ import { storeRetryKey, storeFeedbackUrl, storeSummaryKey } from "./session.js";
 import { DIV, DIV_SOFT } from "./ui.js";
 
 // ══════════════════════════════════════════════════════════════
-// KEYBOARDS — رفيق v8
+// KEYBOARDS — رفيق v9 (وضوح أولاً)
 // ──────────────────────────────────────────────────────────────
 // فلسفة:
 //   • الصف الأول = الفعل الأكثر احتمالاً
@@ -26,36 +26,32 @@ function safeCb(data: string): string {
 export function kbMain(): TelegramBot.InlineKeyboardMarkup {
   return {
     inline_keyboard: [
-      // Core actions
       [
-        { text: "🔍  ابحث عن كتاب",   callback_data: "new_search" },
-        { text: "🎲  كتاب مفاجأة",     callback_data: "rg:any"     },
-      ],
-      // Discover
-      [
-        { text: "🏆  الأكثر تحميلاً",  callback_data: "top_books"      },
-        { text: "📅  أفضل الأسبوع",    callback_data: "weekly_refresh" },
-      ],
-      // Me
-      [
-        { text: "👤  ملفي",            callback_data: "my_profile"  },
-        { text: "☀️  يوم رفيق",         callback_data: "daily_quest" },
+        { text: "🔍  ابحث عن كتاب", callback_data: "new_search" },
+        { text: "🎲  كتاب مفاجأة", callback_data: "rg:any" },
       ],
       [
-        { text: "📚  سجلّي",           callback_data: "my_history"  },
+        { text: "✅  سجّل حضورك", callback_data: "daily_quest" },
+        { text: "👤  ملفي", callback_data: "my_profile" },
       ],
       [
-        { text: "🔖  أمنياتي",         callback_data: "wishlist_view" },
-        { text: "🎁  ادعُ صديقاً",      callback_data: "invite_view"   },
+        { text: "📊  رصيدي اليوم", callback_data: "my_stats" },
+        { text: "📚  آخر تحميلاتي", callback_data: "my_history" },
       ],
-      // Create
       [
-        { text: "🎨  صورة AI",         callback_data: "img_gen"   }
+        { text: "🔖  أمنياتي", callback_data: "wishlist_view" },
+        { text: "🏆  الأكثر طلباً", callback_data: "top_books" },
       ],
-      // Premium + help
       [
-        { text: "⭐  Premium",         callback_data: "premium_buy" },
-        { text: "❓  مساعدة",          callback_data: "help"        },
+        { text: "📅  هذا الأسبوع", callback_data: "weekly_refresh" },
+        { text: "🎨  اصنع صورة", callback_data: "img_gen" },
+      ],
+      [
+        { text: "🎁  ادعُ صديقاً", callback_data: "invite_view" },
+        { text: "⭐  Premium", callback_data: "premium_buy" },
+      ],
+      [
+        { text: "❓  كيف أستخدم رفيق؟", callback_data: "help" },
       ],
     ],
   };
@@ -78,11 +74,11 @@ export function kbAfterSuccess(
   //  nav: premium (free) or profile + home
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
-      { text: "📘  ملخّص ذكي", callback_data: safeCb(`sum:${summaryK}`) },
-      { text: "🔖  احفظه",     callback_data: safeCb(`wishlist_add:${retryK}`) },
+      { text: "📘  ملخّص سريع", callback_data: safeCb(`sum:${summaryK}`) },
+      { text: "🔖  احفظه عندي",     callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
     [
-      { text: "🔍  كتاب آخر", callback_data: "new_search" },
+      { text: "🔍  كتاب تاني", callback_data: "new_search" },
       { text: "🎲  مفاجأة",   callback_data: "rg:any" },
     ],
   ];
@@ -90,12 +86,12 @@ export function kbAfterSuccess(
   if (sourceUrl) {
     const fbKey = storeFeedbackUrl(sourceUrl, bookName);
     rows.push([
-      { text: "⚠️  الملف غير مطابق؟", callback_data: safeCb(`bad_file:${fbKey}`) },
-      { text: "🔁  أعد الإرسال",      callback_data: safeCb(`retry:${retryK}`) },
+      { text: "⚠️  مش الكتاب ده؟", callback_data: safeCb(`bad_file:${fbKey}`) },
+      { text: "🔁  ابعت الملف تاني",      callback_data: safeCb(`retry:${retryK}`) },
     ]);
   } else {
     rows.push([
-      { text: "🔁  أعد الإرسال", callback_data: safeCb(`retry:${retryK}`) },
+      { text: "🔁  ابعت الملف تاني", callback_data: safeCb(`retry:${retryK}`) },
     ]);
   }
 
@@ -136,12 +132,12 @@ export function kbAfterFail(
   }
 
   rows.push([
-    { text: "🔄  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
-    { text: "🔍  بحث جديد",      callback_data: "new_search"               },
+    { text: "🔁  حاول تاني",  callback_data: safeCb(`retry:${retryK}`) },
+    { text: "🔍  عنوان مختلف",      callback_data: "new_search"               },
   ]);
   rows.push([
     { text: "🎲  مفاجأة",        callback_data: "rg:any"    },
-    { text: "🏠  القائمة",       callback_data: "main_menu" },
+    { text: "🏠  الرئيسية",       callback_data: "main_menu" },
   ]);
   return { inline_keyboard: rows };
 }
@@ -152,15 +148,15 @@ export function kbNoResults(bookName: string): TelegramBot.InlineKeyboardMarkup 
   return {
     inline_keyboard: [
       [
-        { text: "🔄  أعد المحاولة",  callback_data: safeCb(`retry:${retryK}`) },
-        { text: "🔍  بحث جديد",      callback_data: "new_search"               },
+        { text: "🔁  حاول تاني",  callback_data: safeCb(`retry:${retryK}`) },
+        { text: "🔍  عنوان مختلف",      callback_data: "new_search"               },
       ],
       [
         { text: "🔖  للأمنيات",     callback_data: safeCb(`wishlist_add:${retryK}`) },
         { text: "🎲  مفاجأة",        callback_data: "rg:any"                        },
       ],
       [
-        { text: "🏠  القائمة",       callback_data: "main_menu" },
+        { text: "🏠  الرئيسية",       callback_data: "main_menu" },
       ],
     ],
   };

@@ -19,6 +19,7 @@ import { escMd, normalizeArabic, buildResetTime } from "./text.js";
 import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
+import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
 import {
   allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
@@ -205,9 +206,10 @@ export function registerCommands(
             ],
           };
       await bot.sendMessage(chatId,
-        `📊 *إحصائياتك*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
-        `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*\n\n` +
-        `_يتجدد بعد ${buildResetTime()}_ 🕐`,
+        `📊 *رصيدك اليوم*${premBadge}\n━━━━━━━━━━━━━━━━\n\n${statBar}\n\n` +
+        `📥 حمّلت النهارده: *${dlCount}*\n` +
+        `${indicator} فاضلك: *${limit <= 0 ? "∞" : remaining}* تحميل\n\n` +
+        `_الرصيد يتجدد بعد ${buildResetTime()} (بتوقيت القاهرة)_`,
         { parse_mode: "Markdown", reply_markup: statsKb });
     } catch (e) {
       L.error("cmd", "/stats error", { err: String(e).slice(0, 100) });
@@ -217,24 +219,15 @@ export function registerCommands(
 
 
   // ── /daily  /quest — retention daily loop ─────
-  bot.onText(/^\/(?:daily|quest|مهمة|يومي)(?:@\w+)?$/i, async (msg) => {
+  bot.onText(/^\/(?:daily|quest|مهمة|يومي|حضور)(?:@\w+)?$/i, async (msg) => {
     const chatId = msg.chat.id;
     const userId = String(msg.from?.id || "");
     if (!userId) return;
     try {
       const res = await claimDaily(userId);
-      const tip = pickFresh(RETENTION_TIPS as unknown as string[], "retip");
-      await bot.sendMessage(chatId, res.message + "\n\n" + tip, {
+      await bot.sendMessage(chatId, res.message, {
         parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "🎲 كتاب مفاجأة", callback_data: "rg:any" },
-              { text: "🔍 ابحث", callback_data: "new_search" },
-            ],
-            [{ text: "👤 ملفي", callback_data: "my_profile" }],
-          ],
-        },
+        reply_markup: kbAfterDaily(),
       });
     } catch (e) {
       L.error("cmd", "/daily error", { err: String(e).slice(0, 100) });
@@ -419,42 +412,10 @@ export function registerCommands(
   // ── /help ──────────────────────────────────────
   bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
-    await bot.sendMessage(chatId,
-      `❓ *دليل الاستخدام*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-      `📖 *البحث:*\n` +
-      `◦ اكتب اسم الكتاب مباشرةً\n` +
-      `◦ \`/search عنوان الكتاب\`\n` +
-      `◦ \`/random\` — كتاب مفاجأة\n` +
-      `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
-      `📊 *حسابك:*\n` +
-      `◦ \`/profile\` — ملفك الكامل + شاراتك 👤\n` +
-      `◦ \`/daily\` — حضورك اليومي الدافئ + XP ☀️\n` +
-      `◦ \`/stats\` — رصيدك اليومي\n` +
-      `◦ \`/history\` — آخر بحث لك\n` +
-      `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
-      `🎨 *الإبداع:*\n` +
-      `◦ \`/img <وصف>\` — ولّد صورة بالـ AI (5/يوم)\n` +
-
-      `🎁 *الإحالات:*\n` +
-      `◦ \`/invite\` — ادعُ صديقاً واحصل على Premium مجاني\n\n` +
-      `🔖 *الإدارة:*\n` +
-      `◦ \`/wishlist عنوان\` — أضف لقائمتك\n` +
-      `◦ \`/wishlist\` — اعرض قائمتك\n` +
-      `◦ \`/queue\` — حالة طلبك في الطابور\n` +
-      `◦ \`/cancel\` — ألغِ طلبك الحالي\n\n` +
-      `🌟 *الترتيبات:*\n` +
-      `◦ \`/top\` — أكثر الكتب تحميلاً\n` +
-      `◦ \`/weekly\` — تقرير الأسبوع\n` +
-      `◦ \`/premium\` — الترقية لـ Premium\n\n` +
-      `👥 *في المجموعات:* اكتب \`بوت\` ثم اسم الكتاب`,
-      { parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [
-          [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
-          [{ text: "🏠  القائمة",           callback_data: "main_menu"   }],
-        ]},
-      }
-    ).catch(() => {});
+    await bot.sendMessage(chatId, buildHelpMessage(), {
+      parse_mode: "Markdown",
+      reply_markup: kbHelp(),
+    }).catch(() => {});
   });
 
   // ── /admin ─────────────────────────────────────

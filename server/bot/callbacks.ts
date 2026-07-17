@@ -28,6 +28,7 @@ import {
 import { handleSummaryCallback } from "./summaryHandler.js";
 import { handleImageCallback } from "./imageGen.js";
 import { claimDaily, RETENTION_TIPS } from "./retention.js";
+import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
 
 // ══════════════════════════════════════════════
@@ -385,27 +386,17 @@ export function registerCallbackHandler(
       }
 
       case "new_search":
-        await bot.sendMessage(chatId,
-          `🔍 *ابحث عن أي كتاب*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\nاكتب اسم الكتاب — أو اسم الكتاب + المؤلف لنتائج أدق`, {
+        await bot.sendMessage(chatId, buildSearchPrompt(), {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "🏠  الرئيسية", callback_data: "main_menu" }]] },
         });
         break;
 
       case "img_gen":
-        await bot.sendMessage(chatId,
-          `🎨 *إنشاء صورة بالـ AI (Nano Banana)*\n` +
-          `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-          `اكتب الأمر مع وصف الصورة:\n` +
-          `\`/img وصف الصورة هنا\`\n\n` +
-          `📌 *مثال:*\n` +
-          `\`/img A red sports car drifting in a neon city\`\n\n` +
-          `⏱ التوليد يستغرق ~40 ثانية`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
-          },
-        );
+        await bot.sendMessage(chatId, buildImgPrompt(), {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🏠  الرئيسية", callback_data: "main_menu" }]] },
+        });
         break;
 
       case "my_stats": {
@@ -440,8 +431,8 @@ export function registerCallbackHandler(
               ],
             };
         await bot.sendMessage(chatId,
-          `📊 *إحصائياتك*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
-          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
+          `📊 *رصيدك اليوم*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
+          `📥 حمّلت النهارده:  *${dlCount}* كتاب\n${indicator} فاضلك:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
           `_يتجدد بعد ${buildResetTime()}_ 🕐`,
           { parse_mode: "Markdown", reply_markup: statsKb }
         );
@@ -473,32 +464,20 @@ export function registerCallbackHandler(
 
       case "daily_quest": {
         const res = await claimDaily(userId);
-        const tip = pickFresh([...RETENTION_TIPS], "retip");
-        await bot.sendMessage(chatId, res.message + "\n\n" + tip, {
+        await bot.sendMessage(chatId, res.message, {
           parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [[
-              { text: "🎲 مفاجأة", callback_data: "rg:any" },
-              { text: "🔍 بحث", callback_data: "new_search" },
-            ]],
-          },
+          reply_markup: kbAfterDaily(),
         }).catch(() => {});
         break;
       }
 
       case "my_profile": {
-        // ملف المستخدم — Streak / Badges / Premium / Referrals
         const name = query.from.first_name || "صديقي";
         try {
           const text = await buildProfileMessage(userId, name);
           await bot.sendMessage(chatId, text, {
             parse_mode: "Markdown",
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "🎁  ادعُ صديقاً",       callback_data: "invite_view" }],
-                [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu"   }],
-              ],
-            },
+            reply_markup: kbAfterProfile(),
           });
         } catch (e) {
           L.error("cb", "my_profile error", { err: String(e).slice(0, 100) });
@@ -537,18 +516,10 @@ export function registerCallbackHandler(
       }
 
       case "help":
-        await bot.sendMessage(chatId,
-          `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `*في المحادثة الخاصة:*\n◦ اكتب اسم أي كتاب مباشرةً\n◦ /search اسم الكتاب\n\n` +
-          `*في المجموعات — ٣ طرق:*\n◦ بوت اسم الكتاب\n◦ bot اسم الكتاب\n◦ @اسم\\_البوت اسم الكتاب\n\n` +
-          `*أوامر مفيدة:*\n/stats · /history · /top · /queue · /cancel · /last · /random · /weekly · /wishlist · /premium`,
-          { parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [
-              [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
-              [{ text: "🏠  القائمة",           callback_data: "main_menu"   }],
-            ]},
-          }
-        );
+        await bot.sendMessage(chatId, buildHelpMessage(), {
+          parse_mode: "Markdown",
+          reply_markup: kbHelp(),
+        }).catch(() => {});
         break;
     }
 
