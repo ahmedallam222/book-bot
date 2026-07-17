@@ -30,6 +30,9 @@ export function normalizeArabic(text: string): string {
     .replace(/ؤ/g,  "و")
     .replace(/ئ/g,  "ي")
     .replace(/[٠-٩]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48))
+    // FIX-DELIVERY: treat _ - + / as word separators (archive/search titles)
+    .replace(/[_+\-–—./\\|]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
 }

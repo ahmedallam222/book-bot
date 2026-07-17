@@ -1035,7 +1035,7 @@ export async function downloadAndSend(
       L.dlTimeout(pdfUrl, Date.now() - t0);
     } else if (isTelegramUploadSizeError(e)) {
       safeDeleteTemp(tempPath);
-      L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
+      L.dlTooLarge(pdfUrl, 0); // totalBytes not in catch scope
       redis.incr("tel:dl:too_large").catch(() => {});
       await recordUrlFailure(pdfUrl);
       return { ok: false, permanent: true, tooLarge: true };

@@ -7,11 +7,13 @@ export async function parseChatIntent(userText: string): Promise<{
   bookName?: string;
   wantsSummary?: boolean;
 }> {
+  // FIX-DELIVERY: Mistral first — Bynara was timing out (6s×N) and
+  // delaying chat/intent parsing even when Mistral is healthy.
   const endpoints = [
+    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY, model: "mistral-small-latest" },
+    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY_2, model: "mistral-small-latest" },
     { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_1, model: "mistral-large" },
-    { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_2, model: "mistral-large" },
-    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY, model: "mistral-large-latest" },
-    { url: "https://api.mistral.ai/v1/chat/completions", key: MISTRAL_API_KEY_2, model: "mistral-large-latest" }
+    { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_2, model: "mistral-large" }
   ].filter(e => !!e.key);
 
   const systemPrompt = `You are a helpful AI assistant for a Telegram bot named "خلاصة الكتب" (Book Summaries).
@@ -36,7 +38,7 @@ Output your response ONLY in valid JSON format:
           "Content-Type": "application/json",
           "Authorization": `Bearer ${ep.key}`,
         },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(8000),
         body: JSON.stringify({
           model: ep.model,
           messages: [

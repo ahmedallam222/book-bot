@@ -84,8 +84,8 @@ export const FC_QUOTA_TTL_SEC         = 86_400;     // 24h
 //
 //   اضبطه = ACCEPT_THRESHOLD لتعطيل الـ band (back-compat).
 //   اضبطه < ACCEPT_THRESHOLD ليبدأ الفحص من تلك القيمة فما فوق.
-export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.75;
-export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.85;
+export const PDF_VALIDATE_ACCEPT_THRESHOLD  = 0.55;
+export const PDF_VALIDATE_CONFIRM_THRESHOLD = 0.72;
 export const PDF_VALIDATE_REJECT_THRESHOLD  = 0.12;
 
 // ── Blacklist ─────────────────────────────────
@@ -118,8 +118,8 @@ export const WELIB_PROXY_ENABLED = WELIB_PROXY_URL.length > 0 && WELIB_PROXY_SEC
 // WELIB_CIRCUIT_TTL_SEC so Firecrawl + Telegram keep the latency budget.
 // Set WELIB_SEARCH_ENABLED=0 to force-off without redeploy.
 export const WELIB_SEARCH_ENABLED = (process.env.WELIB_SEARCH_ENABLED ?? "1") !== "0";
-export const WELIB_EMPTY_STREAK_OPEN = parseInt(process.env.WELIB_EMPTY_STREAK_OPEN || "6", 10);
-export const WELIB_CIRCUIT_TTL_SEC = parseInt(process.env.WELIB_CIRCUIT_TTL_SEC || "7200", 10);
+export const WELIB_EMPTY_STREAK_OPEN = parseInt(process.env.WELIB_EMPTY_STREAK_OPEN || "8", 10);
+export const WELIB_CIRCUIT_TTL_SEC = parseInt(process.env.WELIB_CIRCUIT_TTL_SEC || "1800", 10);
 export const WELIB_CIRCUIT_KEY = "flag:welib_circuit_open";
 export const WELIB_EMPTY_STREAK_KEY = "welib:empty_streak";
 
@@ -414,7 +414,7 @@ export const FILENAME_TRUSTED_PDF_DOMAINS: string[] = [
 // ALL the canonical strong-match cases (English "atomic-habits", Arabic
 // exact slug "كافكا-على-الشاطئ", etc.) since they hit ≥ 0.67 or 1.0.
 export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
-  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.85",
+  process.env.MISTRAL_BYPASS_FILENAME_THRESHOLD || "0.70",
 );
 
 // Minimum filename-relevance for the TRUSTED_PDF_DOMAINS bypass branch
@@ -430,7 +430,7 @@ export const MISTRAL_BYPASS_FILENAME_THRESHOLD = parseFloat(
 // slug, Arabic exact slug) through. Override with the env var if you
 // need to revert during incident investigation.
 export const TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD = parseFloat(
-  process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD || "0.85",
+  process.env.TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD || "0.60",
 );
 
 // ── Download attempt caps (find-to-send loss mitigation) ──
@@ -464,11 +464,11 @@ export const TRUSTED_DOMAIN_FILENAME_BYPASS_THRESHOLD = parseFloat(
 // historic 90s × N timeout budget; per-URL fast paths typically
 // finish in 5-30s).
 export const MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST = parseInt(
-  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "8",
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST || "10",
   10,
 );
 export const MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN = parseInt(
-  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "4",
+  process.env.MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN || "3",
   10,
 );
 

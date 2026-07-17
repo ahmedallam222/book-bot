@@ -463,7 +463,7 @@ function wordOverlapScore(bookName: string, metaTitle: string): number {
   // FIX: حذف علامات الترقيم من كلمات haystack قبل البحث
   // المشكلة: "العادة:" ≠ "العادة" → miss رغم أن الكلمة صحيحة
   // شائع جداً في عناوين PDF العربية: "قوة العادة: لماذا..."
-  const stripPunct = (w: string) => w.replace(/[،,.:;!؟?()[\]{}'"«»\-–—/\\]/g, "");
+  const stripPunct = (w: string) => w.replace(/[،,.:;!؟?()[\]{}'"«»\-–—_/\\|+]/g, "");
   const haystackWords = normalizeArabic(metaTitle).split(/\s+/)
     .filter((w) => w.length >= 1)
     .map(stripPunct)

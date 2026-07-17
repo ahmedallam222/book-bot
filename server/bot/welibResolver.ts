@@ -373,16 +373,23 @@ export async function searchWelib(
           redis.del(WELIB_EMPTY_STREAK_KEY).catch(() => {});
           redis.del(WELIB_CIRCUIT_KEY).catch(() => {});
         } else {
+          // FIX-DELIVERY: empty search for obscure titles is normal — only
+          // count half-weight toward the circuit (incr every other empty)
+          // so we don't disable welib after a run of rare-book queries.
           redis.incr("tel:welib:search_empty").catch(() => {});
-          const streak = await redis.incr(WELIB_EMPTY_STREAK_KEY);
-          redis.expire(WELIB_EMPTY_STREAK_KEY, WELIB_CIRCUIT_TTL_SEC).catch(() => {});
-          if (WELIB_EMPTY_STREAK_OPEN > 0 && streak >= WELIB_EMPTY_STREAK_OPEN) {
-            await redis.setex(WELIB_CIRCUIT_KEY, WELIB_CIRCUIT_TTL_SEC, String(streak));
-            L.warn("welib", "circuit OPEN — skipping Playwright search temporarily", {
-              streak,
-              ttlSec: WELIB_CIRCUIT_TTL_SEC,
-            });
-            redis.incr("tel:welib:circuit_opened").catch(() => {});
+          const emptyN = await redis.incr("welib:empty_raw");
+          redis.expire("welib:empty_raw", WELIB_CIRCUIT_TTL_SEC).catch(() => {});
+          if (emptyN % 2 === 0) {
+            const streak = await redis.incr(WELIB_EMPTY_STREAK_KEY);
+            redis.expire(WELIB_EMPTY_STREAK_KEY, WELIB_CIRCUIT_TTL_SEC).catch(() => {});
+            if (WELIB_EMPTY_STREAK_OPEN > 0 && streak >= WELIB_EMPTY_STREAK_OPEN) {
+              await redis.setex(WELIB_CIRCUIT_KEY, WELIB_CIRCUIT_TTL_SEC, String(streak));
+              L.warn("welib", "circuit OPEN — skipping Playwright search temporarily", {
+                streak,
+                ttlSec: WELIB_CIRCUIT_TTL_SEC,
+              });
+              redis.incr("tel:welib:circuit_opened").catch(() => {});
+            }
           }
         }
       } catch { /* telemetry must never fail the search */ }

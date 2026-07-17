@@ -51,11 +51,11 @@ import type { BookResult } from "./types.js";
 // ── Tunables ───────────────────────────────────────────────────────
 const KEY_PREFIX                = "retry:fail";
 const RETRY_TTL_DAYS            = 7;
-const RETRY_MAX_ATTEMPTS        = 3;
-const RETRY_MIN_COOLDOWN_MS     = 30 * 60 * 1000;        // 30 min between attempts on the same record
+const RETRY_MAX_ATTEMPTS        = 5;
+const RETRY_MIN_COOLDOWN_MS     = 20 * 60 * 1000;        // 20 min between attempts on the same record
 const RETRY_WORKER_INTERVAL_MS  = 30 * 60 * 1000;        // sweeper period
 const RETRY_WORKER_STARTUP_MS   = 5 * 60 * 1000;         // startup delay (let DB/redis stabilize)
-const RETRY_BATCH_LIMIT         = 25;                    // max records per pass
+const RETRY_BATCH_LIMIT         = 40;                    // max records per pass
 const RETRY_RESCUE_BEST_PDF_THRESHOLD = 0.30;            // mirrors bookRequest.ts
 const RETRY_RESCUE_FALLBACK_THRESHOLD = 0.50;            // mirrors bookRequest.ts
 const RETRY_RESCUE_MAX_FALLBACKS      = 3;               // mirrors bookRequest.ts

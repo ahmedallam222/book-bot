@@ -841,12 +841,25 @@ async function performFullSearch(
         // (5) latency class: invert so lower class (faster) scores higher
         const lat = latencyClassForUrl(url);
         const latencyBoost = Math.max(0, 1 - lat * 0.18); // 0→1.0, 1→0.82, 5→0.1
+        // (6) FIX-DELIVERY: opaque digit-only filenames (Hindawi /books/123.pdf)
+        // have zero title signal — they burn domain caps on wrong books.
+        // Deprioritize unless search-title relevance rescues them.
+        const opaque = hasUninformativeFilename(url);
+        const searchT = urlSearchTitle.get(url) || "";
+        let titleBoost = 0;
+        if (searchT) {
+          const titleAsUrl = `https://x/${encodeURIComponent(searchT)}.pdf`;
+          titleBoost = urlFilenameRelevance(bookName, titleAsUrl);
+        }
+        const opaquePenalty = opaque && filenameScore < 0.15 && titleBoost < 0.35 ? -0.45 : 0;
+        const effectiveName = Math.max(filenameScore, titleBoost * 0.9);
         return (
-          filenameScore * 0.40 +
-          sourceRate * 0.20 +
-          reliablePenalty * 0.12 +
-          sizeBoost * 0.13 +
-          latencyBoost * 0.15
+          effectiveName * 0.48 +
+          sourceRate * 0.16 +
+          reliablePenalty * 0.10 +
+          sizeBoost * 0.10 +
+          latencyBoost * 0.10 +
+          opaquePenalty
         );
       };
       return scoreUrl(b) - scoreUrl(a);
@@ -856,14 +869,51 @@ async function performFullSearch(
     // sample different sources (reduces found_no_send from one bad domain).
     // Stable secondary key: prefer lower latency class within interleave.
     validUrls = diversifyUrlsByDomain(validUrls);
-    // Final micro-pass: among first 6 slots, prefer lower latency class
-    // without fully undoing diversity (swap adjacent if same domain family).
+    // FIX-DELIVERY: previous micro-pass re-sorted head by latency only,
+    // which floated Hindawi numeric PDFs (latency class 0) above
+    // high-relevance candidates and burned the domain cap on wrong books.
+    // Keep diversity order; only swap within the same host to prefer
+    // higher filename/title relevance.
     {
-      const head = validUrls.slice(0, 6);
-      head.sort((a, b) => latencyClassForUrl(a) - latencyClassForUrl(b) || 0);
-      // re-diversify head only
-      const rest = validUrls.slice(6);
-      validUrls = [...diversifyUrlsByDomain(head), ...rest];
+      const head = validUrls.slice(0, 8);
+      const rest = validUrls.slice(8);
+      const scored = (u: string): number => {
+        const fn = urlFilenameRelevance(bookName, u);
+        const st = urlSearchTitle.get(u) || "";
+        const tb = st ? urlFilenameRelevance(bookName, `https://x/${encodeURIComponent(st)}.pdf`) : 0;
+        const opaque = hasUninformativeFilename(u) ? -0.3 : 0;
+        return Math.max(fn, tb) + opaque - latencyClassForUrl(u) * 0.02;
+      };
+      // Stable domain-interleave already applied; re-order within each
+      // domain bucket by score, then re-interleave.
+      const buckets = new Map<string, string[]>();
+      const order: string[] = [];
+      for (const u of head) {
+        let host = "";
+        try { host = new URL(u.startsWith("tg://") ? "https://t.me.local" : u).hostname.toLowerCase(); } catch {
+          host = (u.split("/")[2] || "unknown").toLowerCase();
+        }
+        if (u.includes("t.me/") || u.startsWith("tg://")) host = "t.me";
+        if (!buckets.has(host)) { buckets.set(host, []); order.push(host); }
+        buckets.get(host)!.push(u);
+      }
+      for (const h of order) {
+        buckets.get(h)!.sort((a, b) => scored(b) - scored(a));
+      }
+      const out: string[] = [];
+      let progress = true;
+      while (progress) {
+        progress = false;
+        // Prefer hosts whose next URL has higher score (not just first-seen order)
+        const ready = order
+          .filter(h => (buckets.get(h)?.length ?? 0) > 0)
+          .sort((ha, hb) => scored(buckets.get(hb)![0]) - scored(buckets.get(ha)![0]));
+        for (const h of ready) {
+          const arr = buckets.get(h)!;
+          if (arr.length) { out.push(arr.shift()!); progress = true; break; }
+        }
+      }
+      validUrls = [...out, ...rest];
     }
 
     // الحماية في pdfValidator — يقرأ metaTitle من PDF بعد التحميل
@@ -993,6 +1043,7 @@ async function performFullSearch(
   // MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN. 0 disables the corresponding cap.
   let attemptedDownloads = 0;
   const attemptsByDomain = new Map<string, number>();
+  const contentRejectsByDomain = new Map<string, number>();
   let globalCapReached = false;
   let domainCapHits = 0;
   let tooLargeHits = 0;
@@ -1081,6 +1132,22 @@ async function performFullSearch(
         // poisoning the auto-disable signal.
         if (result.rejectedContent) {
           trackSourceMistralReject(dlDomain).catch(() => {});
+          // FIX-DELIVERY: local title_mismatch / Mistral NO both mean this
+          // domain's remaining candidates for THIS query are likely wrong
+          // books (especially Hindawi numeric IDs). After 2 content rejects
+          // from the same host, burn the rest of its cap immediately so we
+          // spend attempts on other domains.
+          const crej = (contentRejectsByDomain.get(dlDomain) ?? 0) + 1;
+          contentRejectsByDomain.set(dlDomain, crej);
+          if (crej >= 2 && MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN > 0) {
+            attemptsByDomain.set(dlDomain, MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN);
+            L.info("bot", "early domain abandon after content rejects", {
+              book: bookName.slice(0, 50),
+              domain: dlDomain,
+              contentRejects: crej,
+            });
+            redis.incr("tel:dl:early_domain_abandon").catch(() => {});
+          }
         } else {
           trackSourceAttempt(dlDomain, false).catch(() => {});
         }
