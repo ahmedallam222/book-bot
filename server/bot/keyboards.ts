@@ -47,8 +47,7 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       ],
       // Create
       [
-        { text: "🎨  صورة AI",         callback_data: "img_gen"   },
-        { text: "🎬  فيديو AI",        callback_data: "video_gen" },
+        { text: "🎨  صورة AI",         callback_data: "img_gen"   }
       ],
       // Premium + help
       [

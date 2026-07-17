@@ -184,7 +184,7 @@ export const NANO_BANANA_ENDPOINT =
 // لو حصلت مشاكل في الإنتاج (rate-limit / blocked IP) اضبطه = false عشان
 // تتعطل الميزة بدون redeploy.
 export const VEO3_ENABLED        =
-  (process.env.VEO3_ENABLED ?? "true").toLowerCase() !== "false";
+  (process.env.VEO3_ENABLED ?? "false").toLowerCase() === "true"; // feature removed from bot UI
 export const VEO3_BASE_URL       =
   (process.env.VEO3_BASE_URL || "https://veoaifree.com").replace(/\/+$/, "");
 export const VEO3_GENERATOR_PATH =

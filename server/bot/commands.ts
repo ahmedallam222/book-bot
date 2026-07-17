@@ -7,7 +7,6 @@ import { REACTION_RECEIVED } from "./uiVariants.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { handleImageCommand } from "./imageGen.js";
-import { handleVideoCommand } from "./videoGen.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
 import { runRetryPass, listPendingFailures } from "./failureRetry.js";
 import { cancelUserJobs, getQueueStats } from "./queue.js";
@@ -169,15 +168,6 @@ export function registerCommands(
     await handleImageCommand(bot, chatId, userId, prompt, msg.message_id);
   });
 
-  // ── /video ─────────────────────────────────────
-  // توليد فيديو عبر veo3 (veoaifree). التفاصيل في videoGen.ts.
-  bot.onText(/^\/video(?:\s+(.+))?$/i, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = String(msg.from?.id || "");
-    if (!userId) return;
-    const prompt = (match?.[1] || "").trim();
-    await handleVideoCommand(bot, chatId, userId, prompt, msg.message_id);
-  });
 
   // ── /stats ─────────────────────────────────────
   bot.onText(/^\/stats$/, async (msg) => {
@@ -416,7 +406,7 @@ export function registerCommands(
       `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
       `🎨 *الإبداع:*\n` +
       `◦ \`/img <وصف>\` — ولّد صورة بالـ AI (5/يوم)\n` +
-      `◦ \`/video <وصف>\` — ولّد فيديو veo3 (2/يوم)\n\n` +
+
       `🎁 *الإحالات:*\n` +
       `◦ \`/invite\` — ادعُ صديقاً واحصل على Premium مجاني\n\n` +
       `🔖 *الإدارة:*\n` +
