@@ -160,6 +160,68 @@ async function sendLocalDocumentGuarded(
 }
 
 
+
+// ══════════════════════════════════════════════
+// FIX-SPEED: copy/forward Telegram channel messages
+// Re-uploading a channel PDF via bot.sendDocument often takes 1–3 minutes
+// (AWS→Telegram). copyMessage is usually <2s when the source is a public
+// channel or a chat the bot can access.
+// ══════════════════════════════════════════════
+async function tryCopyTelegramMessage(
+  bot: TelegramBot,
+  chatId: number,
+  channelRef: string,
+  msgId: number,
+  caption: string,
+): Promise<TelegramBot.Message | null> {
+  // Prefer public username form (@channel); numeric ids need -100 prefix for bots
+  let fromChat: string | number = channelRef;
+  if (/^-?\d+$/.test(channelRef)) {
+    const n = Number(channelRef);
+    // Bot API channel ids are usually -100XXXXXXXXXX
+    fromChat = channelRef.startsWith("-100") ? n : Number(`-100${channelRef.replace(/^-/, "")}`);
+  } else {
+    fromChat = channelRef.startsWith("@") ? channelRef : `@${channelRef}`;
+  }
+
+  try {
+    const copied = await bot.copyMessage(chatId, fromChat as any, msgId, {
+      caption,
+      parse_mode: "HTML",
+    } as any);
+    // copyMessage may return { message_id } only — treat as success if no throw
+    redis.incr("tel:tg:copy_success").catch(() => {});
+    L.info("download", "telegram copyMessage success", {
+      from: String(fromChat).slice(0, 40),
+      msgId,
+    });
+    // Synthesize a Message-like object when API returns only message_id
+    if (copied && typeof copied === "object" && "message_id" in (copied as object)) {
+      return copied as TelegramBot.Message;
+    }
+    return { message_id: (copied as any)?.message_id } as TelegramBot.Message;
+  } catch (e1: any) {
+    try {
+      const fwd = await bot.forwardMessage(chatId, fromChat as any, msgId);
+      redis.incr("tel:tg:forward_success").catch(() => {});
+      L.info("download", "telegram forwardMessage success", {
+        from: String(fromChat).slice(0, 40),
+        msgId,
+      });
+      return fwd;
+    } catch (e2: any) {
+      L.warn("download", "telegram copy/forward failed — will re-upload", {
+        from: String(fromChat).slice(0, 40),
+        msgId,
+        copyErr: String(e1?.message || e1).slice(0, 80),
+        fwdErr: String(e2?.message || e2).slice(0, 80),
+      });
+      redis.incr("tel:tg:copy_fail").catch(() => {});
+      return null;
+    }
+  }
+}
+
 // ══════════════════════════════════════════════
 // SKIP_DIRECT_DOMAINS
 // كل موقع هنا → السيرفر يحمّله محلياً أولاً
@@ -1523,10 +1585,27 @@ async function telegramDownloadAndSend(
   // ── sendDocument ─────────────────────────────
   const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.size ?? fs.statSync(tempPath).size;
+  const caption = buildCaption(bookName, validation.metaTitle);
+  // FIX-SPEED: prefer copyMessage (seconds) over re-upload (often 1–3 min)
+  const copied = await tryCopyTelegramMessage(
+    bot, chatId, parsed.channelRef, parsed.msgId, caption,
+  );
+  if (copied) {
+    safeDeleteTemp(tempPath);
+    const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+    L.dlLocal(bookName, sizeMB, Date.now() - t0);
+    await recordUrlSuccess(pdfUrl);
+    return {
+      ok: true,
+      fileId: (copied as any).document?.file_id,
+      sizeMB,
+      sendMode: "local",
+    };
+  }
 
-  // FIX-DOUBLE-SEND: never abandon in-flight channel re-upload
+// FIX-DOUBLE-SEND: never abandon in-flight channel re-upload
   const upload = await sendLocalDocumentGuarded(
-    bot, chatId, tempPath, buildCaption(bookName, validation.metaTitle), fname, "telegram",
+    bot, chatId, tempPath, caption, fname, "telegram",
   );
   if (!upload.ok) {
     L.dlFail(pdfUrl, `telegram upload: ${upload.err || "failed"}`.slice(0, 120));

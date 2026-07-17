@@ -21,7 +21,7 @@ import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { storeRetryKey } from "./session.js";
 import {
-  MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
+  MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, GROUP_FREE_TEXT_CHAT_IDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
 } from "./config.js";
 import { redis } from "./redis.js";
 import { recordGroup } from "./groupTracker.js";
@@ -781,12 +781,19 @@ export function registerMessageHandler(
     if (isGroup) {
       const botUsername = getBotUsername().toLowerCase();
       const mention     = `@${botUsername}`;
-      if (text.toLowerCase().startsWith(mention)) {
+      const lower       = text.toLowerCase();
+      if (lower.startsWith(mention)) {
         bookName = text.slice(mention.length).trim();
       } else {
-        const lower   = text.toLowerCase();
         const trigger = GROUP_TRIGGER_WORDS.find((w) => lower.startsWith(w.toLowerCase()));
-        if (trigger) bookName = text.slice(trigger.length).trim();
+        if (trigger) {
+          bookName = text.slice(trigger.length).trim();
+        } else if (GROUP_FREE_TEXT_CHAT_IDS.has(String(chatId)) && looksLikeBookRequest(text)) {
+          // Free-text mode for allowlisted groups (e.g. @kholasa_elktob2):
+          // members often type only the book title without "بوت".
+          bookName = text;
+          redis.incr("tel:group:free_text_hit").catch(() => {});
+        }
       }
       if (!bookName) return;
     } else {
@@ -814,25 +821,63 @@ export function registerMessageHandler(
     // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
 
-    const intent = await parseChatIntent(bookName);
-    if (intent.isChat && intent.response) {
-      await bot.sendMessage(chatId, intent.response, { parse_mode: "Markdown" }).catch(() => {});
-      return;
-    }
-    
-    let finalBookName = intent.bookName;
-    let finalWantsSummary = intent.wantsSummary;
-    
-    if (!finalBookName || finalBookName.trim().length < 2) {
-      finalWantsSummary = detectSummaryIntent(bookName);
+    // FIX-SPEED: skip AI chat-intent when the text already looks like a book
+    // title. parseChatIntent was adding 1–8s (and Bynara timeouts) before
+    // search even started on every request.
+    let finalBookName: string;
+    let finalWantsSummary: boolean;
+    const summaryHint = detectSummaryIntent(bookName);
+    const likelyBook =
+      looksLikeBookRequest(bookName) &&
+      bookName.split(/\s+/).length <= 12 &&
+      !/^(?:ازيك|عامل|مرحبا|السلام)/i.test(bookName);
+
+    if (likelyBook) {
+      finalWantsSummary = summaryHint;
       finalBookName = await parseBookName(bookName);
+      redis.incr("tel:intent:fast_path").catch(() => {});
+    } else {
+      const intent = await parseChatIntent(bookName);
+      if (intent.isChat && intent.response) {
+        await bot.sendMessage(chatId, intent.response, { parse_mode: "Markdown" }).catch(() => {});
+        return;
+      }
+      finalBookName = intent.bookName || "";
+      finalWantsSummary = !!intent.wantsSummary || summaryHint;
+      if (!finalBookName || finalBookName.trim().length < 2) {
+        finalBookName = await parseBookName(bookName);
+      }
     }
-    
+
+    if (!finalBookName || finalBookName.trim().length < 2) return;
+
     await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
   });
 }
 
 // ── Helpers ───────────────────────────────────
+
+
+/** True when free text in a group is likely a book title, not chat. */
+function looksLikeBookRequest(input: string): boolean {
+  const t = input.replace(/\s+/g, " ").trim();
+  if (t.length < 2 || t.length > 90) return false;
+  if (/^https?:\/\//i.test(t)) return false;
+  if (/@\w+/.test(t) && t.startsWith("@")) return false; // bare mentions
+  // pure emoji / punctuation
+  if (!/[\u0600-\u06FFa-zA-Z0-9]/.test(t)) return false;
+  // must have some letters (Arabic or Latin)
+  const letters = (t.match(/[\u0600-\u06FFa-zA-Z]/g) || []).length;
+  if (letters < 2) return false;
+  // chatty / social noise — do not treat as book search
+  const chatty =
+    /^(?:مرحبا|مرحباً|السلام\s*عليكم|سلام|هلا|أهلا|اهلا|صباح|مساء|شكرا|شكراً|يسلمو|تمام|اوك|أوك|طيب|هه+|هههه|لول|lol|ok|hi|hello|hey|bye|كيفك|عامل\s*ايه|اخبارك|مين|ايه|إيه|يعني|بجد|والله|يا\s*جماعة|جروب|القناة|ادمن|أدمن|البوت|بوت\??|help|مساعدة)(?:\s|[!?.…]*)$/i;
+  if (chatty.test(t)) return false;
+  // long chat sentences with many conversational markers
+  if (t.split(/\s+/).length > 14) return false;
+  if (/[؟?]{1}/.test(t) && t.split(/\s+/).length > 8) return false;
+  return true;
+}
 
 function sanitizeBookName(input: string): string {
   const cleaned = input.replace(/\s+/g, " ").trim().slice(0, MAX_BOOK_NAME_LEN);

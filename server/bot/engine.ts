@@ -235,7 +235,9 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // welib pages), so we hit it directly via the existing welibResolver
   // browser singleton. Promise.allSettled keeps either source from
   // taking the other down.
-  const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 25_000);
+  // FIX-SPEED: default welib budget 8s (was 25s). Welib is Playwright+CF
+  // and often returns 0 results while still blocking the whole search.
+  const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 8_000);
   const welibMaxResults = Number(process.env.WELIB_SEARCH_MAX_RESULTS || 8);
 
   // Telegram-channels fallback is a 3rd parallel leg. The userbot is a
@@ -244,20 +246,42 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // channels Telegram surfaces in global results) in one MTProto RPC,
   // typically in <500ms. When credentials aren't set the call short-
   // circuits to `[]` so this leg is free on dev boxes.
-  const [fcSettled, welibSettled, tgSettled] = await Promise.allSettled([
-    fcPaused
-      ? Promise.resolve([] as BookResult[])
-      : unifiedSearch(arabicDomains, query, true),
-    welibSourceConfig
-      ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
-      : Promise.resolve([] as WelibSearchResult[]),
-    TG_FALLBACK_ENABLED
-      ? searchTelegramChannels(query)
-      : Promise.resolve([] as TelegramSearchResult[]),
-  ]);
+  //
+  // FIX-SPEED: wait for Firecrawl + Telegram first (fast). Only await
+  // welib when those legs are thin — otherwise welib's 10–25s empty
+  // search delayed every successful TG hit (prod: "فكر وازدد ثراء"
+  // TG 261ms + welib 16s empty before download started).
+  const fcPromise = fcPaused
+    ? Promise.resolve([] as BookResult[])
+    : unifiedSearch(arabicDomains, query, true);
+  const tgPromise = TG_FALLBACK_ENABLED
+    ? searchTelegramChannels(query)
+    : Promise.resolve([] as TelegramSearchResult[]);
+  const welibPromise = welibSourceConfig
+    ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
+    : Promise.resolve([] as WelibSearchResult[]);
+
+  const [fcSettled, tgSettled] = await Promise.allSettled([fcPromise, tgPromise]);
   const fcResults = fcSettled.status === "fulfilled" ? fcSettled.value : [];
-  const welibResults = welibSettled.status === "fulfilled" ? welibSettled.value : [];
   const tgResults = tgSettled.status === "fulfilled" ? tgSettled.value : [];
+
+  const fastCount = fcResults.length + tgResults.length;
+  const needWelib = fastCount < 6; // enough candidates → skip waiting on welib
+  let welibResults: WelibSearchResult[] = [];
+  if (needWelib) {
+    const welibSettled = await Promise.allSettled([welibPromise]);
+    welibResults = welibSettled[0].status === "fulfilled" ? welibSettled[0].value : [];
+  } else {
+    // Let welib finish in background for cache warmth, but don't block delivery.
+    welibPromise.then(() => {
+      redis.incr("tel:engine:welib_skipped_wait").catch(() => {});
+    }).catch(() => {});
+    L.info("engine", "skipping welib wait — FC/TG already have candidates", {
+      query: query.slice(0, 50),
+      fc: fcResults.length,
+      tg: tgResults.length,
+    });
+  }
 
   const seen = new Set(fcResults.map((r) => r.url));
   const welibAsBookResults: BookResult[] = [];

@@ -537,7 +537,26 @@ export const GROUP_TRIGGER_WORDS: string[] = [
   "bot ",
   "كتاب ",
   "رواية ",
+  "روايه ",
+  "ابحث ",
+  "تحميل ",
+  "حمل ",
+  "بدور على ",
+  "عايز ",
+  "عاوز ",
+  "أبي ",
+  "ابغى ",
 ];
+
+// ── Groups where plain book titles work without a trigger word ──
+// Comma-separated chat IDs (supergroups use -100…). Default includes
+// @kholasa_elktob2 (-1002129652576). Override via GROUP_FREE_TEXT_CHAT_IDS.
+export const GROUP_FREE_TEXT_CHAT_IDS: Set<string> = new Set(
+  (process.env.GROUP_FREE_TEXT_CHAT_IDS || "-1002129652576")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
 // ── Queue Workers (للتوافق مع worker.ts) ─────
 export const QUEUE_WORKERS   = parseInt(process.env.WORKER_COUNT || "3", 10);
