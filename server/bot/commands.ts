@@ -23,6 +23,7 @@ import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { tryGroupSocialReply, sendGroupPlaybook } from "./groupInteract.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
 import { buildMicroMessage, hasAnsweredMicro } from "./microHabit.js";
@@ -898,6 +899,8 @@ export function registerMessageHandler(
         }
       }
       if (!bookName) {
+        const social = await tryGroupSocialReply(bot, msg).catch(() => false);
+        if (social) return;
         // Soft tip (rate-limited) so members learn free-text mode
         if (isFreeTextGroup(chatId) && text.length >= 2) {
           maybeSoftNotBookReply(bot, chatId, userId, msg.message_id).catch(() => {});

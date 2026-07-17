@@ -11,6 +11,10 @@ import {
   setSourceManuallyDisabled, isSourceManuallyDisabled, sanitizeDomainKey,
 } from "./analytics.js";
 import { getImageGenStats } from "./imageGen.js";
+import {
+  buildAdminHomeMessage, buildAdminLiveMessage, buildAdminRetentionMessage,
+  buildAdminMonthMessage, buildAdminImagesMessage, adminPanelKeyboard,
+} from "./adminDashboard.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
@@ -174,72 +178,11 @@ export async function buildProfileMessage(userId: string, name: string): Promise
 // ── لوحة التحكم الرئيسية ─────────────────────
 export async function sendAdminPanel(bot: TelegramBot, chatId: number): Promise<void> {
   try {
-    const [today, total, qs, blStats, pdfStats, dbStats] = await Promise.all([
-      getDailyStats(),
-      getTotalStats(),
-      getQueueStats(),
-      blacklistStats(),
-      getPdfValidationStats(),
-      storage.getStats(),
-    ]);
-
-    const isMaint  = await redis.get(MAINTENANCE_KEY).catch(() => null);
-    const announce = await redis.get(BOT_ANNOUNCE_KEY).catch(() => null);
-    const successRate = (today.requests ?? 0) > 0
-      ? Math.round(((today.found ?? 0) / (today.requests ?? 1)) * 100)
-      : 0;
-
-    const msg =
-      `🔧 *لوحة التحكم — رفيق*\n` +
-      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-      `📊 *اليوم:*\n` +
-      `◦ طلبات: *${today.requests ?? 0}* | نجح: *${today.found ?? 0}* (${successRate}%)\n` +
-      `◦ تحميل: *${today.downloads ?? 0}* | كاش: *${today.cache_hits ?? 0}*\n\n` +
-      `📈 *الإجمالي:*\n` +
-      `◦ مستخدمون: *${dbStats.totalUsers}*\n` +
-      `◦ تحميلات: *${total.downloads ?? 0}* | بحث: *${total.searches ?? 0}*\n\n` +
-      `📋 *الطابور:*\n` +
-      `◦ High: *${qs.highQueue}* | Normal: *${qs.normalQueue}* | DLQ: *${qs.dlqSize}*\n\n` +
-      `🛡️ *PDF Validator:*\n` +
-      `◦ قبول: *${pdfStats.accepted}* | رفض: *${pdfStats.rejected}* (${pdfStats.rejectionRate})\n` +
-      `◦ Mistral: *${pdfStats.mistralUsed}* مرة\n\n` +
-      `🚫 *Blacklist:* ${blStats.total} رابط\n` +
-      `📢 *إعلان:* ${announce ? `"${announce.slice(0, 30)}..."` : "لا يوجد"}\n` +
-      `🔧 *الصيانة:* ${isMaint === "1" ? "✅ مفعّلة" : "❌ معطّلة"}`;
-
+    const isMaint = await redis.get(MAINTENANCE_KEY).catch(() => null);
+    const msg = await buildAdminHomeMessage();
     await bot.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "📊 إحصاءات",      callback_data: "admin_stats"    },
-            { text: "📋 الطابور",       callback_data: "admin_queue"    },
-          ],
-          [
-            { text: "👥 المستخدمون",    callback_data: "admin_users_0"  },
-            { text: "🏆 أكثر تحميلاً", callback_data: "admin_top"      },
-          ],
-          [
-            { text: "🚫 Blacklist",     callback_data: "admin_blacklist" },
-            { text: "💾 الكاش",         callback_data: "admin_cache"     },
-          ],
-          [
-            { text: "📡 المصادر",       callback_data: "admin_sources"   },
-            { text: "🔭 الـ Funnel",    callback_data: "admin_funnel"    },
-          ],
-          [
-            { text: "🎨 نانو بنانا",   callback_data: "admin_nano_banana" },
-          ],
-          [
-            { text: isMaint === "1" ? "✅ إيقاف الصيانة" : "🔧 تفعيل الصيانة",
-              callback_data: "admin_toggle_maintenance" },
-          ],
-          [
-            { text: "📢 بث جماعي",      callback_data: "admin_broadcast" },
-            { text: "🗑️ مسح DLQ",       callback_data: "admin_clear_dlq" },
-          ],
-        ],
-      },
+      reply_markup: adminPanelKeyboard(isMaint === "1"),
     }).catch(() => {});
   } catch (e) {
     L.error("admin", `sendAdminPanel error`, { err: String(e).slice(0, 100) });
@@ -457,6 +400,52 @@ export async function handleAdminCallback(
     switch (data) {
 
       // ── إحصاءات تفصيلية ─────────────────────────────
+
+      case "admin_live": {
+        const text = await buildAdminLiveMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_live" },
+            { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+      case "admin_images": {
+        const text = await buildAdminImagesMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_images" },
+            { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+      case "admin_retention": {
+        const text = await buildAdminRetentionMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+
+      case "admin_month": {
+        const text = await buildAdminMonthMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            [{ text: "📤 CSV", callback_data: "admin_export_csv" }],
+            [{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }],
+          ]},
+        }).catch(() => {});
+        break;
+      }
+
       case "admin_stats": {
         const [today, total, topBooks] = await Promise.all([
           getDailyStats(),

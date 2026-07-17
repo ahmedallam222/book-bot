@@ -62,10 +62,10 @@ export async function maybeSoftNotBookReply(
     if (ok !== "OK") return;
     await bot.sendMessage(
       chatId,
-      `📚 *لبحث عن كتاب:* اكتب العنوان مباشرة\n` +
-        `مثال: \`فكر وازدد ثراء\`\n\n` +
-        `_أو:_ \`بوت اسم الكتاب\`\n` +
-        `_الأوامر:_ /help · /random · /club · /premium`,
+      `🌿 *رفيق هنا*\n` +
+        `اكتب *عنوان الكتاب* مباشرةً — مثال: \`فكر وازدد ثراء\`\n\n` +
+        `◦ /random مفاجأة · /club النادي · /group تفاعل\n` +
+        `◦ أو قل «مرحبا» وسأرد عليك`,
       {
         parse_mode: "Markdown",
         reply_to_message_id: replyToMsgId,

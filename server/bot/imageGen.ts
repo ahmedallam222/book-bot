@@ -506,6 +506,11 @@ async function runGeneration(
     userId, elapsedMs, promptLen: prompt.length, apiTime: result.time_taken, tier,
   });
   redis.incr(NB_TOTAL_SUCCESS_KEY).catch(() => {});
+  if (result.provider) {
+    const p = String(result.provider).toLowerCase();
+    const tag = p.includes("flux") ? "flux" : p.includes("nano") || p.includes("banana") ? "nano" : p.includes("gemini") ? "gemini" : "other";
+    redis.incr(`tel:imageGen:provider:${tag}`).catch(() => {});
+  }
   recordSuccessfulImage(userId).catch(() => {});
   onSuccessfulImage(userId).catch(() => {});
 

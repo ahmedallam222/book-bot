@@ -56,6 +56,7 @@ import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badg
 import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
 import { recordInterest } from "./interests.js";
 import { maybeGroupDeliveryWhisper } from "./groupClub.js";
+import { celebrateGroupDelivery } from "./groupInteract.js";
 import { recordLibraryDownload } from "./library.js";
 import { buildQualityBlock } from "./quality.js";
 import { seriesAfter } from "./curated.js";
@@ -1504,6 +1505,7 @@ _حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُ
   recordInterest(userId, bookName).catch(() => {});
   recordLibraryDownload(userId, bookName, { sizeMB, fromCache }).catch(() => {});
   maybeGroupDeliveryWhisper(bot, chatId, bookName).catch(() => {});
+  celebrateGroupDelivery(bot, chatId, bookName).catch(() => {});
 
   let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
   msg += buildQualityBlock({
