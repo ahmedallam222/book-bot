@@ -20,6 +20,7 @@ import {
   kbBookOfDay,
   getBookOfDay,
 } from "./bookOfDay.js";
+import { sendPersonalWeekReport } from "./personalWeek.js";
 import { buildResetTime } from "./text.js";
 
 /** نصوص الأزرار — تطابق تام مع ضغط المستخدم */
@@ -31,6 +32,7 @@ export const RK = {
   TODAY:    "📖 كتاب اليوم",
   BALANCE:  "📊 رصيدي اليوم",
   HELP:     "❓ كيف أستخدم رفيق؟",
+  MYWEEK:   "📊 أسبوعي",
   MENU:     "🏠 القائمة",
 } as const;
 
@@ -47,7 +49,8 @@ export function replyKeyboardMain(): TelegramBot.ReplyKeyboardMarkup {
       [{ text: RK.SEARCH }, { text: RK.RANDOM }],
       [{ text: RK.CHECKIN }, { text: RK.PROFILE }],
       [{ text: RK.TODAY }, { text: RK.BALANCE }],
-      [{ text: RK.HELP }, { text: RK.MENU }],
+      [{ text: RK.MYWEEK }, { text: RK.HELP }],
+      [{ text: RK.MENU }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -156,6 +159,10 @@ export async function tryHandleReplyKeyboard(
       ).catch(() => {});
       return true;
     }
+
+    case RK.MYWEEK:
+      await sendPersonalWeekReport(bot, chatId, userId);
+      return true;
 
     case RK.HELP:
       await bot.sendMessage(chatId, buildHelpMessage(), {

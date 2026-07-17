@@ -41,7 +41,7 @@ export async function handleWeeklyCommand(
 
     if (books.length === 0) {
       await bot.sendMessage(chatId,
-        `📅 *أفضل كتب الأسبوع*\n\n_لا توجد بيانات كافية بعد — عد لاحقاً!_`,
+        `📅 *أفضل كتب الأسبوع*\n\n_لا توجد بيانات كافية بعد — عد لاحقاً!_\n\n_يمكنك عرض تقريرك الشخصي:_ /myweek`,
         { parse_mode: "Markdown" }
       ).catch(() => {});
       return;
@@ -64,11 +64,16 @@ export async function handleWeeklyCommand(
     await bot.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
       reply_markup: {
-        inline_keyboard: [[
-          { text: "🔄 تحديث", callback_data: "weekly_refresh" },
-          { text: "🏠 القائمة", callback_data: "main_menu" },
-          ...(isAdmin ? [{ text: "📤 تصدير", callback_data: "weekly_export" }] : []),
-        ]],
+        inline_keyboard: [
+          [
+            { text: "🔄 تحديث", callback_data: "weekly_refresh" },
+            { text: "📊 أسبوعي أنا", callback_data: "my_week" },
+          ],
+          [
+            { text: "🏠 القائمة", callback_data: "main_menu" },
+            ...(isAdmin ? [{ text: "📤 تصدير", callback_data: "weekly_export" }] : []),
+          ],
+        ],
       },
     }).catch(() => {});
 

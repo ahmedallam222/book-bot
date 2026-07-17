@@ -21,6 +21,9 @@ import {
   WARM_EVENING_NOTES,
 } from "./brand.js";
 import { bookOfDayMorningBlock, kbBookOfDayAsync } from "./bookOfDay.js";
+import { sendSundayWeekReports, getPersonalWeekStats } from "./personalWeek.js";
+import { getTopInterests } from "./interests.js";
+import { runGroupClubWeeklyPosts } from "./groupClub.js";
 
 const QUEST_KEY     = (uid: string, day: string) => `ret:quest:${uid}:${day}`;
 const QUEST_DONE    = (uid: string, day: string) => `ret:qdone:${uid}:${day}`;
@@ -644,6 +647,12 @@ async function runRetentionTick(): Promise<void> {
   if (hour >= 9 && hour <= 11) {
     await sendWarmMorningNotes(_bot);
   }
+  if (hour >= 10 && hour <= 13) {
+    await runGroupClubWeeklyPosts(_bot).catch(() => {});
+  }
+  if (hour >= 17 && hour <= 20) {
+    await sendSundayWeekReports(_bot).catch(() => {});
+  }
   if (hour >= 19 && hour <= 21) {
     await sendGentleEveningNotes(_bot);
   }
@@ -679,11 +688,19 @@ async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
 
       const note = pickNote(WARM_DAILY_NOTES, `${day}:${uid}`);
       const botd = await bookOfDayMorningBlock();
+      let personalBit = "";
+      try {
+        const pw = await getPersonalWeekStats(uid);
+        if (pw.total > 0) personalBit = `📅 أسبوعك حتى الآن: *${pw.total}* تحميل\n`;
+        const taste = await getTopInterests(uid, 1);
+        if (taste[0]) personalBit += `🎭 أقرب ذوق: ${taste[0].label}\n`;
+      } catch { /* */ }
       const text =
         `🕊 *رسالة من ${BOT_NAME}*\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `${escMd(note)}\n\n` +
-        `${botd.text}\n\n` +
+        `${botd.text}\n` +
+        (personalBit ? `\n${personalBit}\n` : `\n`) +
         `*يمكنك:*\n` +
         `◦ طلب كتاب اليوم من الزر\n` +
         `◦ كتابة عنوان كتاب\n` +

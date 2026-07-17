@@ -36,22 +36,25 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       ],
       [
         { text: "👤  ملفي", callback_data: "my_profile" },
+        { text: "📊  أسبوعي أنا", callback_data: "my_week" },
+      ],
+      [
         { text: "📊  رصيدي اليوم", callback_data: "my_stats" },
-      ],
-      [
         { text: "📚  آخر تحميلاتي", callback_data: "my_history" },
+      ],
+      [
         { text: "🔖  أمنياتي", callback_data: "wishlist_view" },
-      ],
-      [
         { text: "🏆  الأكثر طلباً", callback_data: "top_books" },
+      ],
+      [
         { text: "📅  هذا الأسبوع", callback_data: "weekly_refresh" },
-      ],
-      [
         { text: "🎨  اصنع صورة", callback_data: "img_gen" },
-        { text: "🎁  ادعُ صديقاً", callback_data: "invite_view" },
       ],
       [
+        { text: "🎁  ادعُ صديقاً", callback_data: "invite_view" },
         { text: "⭐  Premium", callback_data: "premium_buy" },
+      ],
+      [
         { text: "❓  كيف أستخدم رفيق؟", callback_data: "help" },
       ],
     ],

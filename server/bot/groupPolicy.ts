@@ -5,6 +5,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import { GROUP_FREE_TEXT_CHAT_IDS } from "./config.js";
+import { GROUP_CLUB_WELCOME_EXTRA } from "./groupClub.js";
 
 const RATE_KEY = (chatId: number, userId: string) =>
   `grp:rate:${chatId}:${userId}`;
@@ -64,7 +65,7 @@ export async function maybeSoftNotBookReply(
       `📚 *لبحث عن كتاب:* اكتب العنوان مباشرة\n` +
         `مثال: \`فكر وازدد ثراء\`\n\n` +
         `_أو:_ \`بوت اسم الكتاب\`\n` +
-        `_الأوامر:_ /help · /random · /premium`,
+        `_الأوامر:_ /help · /random · /club · /premium`,
       {
         parse_mode: "Markdown",
         reply_to_message_id: replyToMsgId,
@@ -86,7 +87,8 @@ export const GROUP_WELCOME_TEXT =
   `◦ يمكنك طلب ملخّص بعد التحميل\n` +
   `◦ أزرار: مفاجأة · أمنيات · Premium\n\n` +
   `*نصيحة:* العنوان وحده يكفي غالباً.\n` +
-  `_/help للشرح · /daily لتسجيل الحضور_`;
+  `_/help للشرح · /daily لتسجيل الحضور · /club لنادي الأسبوع_` +
+  GROUP_CLUB_WELCOME_EXTRA;
 
 export async function maybeSendGroupWelcome(
   bot: TelegramBot,

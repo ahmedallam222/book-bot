@@ -22,6 +22,8 @@ import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTI
 import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
+import { sendPersonalWeekReport } from "./personalWeek.js";
+import { buildGroupClubMessage, kbGroupClub, getGroupClubBook, maybePostWeeklyClub } from "./groupClub.js";
 import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { pickFresh } from "./uiVariants.js";
 import {
@@ -281,6 +283,34 @@ export function registerCommands(
       });
     } catch (e) {
       L.error("cmd", "/today error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+
+  // ── /myweek — تقرير أسبوعي شخصي ────────────
+  bot.onText(/^\/(?:myweek|weekme|أسبوعي|تقريري)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      await sendPersonalWeekReport(bot, chatId, userId);
+    } catch (e) {
+      L.error("cmd", "/myweek error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+  // ── /club — نادي المجموعة / كتاب النادي ─────
+  bot.onText(/^\/(?:club|نادي)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      const text = await buildGroupClubMessage(chatId);
+      const { title } = await getGroupClubBook(chatId);
+      await bot.sendMessage(chatId, text, {
+        parse_mode: "Markdown",
+        reply_markup: kbGroupClub(title),
+      });
+    } catch (e) {
+      L.error("cmd", "/club error", { err: String(e).slice(0, 100) });
     }
   });
 

@@ -18,6 +18,7 @@ import { getStreakState } from "./streak.js";
 import { getUserBadges, BADGES }     from "./badges.js";
 import { buildRetentionProfileBlock } from "./retention.js";
 import { buildInterestProfileLine } from "./interests.js";
+import { buildPersonalWeekProfileLine } from "./personalWeek.js";
 import { getReferralState }          from "./referral.js";
 import { ARABIC_SOURCES }            from "./sources.js";
 import type { SourceStat }           from "./analytics.js";
@@ -71,7 +72,7 @@ export function buildWelcome(
     `${balanceLine}\n` +
     `🌍 أدور لك في *${sourceCount}* مصدر\n\n` +
     `*أتريد كتاباً؟* اكتب عنوانه في المحادثة.\n` +
-    `*ألست متأكّداً؟* اضغط «كتاب مفاجأة» أو «كيف أستخدم رفيق؟».\n\n` +
+    `*ألست متأكّداً؟* مفاجأة · كتاب اليوم · /myweek لتقريرك.\n\n` +
     `_رفيق جاهز._ ✨`
   );
 }
@@ -142,9 +143,10 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
-  const [retentionBlock, interestLine] = await Promise.all([
+  const [retentionBlock, interestLine, weekLine] = await Promise.all([
     buildRetentionProfileBlock(userId).catch(() => ""),
     buildInterestProfileLine(userId).catch(() => ""),
+    buildPersonalWeekProfileLine(userId).catch(() => ""),
   ]);
 
   return (
@@ -155,10 +157,12 @@ export async function buildProfileMessage(userId: string, name: string): Promise
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
     (interestLine ? `${interestLine}\n` : "") +
+    (weekLine ? `${weekLine}\n` : "") +
     (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
     `*أوامر سريعة:*\n` +
     `◦ /daily — سجّل حضورك اليوم\n` +
+    `◦ /myweek — تقرير أسبوعك\n` +
     `◦ /stats — كم تحميلاً يتبقّى لك اليوم\n` +
     `◦ /invite — ادعُ صديقاً`
   );

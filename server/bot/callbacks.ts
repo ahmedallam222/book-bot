@@ -31,6 +31,7 @@ import { claimDaily, RETENTION_TIPS } from "./retention.js";
 import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { replyKeyboardMain } from "./replyKeyboard.js";
 import { completeOnboarding } from "./onboarding.js";
+import { sendPersonalWeekReport } from "./personalWeek.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
 import { pickFresh } from "./uiVariants.js";
@@ -574,6 +575,15 @@ export function registerCallbackHandler(
           });
         } catch (e) {
           L.error("cb", "invite_view error", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "my_week": {
+        try {
+          await sendPersonalWeekReport(bot, chatId, userId);
+        } catch (e) {
+          L.error("cb", "my_week failed", { err: String(e).slice(0, 100) });
         }
         break;
       }

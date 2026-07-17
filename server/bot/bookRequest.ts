@@ -55,6 +55,7 @@ import {
 import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badges.js";
 import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
 import { recordInterest } from "./interests.js";
+import { maybeGroupDeliveryWhisper } from "./groupClub.js";
 import { getRelatedBooks, pickReadingTip, buildDiscoverFooter } from "./discover.js";
 import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
@@ -1483,6 +1484,7 @@ _حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُ
   const related = await getRelatedBooks(bookName, userId, 2).catch(() => [] as string[]);
   const tip = pickReadingTip(bookName + userId);
   recordInterest(userId, bookName).catch(() => {});
+  maybeGroupDeliveryWhisper(bot, chatId, bookName).catch(() => {});
 
   let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
   if (related.length > 0) {
