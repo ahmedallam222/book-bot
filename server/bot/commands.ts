@@ -23,6 +23,8 @@ import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
 import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
+import { sendPersonalMonthReport } from "./personalMonth.js";
+import { buildShareCardMessage, kbShareCard } from "./shareCard.js";
 import { tryGroupSocialReply, sendGroupPlaybook } from "./groupInteract.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
@@ -294,6 +296,42 @@ export function registerCommands(
 
 
   // ── /myweek — تقرير أسبوعي شخصي ────────────
+  
+  bot.onText(/^\/(?:mymonth|month|شهري|شهري)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      await sendPersonalMonthReport(bot, chatId, userId);
+    } catch (e) {
+      L.error("cmd", "/mymonth error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:share|مشاركة)(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    const q = (match?.[1] || "").trim();
+    try {
+      let title = q;
+      if (!title) {
+        const { getLastBook } = await import("./library.js");
+        title = (await getLastBook(userId)) || "";
+      }
+      if (!title) {
+        await bot.sendMessage(chatId, `📤 اكتب: \`/share عنوان الكتاب\` أو حمّل كتاباً أولاً.`, { parse_mode: "Markdown" });
+        return;
+      }
+      const uname = getBotUsername();
+      await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+        parse_mode: "Markdown",
+        reply_markup: kbShareCard(title),
+      });
+    } catch (e) {
+      L.error("cmd", "/share error", { err: String(e).slice(0, 80) });
+    }
+  });
+
   bot.onText(/^\/(?:myweek|weekme|أسبوعي|تقريري)(?:@\w+)?$/i, async (msg) => {
     const chatId = msg.chat.id;
     const userId = String(msg.from?.id || "");

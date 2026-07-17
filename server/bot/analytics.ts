@@ -251,6 +251,10 @@ export async function trackDownload(
       const { recordPersonalWeekDownload } = await import("./personalWeek.js");
       const title = (canonicalTitle && canonicalTitle.trim()) ? canonicalTitle.trim() : bookName;
       await recordPersonalWeekDownload(userId, title);
+      try {
+        const { recordPersonalMonthDownload } = await import("./personalMonth.js");
+        await recordPersonalMonthDownload(userId, title);
+      } catch { /* */ }
     } catch { /* */ }
   }
   // Bug #11 — source counters now live in per-day buckets so the

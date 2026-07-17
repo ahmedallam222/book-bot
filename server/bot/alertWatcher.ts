@@ -154,6 +154,38 @@ async function runCheck(bot: TelegramBot): Promise<void> {
       }
     }
   } catch { /* metrics optional */ }
+
+  // ── 7. فشل توليد الصور ──
+  try {
+    const imgFail = parseInt((await redis.get("tel:imageGen:fail")) || "0", 10) || 0;
+    const imgOk = parseInt((await redis.get("tel:imageGen:success")) || "0", 10) || 0;
+    const imgTotal = imgFail + imgOk;
+    if (imgTotal >= 15 && imgFail / imgTotal > 0.45) {
+      const lock = await redis.set("alert:last:img_fail", String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
+      if (lock === "OK") {
+        await sendToAdmins(bot,
+          `🎨 *تنبيه: فشل توليد الصور مرتفع*\n\n` +
+          `❌ فشل: *${imgFail}* · ✅ نجاح: *${imgOk}*\n` +
+          `_راجع /admin → الصور_`,
+        );
+      }
+    }
+  } catch { /* */ }
+
+  // ── 8. طابور متراكم ──
+  try {
+    const backlog = (qs.highQueue || 0) + (qs.normalQueue || 0);
+    if (backlog >= 40) {
+      const lock = await redis.set("alert:last:queue_backlog", String(now), "EX", ALERT_COOLDOWN_SEC, "NX").catch(() => null);
+      if (lock === "OK") {
+        await sendToAdmins(bot,
+          `📋 *تنبيه: طابور متراكم*\n\n` +
+          `High: *${qs.highQueue}* · Normal: *${qs.normalQueue}* · نشط: *${qs.totalActiveJobs}*\n` +
+          `_/admin → الطابور_`,
+        );
+      }
+    }
+  } catch { /* */ }
 }
 
 /** يُستدعى مرة واحدة عند بدء البوت */

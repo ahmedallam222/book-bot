@@ -20,6 +20,8 @@ import {
   getAdminPending, clearAdminPending,
 } from "./adminControl.js";
 import { isBanned } from "./guards.js";
+import { buildAdminAuditMessage } from "./adminAudit.js";
+import { buildSystemHealthMessage, buildBackupStatusMessage, runBackupNow } from "./adminHealth.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
@@ -407,6 +409,81 @@ export async function handleAdminCallback(
     switch (data) {
 
       // ── إحصاءات تفصيلية ─────────────────────────────
+
+
+      case "admin_health": {
+        const text = await buildSystemHealthMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_health" },
+            { text: "🔙 اللوحة", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+      case "admin_audit": {
+        const text = await buildAdminAuditMessage(40);
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+      case "admin_backup": {
+        const text = await buildBackupStatusMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            [{ text: "▶️ تشغيل نسخة الآن", callback_data: "admin_backup_run" }],
+            [{ text: "🔄 تحديث القائمة", callback_data: "admin_backup" }],
+            [{ text: "🔙 اللوحة", callback_data: "admin_panel" }],
+          ]},
+        }).catch(() => {});
+        break;
+      }
+      case "admin_backup_run": {
+        await bot.sendMessage(chatId, `⏳ *جارٍ تشغيل النسخة الاحتياطية…* قد يستغرق دقيقة.`, { parse_mode: "Markdown" }).catch(() => {});
+        const res = await runBackupNow();
+        L.adminAction(userId, res.ok ? "backup ok" : "backup fail");
+        await bot.sendMessage(chatId,
+          (res.ok ? `✅ *اكتملت النسخة*\n\n` : `⚠️ *فشلت النسخة*\n\n`) +
+          "```\n" + res.log.slice(0, 1200).replace(/```/g, "") + "\n```",
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+        const status = await buildBackupStatusMessage();
+        await bot.sendMessage(chatId, status, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+      case "admin_help_doc": {
+        await bot.sendMessage(chatId,
+          `📖 *دليل الأدمن — رفيق*\n` +
+          `━━━━━━━━━━━━━━━━\n\n` +
+          `*المراقبة:*\n` +
+          `◦ /admin — اللوحة\n` +
+          `◦ بث حي · إحصاءات · Funnel · Retention · صور · أحداث\n` +
+          `◦ 🏥 صحة النظام · 📜 سجل التحكم\n\n` +
+          `*السيطرة:*\n` +
+          `◦ 🎛 مركز التحكم — ميزات ON/OFF · حدود · حظر · Premium\n` +
+          `◦ إعلان · صيانة · تفريغ كاش · مجموعات\n` +
+          `◦ 💾 نسخ احتياطي يدوي\n\n` +
+          `*أوامر نصية:*\n` +
+          `◦ /ban ID · /unban ID\n` +
+          `◦ /premium_add ID · /premium_remove ID\n` +
+          `◦ /set_limit ID N\n\n` +
+          `*تنبيهات تلقائية كل 5 دقائق:*\n` +
+          `◦ DLQ · نجاح منخفض · Firecrawl · بطء p95 · صور · طابور\n\n` +
+          `_كل إجراء مهم يُسجَّل في سجل التحكم._`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+          },
+        ).catch(() => {});
+        break;
+      }
 
       case "admin_live": {
         const text = await buildAdminLiveMessage();

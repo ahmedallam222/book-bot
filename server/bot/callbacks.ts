@@ -36,6 +36,8 @@ import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libra
 import { togglePref, isPrefKey, buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
 import { answerMicro, skipMicro } from "./microHabit.js";
 import { voteClubBook } from "./groupClub.js";
+import { buildShareCardMessage, kbShareCard } from "./shareCard.js";
+import { sendPersonalMonthReport } from "./personalMonth.js";
 import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries } from "./curated.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
@@ -437,6 +439,31 @@ export function registerCallbackHandler(
 
 
     // ── library / curated ──
+    if (data.startsWith("share:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const key = data.slice(6);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة.").catch(() => {});
+          return;
+        }
+        const uname = getBotUsername?.() || "";
+        await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+          parse_mode: "Markdown",
+          reply_markup: kbShareCard(title),
+        });
+      } catch (e) {
+        L.error("cb", "share failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+    if (data === "my_month") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try { await sendPersonalMonthReport(bot, chatId, userId); } catch { /* */ }
+      return;
+    }
     if (data === "prefs_menu") {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       try {

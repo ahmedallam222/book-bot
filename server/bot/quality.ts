@@ -61,8 +61,8 @@ export function buildQualityBlock(q: QualityInput): string {
       : null;
   const path = q.fromCache ? "تسليم سريع (من ذاكرة رفيق)" : "بحث جديد ثم تحقق";
   const match = q.isSuspect
-    ? "⚠︎ قد يحتاج تدقيق العنوان"
-    : "✓ مرّ بفحوصات التطابق المتاحة";
+    ? "⚠︎ تطابق غير مؤكد — راجع العنوان"
+    : "✓ اجتاز فحوصات التطابق المتاحة (ليست ضماناً مطلقاً)";
 
   const bits = [
     `◦ المسار: ${path}`,

@@ -113,6 +113,9 @@ export function kbAfterSuccess(
     { text: "📚  مكتبتي", callback_data: "my_library" },
     { text: "▶️  أكمل لاحقاً", callback_data: "lib_continue" },
   ]);
+  rows.push([
+    { text: "📤  مشاركة", callback_data: safeCb(`share:${retryK}`) },
+  ]);
 
   if (isPrem) {
     rows.push([

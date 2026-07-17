@@ -135,8 +135,12 @@ export async function maybeBackfillLibrary(userId: string): Promise<number> {
     const n = await redis.zcard(ZKEY(userId));
     if (n > 0) return 0;
     const flag = await redis.set(`lib:backfilled:${userId}`, "1", "EX", 400 * 86400, "NX");
-    if (flag !== "OK") return 0;
-    const hist = await storage.getUserSearchHistory(userId, 40);
+    // allow one refresh path: if zcard 0 even after flag, still fill
+    if (flag !== "OK") {
+      const n2 = await redis.zcard(ZKEY(userId));
+      if (n2 > 0) return 0;
+    }
+    const hist = await storage.getUserSearchHistory(userId, 100);
     let added = 0;
     for (const h of hist) {
       const q = (h.query || "").trim();

@@ -323,6 +323,14 @@ export function adminPanelKeyboard(isMaint: boolean): {
         { text: "🎛 مركز التحكم", callback_data: "admin_control" },
       ],
       [
+        { text: "🏥 صحة النظام", callback_data: "admin_health" },
+        { text: "📜 سجل التحكم", callback_data: "admin_audit" },
+      ],
+      [
+        { text: "💾 النسخ الاحتياطي", callback_data: "admin_backup" },
+        { text: "📖 دليل الأدمن", callback_data: "admin_help_doc" },
+      ],
+      [
         { text: "⚡ بث حي", callback_data: "admin_live" },
         { text: "📊 إحصاءات", callback_data: "admin_stats" },
       ],
