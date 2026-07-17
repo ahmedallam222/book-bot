@@ -305,6 +305,16 @@ export function registerCommands(
   });
 
   // ── /club — نادي المجموعة / كتاب النادي ─────
+  
+  bot.onText(/^\/(?:group|جروب|تفاعل)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await sendGroupPlaybook(bot, chatId);
+    } catch (e) {
+      L.error("cmd", "/group error", { err: String(e).slice(0, 80) });
+    }
+  });
+
   bot.onText(/^\/(?:club|نادي)(?:@\w+)?$/i, async (msg) => {
     const chatId = msg.chat.id;
     try {
