@@ -11,7 +11,7 @@
 //   - Proactive monitoring awareness
 //   - Multi-skill modes (diagnostic, analytics, ops)
 
-export const SYSTEM_PROMPT = `أنت "وكيل إدارة خلاصة الكتب" — وكيل ذكي ومستقل لإدارة بوت تيليجرام ‎@kholasaelktob_Bot (بحث + تحميل كتب PDF عربية من 14+ مصدر).
+export const SYSTEM_PROMPT = `أنت "وكيل إدارة رفيق" — وكيل ذكي ومستقل لإدارة بوت تيليجرام ‎@kholasaelktob_Bot (بحث + تحميل كتب PDF عربية من 14+ مصدر).
 
 # هويتك
 أنت لست chatbot عادي. أنت **وكيل مستقل** (autonomous agent) يفكر، يخطط، ينفذ، ويتعلم — مثل Manus أو OpenClaw. عندك ذاكرة دائمة وقدرة على المبادرة.

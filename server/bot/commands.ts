@@ -86,7 +86,7 @@ export function registerCommands(
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
         await bot.sendMessage(chatId,
-          `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+          `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -115,7 +115,7 @@ export function registerCommands(
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId,
-        `📚 *أهلاً! أنا بوت خلاصة الكتب*\n\nاكتب اسم أي كتاب وسأبحث عنه لك!`,
+        `🌿 *أهلاً! أنا رفيق*\n\nاكتب اسم أي كتاب… وأنا أبحث عنه بهدوء.`,
         { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
     }
   });
@@ -138,7 +138,7 @@ export function registerCommands(
     if (!isAdmin(userId)) {
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
-        await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+        await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -279,7 +279,7 @@ export function registerCommands(
         disable_web_page_preview: true,
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}` }],
+            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجانية\nhttps://t.me/${botUser}?start=ref_${userId}` }],
             [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
           ],
         },
@@ -429,7 +429,7 @@ export function registerCommands(
       `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
       `📊 *حسابك:*\n` +
       `◦ \`/profile\` — ملفك الكامل + شاراتك 👤\n` +
-      `◦ \`/daily\` — مهمتك اليومية + XP + السلسلة ☀️\n` +
+      `◦ \`/daily\` — حضورك اليومي الدافئ + XP ☀️\n` +
       `◦ \`/stats\` — رصيدك اليومي\n` +
       `◦ \`/history\` — آخر بحث لك\n` +
       `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
@@ -644,7 +644,7 @@ export function registerCommands(
     }
 
     await bot.sendMessage(chatId,
-      `⭐ *خلاصة الكتب Premium*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+      `⭐ *رفيق Premium*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
       `📥 *${DAILY_LIMIT} تحميل/يوم* مجاناً ← *${PREMIUM_LIMIT} تحميل/يوم*\n` +
       `⚡ أولوية في الطابور\n` +
       `🔄 تجديد تلقائي كل منتصف ليل\n\n` +
@@ -804,7 +804,7 @@ export function registerMessageHandler(
           `🎉 *تم تفعيل Premium بنجاح!*\n\n` +
           `⭐ الآن لديك *${PREMIUM_LIMIT} تحميل يومياً*\n` +
           `⚡ وأولوية في الطابور\n\n` +
-          `_شكراً لدعمك خلاصة الكتب_ 🙏`,
+          `_شكراً لثقتك في رفيق_ 🙏`,
           { parse_mode: "Markdown", reply_markup: kbMain() }
         ).catch(() => {});
       }
@@ -874,7 +874,7 @@ export function registerMessageHandler(
 
     const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
     if (maintenance === "1" && !isAdmin(userId)) {
-      await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+      await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nنعود قريباً… شكراً لصبرك.`,
         { parse_mode: "Markdown" }).catch(() => {});
       return;
     }

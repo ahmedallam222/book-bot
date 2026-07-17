@@ -16,7 +16,7 @@ export async function parseChatIntent(userText: string): Promise<{
     { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_2, model: "mistral-large" }
   ].filter(e => !!e.key);
 
-  const systemPrompt = `You are a helpful AI assistant for a Telegram bot named "خلاصة الكتب" (Book Summaries).
+  const systemPrompt = `You are a helpful AI assistant for a Telegram bot named "رفيق" (Rafiq — warm book companion). Prefer calm warm Arabic; never pressure downloads.
 Your goal is to parse user intents. 
 If the user is chatting, saying hi, or asking a general question, reply kindly in Arabic.
 If they want a book, extract the exact, clean book name.

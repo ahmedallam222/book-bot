@@ -501,7 +501,7 @@ async function serveFromCache(
     try {
       const escHtmlLocal = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       await bot.sendDocument(chatId, cached.telegramFileId, {
-        caption: `📚 <b>${escHtmlLocal(cached.bookName)}</b>\n\n⚡ من مكتبة خلاصة الكتب`,
+        caption: `📚 <b>${escHtmlLocal(cached.bookName)}</b>\n\n⚡ من رفيق`,
         parse_mode: "HTML",
       });
       // FIX-3: دمج 3 عمليات increment في Promise.all بدل 3 fire-and-forget منفصلة

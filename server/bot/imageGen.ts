@@ -43,6 +43,7 @@ import {
   GEMINI_API_KEY,
   PREMIUM_STARS_PRICE,
 } from "./config.js";
+import { onSuccessfulImage } from "./retention.js";
 
 const MAX_PROMPT_LEN = 1000;
 const MIN_PROMPT_LEN = 3;
@@ -506,6 +507,7 @@ async function runGeneration(
   });
   redis.incr(NB_TOTAL_SUCCESS_KEY).catch(() => {});
   recordSuccessfulImage(userId).catch(() => {});
+  onSuccessfulImage(userId).catch(() => {});
 
   // خزّن (prompt + url) تحت hash قصير عشان الأزرار تشتغل
   const hash = shortHash();
@@ -527,7 +529,7 @@ async function runGeneration(
   const seconds = (elapsedMs / 1000).toFixed(1);
   const providerTag = result.provider ? ` · ${result.provider}` : "";
   const caption =
-    `🎨 *الصورة جاهزة* (${seconds}s${providerTag})\n\n` +
+    `🎨 *صورتك جاهزة — بلطف* (${seconds}s${providerTag})\n\n` +
     `📝 \`${escMd(prompt.slice(0, 200))}\`${remainingLine}`;
 
   const downloaded = result.buffer

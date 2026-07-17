@@ -47,9 +47,9 @@ export function buildWelcome(
 
   if (isFirstTime) {
     return (
-      `✨ *مرحباً بك في خلاصة الكتب*\n` +
+      `🌿 *مرحباً… أنا رفيق*\n` +
       `${DIV}\n` +
-      `أهلاً *${escMd(name)}* — مكتبتك العربية الذكية.\n\n` +
+      `أهلاً *${escMd(name)}* — رفيقك في عالم الكتب.\n\n` +
       `*ابدأ في 3 ثوانٍ:*\n` +
       `① اكتب اسم أي كتاب\n` +
       `② انتظر البحث الذكي\n` +
@@ -60,7 +60,7 @@ export function buildWelcome(
       `◦ /help — الدليل الكامل\n\n` +
       `${balanceLine}\n` +
       `🌍 *${sourceCount}* مصدراً عربياً تحت أمرك\n\n` +
-      `_اكتب عنوان كتابك الأول وانطلق._ 📖`
+      `_اكتب عنواناً متى شئت… بلا استعجال._ 📖`
     );
   }
 
@@ -69,7 +69,7 @@ export function buildWelcome(
     `${DIV}\n` +
     `${balanceLine}\n` +
     `🌍 *${sourceCount}* مصدراً عربياً جاهزاً\n\n` +
-    `_اكتب اسم الكتاب — ودع الباقي عليّ._ ✨`
+    `_اكتب اسم الكتاب — ودع الباقي على رفيق._ ✨`
   );
 }
 
@@ -172,7 +172,7 @@ export async function sendAdminPanel(bot: TelegramBot, chatId: number): Promise<
       : 0;
 
     const msg =
-      `🔧 *لوحة التحكم — خلاصة الكتب*\n` +
+      `🔧 *لوحة التحكم — رفيق*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
       `📊 *اليوم:*\n` +
       `◦ طلبات: *${today.requests ?? 0}* | نجح: *${today.found ?? 0}* (${successRate}%)\n` +

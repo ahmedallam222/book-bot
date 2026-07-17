@@ -78,15 +78,15 @@ export async function maybeSoftNotBookReply(
 }
 
 export const GROUP_WELCOME_TEXT =
-  `📚 *أهلاً — خلاصة الكتب داخل تيليجرام*\n\n` +
-  `اكتب *اسم الكتاب أو الرواية مباشرة* وسأبحث عنه.\n` +
+  `📚 *أهلاً — رفيق داخل تيليجرام*\n\n` +
+  `اكتب *اسم الكتاب أو الرواية مباشرة* وسأبحث عنه بهدوء.\n` +
   `مثال: \`فكر وازدد ثراء\`\n\n` +
   `*ماذا أقدّم؟*\n` +
   `◦ بحث ذكي + PDF موثوق\n` +
   `◦ ملخّص ذكي بعد التحميل\n` +
   `◦ أمنيات · مفاجآت · أولوية Premium\n\n` +
   `*نصيحة:* العنوان وحده يكفي — بلا منشن.\n` +
-  `_/help · /random · /premium_`;
+  `_/help · /daily · /random · /premium_`;
 
 export async function maybeSendGroupWelcome(
   bot: TelegramBot,

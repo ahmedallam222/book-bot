@@ -350,7 +350,7 @@ export async function startAdminAgent(): Promise<void> {
       return;
     }
     await bot.sendMessage(msg.chat.id,
-      "🤖 *وكيل إدارة خلاصة الكتب*\n\n" +
+      "🤖 *وكيل إدارة رفيق*\n\n" +
       "اسألني عن أي حاجة في البوت — إحصاءات، users، sources، logs.\n" +
       "أو اطلب مني أعمل حاجة — pause source، منح premium، broadcast.\n\n" +
       "أوامر سريعة:\n" +

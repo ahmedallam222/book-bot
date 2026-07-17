@@ -233,13 +233,13 @@ export function formatStreakLine(s: StreakUpdate): string | null {
 export function buildMilestoneMessage(milestone: number): string {
   switch (milestone) {
     case 3:
-      return `🔥 *ثلاثة أيام متتالية!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_بدأت العادة تثبّت — استمر 4 أيام تانية لـ "أسبوع كامل"_ 🚀`;
+      return `🔥 *ثلاثة أيام متتالية!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_عادة لطيفة بدأت… من غير ما نثقل عليك._ ✨`;
     case 7:
       return `🔥🔥 *أسبوع كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_شغف القراءة هنا حقيقي — أنت في الـ 5% الأعلى_ 🌟`;
     case 14:
       return `🔥🔥🔥 *أسبوعين!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_مستوى استثنائي — حتى القرّاء المحترفون يعتبرونك مرجع_ 🏆`;
     case 30:
-      return `🌟 *شهر كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_أنت أسطورة الـ kholasaelktob — ادعُ أصدقاءك واحصل على Premium مجاني_ 👑`;
+      return `🌟 *شهر كامل!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_شهر كامل مع رفيق — لو حابب، ادعُ صديقاً بلطف_ 👑`;
     case 60:
       return `🌟🌟 *شهرين متتاليين!*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_مستوى نادر جداً — أنت في الـ 0.1% الأعلى_ 💎`;
     case 100:
@@ -254,5 +254,5 @@ export function buildMilestoneMessage(milestone: number): string {
  * Threshold: نُظهرها فقط لو الـ broken ≥ 3 (لا نُزعج بسلاسل صغيرة).
  */
 export function buildBrokenStreakMessage(broken: number): string {
-  return `💔 *خسرت سلسلة ${broken} يوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_مفيش مشكلة — البداية الجديدة هي الأهم. سلسلة جديدة بدأت اليوم_ 💪`;
+  return `🌿 *انقطعت سلسلة ${broken} يوم*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n_عادي جداً. البداية من جديد بهدوء… ورَفيق لسه معاك._ ✨`;
 }

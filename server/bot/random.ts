@@ -4,6 +4,7 @@ import { L }        from "./logger.js";
 import { GENRE_MAP, SUGGESTIONS } from "./suggestions.js";
 import { handleBookRequest }      from "./bookRequest.js";
 import { escMd }                  from "./text.js";
+import { onSuccessfulRandom } from "./retention.js";
 
 // ══════════════════════════════════════════════
 // RANDOM — كتاب مفاجأة بجنس أدبي
@@ -114,7 +115,7 @@ export async function handleRandomCommand(
     await bot.sendMessage(chatId,
       `🎲 *اختر نوع الكتاب*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_سأختار لك كتاباً مميزاً من هذا النوع_`,
+      `_سأختار لك شيئاً بلطف — بلا ضغط_`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } }
     ).catch(() => {});
     return;
@@ -179,5 +180,6 @@ async function handleRandomByGenre(
     userId,
   });
 
+  onSuccessfulRandom(userId).catch(() => {});
   await handleBookRequest(bot, chatId, userId, bookName, token, username);
 }

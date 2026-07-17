@@ -244,7 +244,7 @@ export function registerCallbackHandler(
       try {
         await (bot as any).sendInvoice(
           chatId,
-          "خلاصة الكتب Premium ⭐",
+          "رفيق Premium ⭐",
           `احصل على ${PREMIUM_LIMIT} تحميل يومياً بدلاً من ${DAILY_LIMIT} — لمدة 30 يوماً`,
           `premium:${userId}`,  // payload — يُستخدم عند successful_payment
           "",                   // provider_token — فارغ لـ Telegram Stars
@@ -524,7 +524,7 @@ export function registerCallbackHandler(
               inline_keyboard: [
                 [{
                   text: "📤  مشاركة الرابط",
-                  switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}`,
+                  switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجانية\nhttps://t.me/${botUser}?start=ref_${userId}`,
                 }],
                 [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
               ],

@@ -1,7 +1,7 @@
 {
-  "name": "kholasa-books-bot",
+  "name": "rafiq-book-bot",
   "version": "32.2.0",
-  "description": "خلاصة الكتب — Arabic Telegram Book Download Bot",
+  "description": "رفيق — Arabic Telegram book companion bot",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"

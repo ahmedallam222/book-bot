@@ -5,7 +5,7 @@ import { storeRetryKey, storeFeedbackUrl, storeSummaryKey } from "./session.js";
 import { DIV, DIV_SOFT } from "./ui.js";
 
 // ══════════════════════════════════════════════════════════════
-// KEYBOARDS — خلاصة الكتب v7
+// KEYBOARDS — رفيق v8
 // ──────────────────────────────────────────────────────────────
 // فلسفة:
 //   • الصف الأول = الفعل الأكثر احتمالاً
@@ -39,7 +39,7 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       // Me
       [
         { text: "👤  ملفي",            callback_data: "my_profile"  },
-        { text: "☀️  يومي",            callback_data: "daily_quest" },
+        { text: "☀️  يوم رفيق",         callback_data: "daily_quest" },
       ],
       [
         { text: "📚  سجلّي",           callback_data: "my_history"  },

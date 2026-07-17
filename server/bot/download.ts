@@ -444,9 +444,9 @@ export function buildCaption(bookName: string, metaTitle: string): string {
                      cleanMeta.length >= 4 &&
                      norm(cleanMeta) !== norm(bookName);
   if (showActual) {
-    return `📚 <b>${escHtml(bookName)}</b>\n📖 <i>${escHtml(cleanMeta)}</i>\n\n✅ من خلاصة الكتب`;
+    return `📚 <b>${escHtml(bookName)}</b>\n📖 <i>${escHtml(cleanMeta)}</i>\n\n✅ من رفيق`;
   }
-  return `📚 <b>${escHtml(bookName)}</b>\n\n✅ من خلاصة الكتب`;
+  return `📚 <b>${escHtml(bookName)}</b>\n\n✅ من رفيق`;
 }
 
 // ══════════════════════════════════════════════

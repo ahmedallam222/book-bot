@@ -1,45 +1,52 @@
 // ══════════════════════════════════════════════
-// RETENTION ENGINE — عودة يومية + مهام + مستويات
+// RETENTION — رفيق: عادة خفيفة بلا إجبار
 //
-// يعمّق الـ streak/badges/referral الموجودين بـ:
-//   1) مهمة يومية (daily quest) — هدف بسيط كل يوم Cairo
-//   2) نقاط ومستويات (XP) — تتراكم مع التحميل/الملخص/المهام
-//   3) تذكير سلسلة القراءة — مساءً لمن عنده streak ولم يحمّل اليوم
-//   4) مكافأة العودة (comeback) — بعد غياب ≥ 3 أيام
-//   5) درع سلسلة أسبوعي (streak shield) — حماية مرة/أسبوع
+// فلسفة:
+//   • الحضور اليومي (/daily) هو الأساس — مش عدد التحميلات
+//   • «لفتة اليوم» اختيارية (اكتشاف / ملخص / صورة) — بونص لا عقوبة
+//   • التحميل يمنح XP بهدوء ولا يظهر كمهمة إجبارية
+//   • إشعار صباحي دافئ + تذكير مسائي لطيف (بلا ضغط)
+//   • مكافأة عودة بعد غياب · درع سلسلة أسبوعي
 //
-// التخزين: Redis فقط. fail-open. لا schema migration.
+// التخزين: Redis فقط. fail-open.
 // ══════════════════════════════════════════════
 
 import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import { cairoDateString, cairoHourNumber, escMd } from "./text.js";
+import {
+  BOT_NAME,
+  WARM_DAILY_NOTES,
+  WARM_EVENING_NOTES,
+} from "./brand.js";
 
 const QUEST_KEY     = (uid: string, day: string) => `ret:quest:${uid}:${day}`;
 const QUEST_DONE    = (uid: string, day: string) => `ret:qdone:${uid}:${day}`;
 const XP_KEY        = (uid: string) => `ret:xp:${uid}`;
 const LEVEL_KEY     = (uid: string) => `ret:lvl:${uid}`;
 const COMEBACK_KEY  = (uid: string) => `ret:comeback:${uid}`;
-const SHIELD_KEY    = (uid: string) => `ret:shield_week:${uid}`; // week id
-const REMIND_KEY    = (day: string) => `ret:reminded:${day}`; // set of uids already reminded
+const SHIELD_KEY    = (uid: string) => `ret:shield_week:${uid}`;
+const REMIND_KEY    = (day: string) => `ret:reminded:${day}`;
+const MORNING_KEY   = (day: string) => `ret:morning:${day}`;
 const DAILY_CLAIM   = (uid: string, day: string) => `ret:dclaim:${uid}:${day}`;
-const QUEST_STREAK  = (uid: string) => `ret:qstreak:${uid}`;
-const QUEST_LAST    = (uid: string) => `ret:qlast:${uid}`;
+const VISIT_STREAK  = (uid: string) => `ret:vstreak:${uid}`;
+const VISIT_LAST    = (uid: string) => `ret:vlast:${uid}`;
 
-// ── XP awards ─────────────────────────────────
+// ── XP (هادئ — مش grind) ─────────────────────
 export const XP = {
-  DOWNLOAD:       10,
-  CACHE_HIT:       4,
-  SUMMARY:        15,
-  QUEST_COMPLETE: 25,
-  DAILY_CLAIM:    8,
-  STREAK_DAY:      5, // bonus when streak transitions
-  COMEBACK:       20,
+  DOWNLOAD:       8,
+  CACHE_HIT:      3,
+  SUMMARY:        12,
+  IMAGE:          10,
+  RANDOM:         8,
+  QUEST_COMPLETE: 18,
+  DAILY_CLAIM:    12,
+  STREAK_DAY:     5,
+  COMEBACK:       18,
 } as const;
 
-// Level thresholds (cumulative XP)
-const LEVEL_THRESHOLDS = [0, 50, 120, 220, 350, 520, 750, 1050, 1450, 2000, 2800, 4000];
+const LEVEL_THRESHOLDS = [0, 40, 100, 180, 280, 420, 600, 850, 1150, 1550, 2100, 2800];
 
 export function levelFromXp(xp: number): number {
   let lvl = 1;
@@ -48,9 +55,8 @@ export function levelFromXp(xp: number): number {
     else break;
   }
   if (xp >= LEVEL_THRESHOLDS[LEVEL_THRESHOLDS.length - 1]) {
-    // every +1200 XP after last threshold → +1 level
     const extra = xp - LEVEL_THRESHOLDS[LEVEL_THRESHOLDS.length - 1];
-    lvl = LEVEL_THRESHOLDS.length + Math.floor(extra / 1200);
+    lvl = LEVEL_THRESHOLDS.length + Math.floor(extra / 1000);
   }
   return Math.max(1, lvl);
 }
@@ -59,17 +65,23 @@ export function xpToNextLevel(xp: number): { level: number; nextAt: number; rema
   const level = levelFromXp(xp);
   let nextAt: number;
   if (level < LEVEL_THRESHOLDS.length) {
-    nextAt = LEVEL_THRESHOLDS[level]; // level is 1-indexed; next threshold index = level
+    nextAt = LEVEL_THRESHOLDS[level];
   } else {
     const base = LEVEL_THRESHOLDS[LEVEL_THRESHOLDS.length - 1];
     const beyond = level - LEVEL_THRESHOLDS.length;
-    nextAt = base + (beyond + 1) * 1200;
+    nextAt = base + (beyond + 1) * 1000;
   }
   return { level, nextAt, remaining: Math.max(0, nextAt - xp) };
 }
 
-// ── Daily quest types ─────────────────────────
-export type QuestType = "download_1" | "download_2" | "summary_1" | "any_2";
+// ── لفتات اختيارية (مش كوتا تحميل) ───────────
+/** checkin = يكتمل تلقائياً مع /daily · الباقي فضول اختياري */
+export type QuestType =
+  | "checkin"
+  | "explore_random"
+  | "summary_soft"
+  | "image_soft"
+  | "curious_touch";
 
 export interface DailyQuest {
   type:        QuestType;
@@ -79,47 +91,87 @@ export interface DailyQuest {
   progress:    number;
   done:        boolean;
   rewardXp:    number;
+  optional:    boolean;
 }
 
 const QUEST_ROTATION: QuestType[] = [
-  "download_1",
-  "download_1",
-  "summary_1",
-  "download_2",
-  "download_1",
-  "any_2",
-  "summary_1",
+  "checkin",
+  "explore_random",
+  "checkin",
+  "summary_soft",
+  "curious_touch",
+  "checkin",
+  "image_soft",
 ];
 
 function questTypeForDay(day: string): QuestType {
-  // Stable per-day: hash date to index
   let h = 0;
   for (let i = 0; i < day.length; i++) h = (h * 31 + day.charCodeAt(i)) >>> 0;
   return QUEST_ROTATION[h % QUEST_ROTATION.length];
 }
 
-function questMeta(type: QuestType): { title: string; description: string; target: number } {
+function questMeta(type: QuestType): { title: string; description: string; target: number; optional: boolean } {
   switch (type) {
-    case "download_1":
-      return { title: "قارئ اليوم", description: "حمّل كتاباً واحداً اليوم", target: 1 };
-    case "download_2":
-      return { title: "نهم المعرفة", description: "حمّل كتابين اليوم", target: 2 };
-    case "summary_1":
-      return { title: "ملخّص ذكي", description: "اطلب ملخصاً لكتاب واحد", target: 1 };
-    case "any_2":
-      return { title: "يوم نشط", description: "نشاطان: تحميل أو ملخص (مجموع 2)", target: 2 };
+    case "checkin":
+      return {
+        title: "وجودك يكفي",
+        description: "سجّل حضورك من /daily — بلا أي تحميل مطلوب",
+        target: 1,
+        optional: false,
+      };
+    case "explore_random":
+      return {
+        title: "لفتة اكتشاف",
+        description: "اختياري: جرّب /random مرة — لو حابب فقط",
+        target: 1,
+        optional: true,
+      };
+    case "summary_soft":
+      return {
+        title: "لمحة سريعة",
+        description: "اختياري: اطلب ملخّصاً لكتاب يهمّك",
+        target: 1,
+        optional: true,
+      };
+    case "image_soft":
+      return {
+        title: "لمسة إبداع",
+        description: "اختياري: /img بوصف بسيط لصورة",
+        target: 1,
+        optional: true,
+      };
+    case "curious_touch":
+      return {
+        title: "فضول خفيف",
+        description: "اختياري: أي لمسة — بحث، مفاجأة، ملخص، أو صورة",
+        target: 1,
+        optional: true,
+      };
   }
 }
 
-async function getQuestProgress(userId: string, day: string): Promise<{ dl: number; sum: number }> {
+interface QuestProg {
+  claim: number;
+  random: number;
+  sum: number;
+  img: number;
+  touch: number;
+  dl: number;
+}
+
+async function getQuestProgress(userId: string, day: string): Promise<QuestProg> {
   try {
     const raw = await redis.hgetall(QUEST_KEY(userId, day));
     return {
-      dl:  parseInt(raw?.dl  || "0", 10) || 0,
-      sum: parseInt(raw?.sum || "0", 10) || 0,
+      claim:  parseInt(raw?.claim  || "0", 10) || 0,
+      random: parseInt(raw?.random || "0", 10) || 0,
+      sum:    parseInt(raw?.sum    || "0", 10) || 0,
+      img:    parseInt(raw?.img    || "0", 10) || 0,
+      touch:  parseInt(raw?.touch  || "0", 10) || 0,
+      dl:     parseInt(raw?.dl     || "0", 10) || 0,
     };
   } catch {
-    return { dl: 0, sum: 0 };
+    return { claim: 0, random: 0, sum: 0, img: 0, touch: 0, dl: 0 };
   }
 }
 
@@ -128,10 +180,35 @@ export async function getDailyQuest(userId: string): Promise<DailyQuest> {
   const type = questTypeForDay(day);
   const meta = questMeta(type);
   const prog = await getQuestProgress(userId, day);
+  const claimed = (await redis.get(DAILY_CLAIM(userId, day)).catch(() => null)) === "1";
+
   let progress = 0;
-  if (type === "download_1" || type === "download_2") progress = prog.dl;
-  else if (type === "summary_1") progress = prog.sum;
-  else progress = prog.dl + prog.sum;
+  switch (type) {
+    case "checkin":
+      progress = claimed || prog.claim > 0 ? 1 : 0;
+      break;
+    case "explore_random":
+      progress = prog.random;
+      break;
+    case "summary_soft":
+      progress = prog.sum;
+      break;
+    case "image_soft":
+      progress = prog.img;
+      break;
+    case "curious_touch": {
+      const any =
+        prog.touch > 0 ||
+        prog.random > 0 ||
+        prog.sum > 0 ||
+        prog.img > 0 ||
+        prog.dl > 0 ||
+        claimed ||
+        prog.claim > 0;
+      progress = any ? 1 : 0;
+      break;
+    }
+  }
 
   const doneFlag = await redis.get(QUEST_DONE(userId, day)).catch(() => null);
   const done = doneFlag === "1" || progress >= meta.target;
@@ -144,7 +221,16 @@ export async function getDailyQuest(userId: string): Promise<DailyQuest> {
     progress: Math.min(progress, meta.target),
     done,
     rewardXp: XP.QUEST_COMPLETE,
+    optional: meta.optional,
   };
+}
+
+async function bumpField(userId: string, field: string, n = 1): Promise<void> {
+  const day = cairoDateString();
+  try {
+    await redis.hincrby(QUEST_KEY(userId, day), field, n);
+    await redis.expire(QUEST_KEY(userId, day), 3 * 86400).catch(() => {});
+  } catch { /* */ }
 }
 
 async function maybeCompleteQuest(userId: string): Promise<{ completed: boolean; quest?: DailyQuest; leveledUp?: number }> {
@@ -158,24 +244,25 @@ async function maybeCompleteQuest(userId: string): Promise<{ completed: boolean;
   const set = await redis.set(QUEST_DONE(userId, day), "1", "EX", 3 * 86400, "NX").catch(() => null);
   if (set !== "OK") return { completed: false, quest: { ...quest, done: true } };
 
-  // quest streak
   try {
-    const last = await redis.get(QUEST_LAST(userId));
-    const yest = (() => {
-      const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!m) return day;
-      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-      d.setUTCDate(d.getUTCDate() - 1);
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-    })();
-    if (last === yest) await redis.incr(QUEST_STREAK(userId));
-    else await redis.set(QUEST_STREAK(userId), "1");
-    await redis.set(QUEST_LAST(userId), day);
+    const last = await redis.get(VISIT_LAST(userId));
+    const yest = yesterdayOf(day);
+    if (last === yest) await redis.incr(VISIT_STREAK(userId));
+    else await redis.set(VISIT_STREAK(userId), "1");
+    await redis.set(VISIT_LAST(userId), day);
   } catch { /* */ }
 
   const { leveledUp } = await addXp(userId, XP.QUEST_COMPLETE);
   redis.incr("tel:retention:quest_complete").catch(() => {});
   return { completed: true, quest: { ...quest, done: true, progress: quest.target }, leveledUp: leveledUp ?? undefined };
+}
+
+function yesterdayOf(day: string): string {
+  const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return day;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  d.setUTCDate(d.getUTCDate() - 1);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 // ── XP ────────────────────────────────────────
@@ -204,13 +291,13 @@ export async function getXpState(userId: string): Promise<{ xp: number; level: n
     const info = xpToNextLevel(xp);
     return { xp, level: info.level, remaining: info.remaining, nextAt: info.nextAt };
   } catch {
-    return { xp: 0, level: 1, remaining: 50, nextAt: 50 };
+    return { xp: 0, level: 1, remaining: 40, nextAt: 40 };
   }
 }
 
-// ── Hooks from download / summary ─────────────
+// ── Hooks ─────────────────────────────────────
 export interface RetentionHookResult {
-  messages: string[]; // extra user-facing messages (Markdown)
+  messages: string[];
 }
 
 export async function onSuccessfulDownload(
@@ -218,17 +305,12 @@ export async function onSuccessfulDownload(
   opts: { fromCache?: boolean; streakTransitioned?: boolean },
 ): Promise<RetentionHookResult> {
   const messages: string[] = [];
-  const day = cairoDateString();
-
-  try {
-    await redis.hincrby(QUEST_KEY(userId, day), "dl", 1);
-    await redis.expire(QUEST_KEY(userId, day), 3 * 86400).catch(() => {});
-  } catch { /* */ }
+  await bumpField(userId, "dl");
+  await bumpField(userId, "touch");
 
   await addXp(userId, opts.fromCache ? XP.CACHE_HIT : XP.DOWNLOAD);
   if (opts.streakTransitioned) await addXp(userId, XP.STREAK_DAY);
 
-  // Comeback: if last activity was ≥3 days ago (before this download)
   const comeback = await maybeComebackBonus(userId);
   if (comeback) messages.push(comeback);
 
@@ -236,15 +318,6 @@ export async function onSuccessfulDownload(
   if (q.completed && q.quest) {
     messages.push(buildQuestCompleteMessage(q.quest));
     if (q.leveledUp) messages.push(buildLevelUpMessage(q.leveledUp));
-  } else {
-    // level up from download XP alone
-    const st = await getXpState(userId);
-    // leveledUp only returned from addXp — re-check via storing previous is hard; skip
-  }
-
-  // Quest progress nudge if not done
-  if (!q.quest?.done && q.quest) {
-    // silent — shown in /daily
   }
 
   return { messages };
@@ -252,11 +325,8 @@ export async function onSuccessfulDownload(
 
 export async function onSuccessfulSummary(userId: string): Promise<RetentionHookResult> {
   const messages: string[] = [];
-  const day = cairoDateString();
-  try {
-    await redis.hincrby(QUEST_KEY(userId, day), "sum", 1);
-    await redis.expire(QUEST_KEY(userId, day), 3 * 86400).catch(() => {});
-  } catch { /* */ }
+  await bumpField(userId, "sum");
+  await bumpField(userId, "touch");
 
   const { leveledUp } = await addXp(userId, XP.SUMMARY);
   if (leveledUp) messages.push(buildLevelUpMessage(leveledUp));
@@ -266,35 +336,59 @@ export async function onSuccessfulSummary(userId: string): Promise<RetentionHook
     messages.push(buildQuestCompleteMessage(q.quest));
     if (q.leveledUp) messages.push(buildLevelUpMessage(q.leveledUp));
   }
+  return { messages };
+}
 
+export async function onSuccessfulRandom(userId: string): Promise<RetentionHookResult> {
+  const messages: string[] = [];
+  await bumpField(userId, "random");
+  await bumpField(userId, "touch");
+  const { leveledUp } = await addXp(userId, XP.RANDOM);
+  if (leveledUp) messages.push(buildLevelUpMessage(leveledUp));
+  const q = await maybeCompleteQuest(userId);
+  if (q.completed && q.quest) {
+    messages.push(buildQuestCompleteMessage(q.quest));
+    if (q.leveledUp) messages.push(buildLevelUpMessage(q.leveledUp));
+  }
+  return { messages };
+}
+
+export async function onSuccessfulImage(userId: string): Promise<RetentionHookResult> {
+  const messages: string[] = [];
+  await bumpField(userId, "img");
+  await bumpField(userId, "touch");
+  const { leveledUp } = await addXp(userId, XP.IMAGE);
+  if (leveledUp) messages.push(buildLevelUpMessage(leveledUp));
+  const q = await maybeCompleteQuest(userId);
+  if (q.completed && q.quest) {
+    messages.push(buildQuestCompleteMessage(q.quest));
+    if (q.leveledUp) messages.push(buildLevelUpMessage(q.leveledUp));
+  }
   return { messages };
 }
 
 async function maybeComebackBonus(userId: string): Promise<string | null> {
   try {
-    // user:lastSeen is updated on every message — we need previous lastSeen
-    // Use ret:last_active:{uid} that WE update after processing
     const prev = await redis.get(`ret:last_active:${userId}`);
     const today = cairoDateString();
     await redis.set(`ret:last_active:${userId}`, today);
 
     if (!prev || prev === today) return null;
 
-    // days between prev and today
     const daysAway = daysBetween(prev, today);
     if (daysAway < 3) return null;
 
-    // once per absence episode
     const claim = await redis.set(COMEBACK_KEY(userId), today, "EX", 7 * 86400, "NX");
     if (claim !== "OK") return null;
 
     await addXp(userId, XP.COMEBACK);
     redis.incr("tel:retention:comeback").catch(() => {});
     return (
-      `👋 *أهلاً بعودتك!*\n` +
+      `🌿 *فرحتُ بعودتك*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_غبتَ ${daysAway} أيام — وفرنا لك +${XP.COMEBACK} XP ترحيباً._\n` +
-      `🔥 ابدأ سلسلة جديدة اليوم… كتاب واحد يكفي.`
+      `_غبتَ ${daysAway} أيام — وهذا طبيعي._\n` +
+      `🎁 +${XP.COMEBACK} XP ترحيباً هادئاً.\n` +
+      `_مفيش فوات… ${BOT_NAME} لسه هنا._`
     );
   } catch {
     return null;
@@ -310,9 +404,7 @@ function daysBetween(a: string, b: string): number {
   return Math.round((db - da) / 86400000);
 }
 
-// ── Streak shield (weekly) ────────────────────
 function isoWeekId(d = new Date()): string {
-  // simple: Cairo date year + week number approx
   const day = cairoDateString(d);
   const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/)!;
   const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
@@ -321,14 +413,12 @@ function isoWeekId(d = new Date()): string {
   return `${dt.getUTCFullYear()}-W${week}`;
 }
 
-/** Called when streak would break — returns true if shield consumed and streak should be preserved. */
 export async function tryUseStreakShield(userId: string, activeStreak: number): Promise<boolean> {
   if (activeStreak < 3) return false;
   const week = isoWeekId();
   try {
     const used = await redis.get(`${SHIELD_KEY(userId)}:${week}`);
-    if (used === "1") return false; // already used this week
-    // Grant availability: user earns shield if quest streak or level >= 3
+    if (used === "1") return false;
     const xp = await getXpState(userId);
     if (xp.level < 2 && activeStreak < 5) return false;
 
@@ -350,7 +440,7 @@ export async function hasShieldAvailable(userId: string): Promise<boolean> {
   }
 }
 
-// ── /daily claim ──────────────────────────────
+// ── /daily — حضور يومي ───────────────────────
 export async function claimDaily(userId: string): Promise<{
   ok: boolean;
   already?: boolean;
@@ -358,6 +448,7 @@ export async function claimDaily(userId: string): Promise<{
 }> {
   const day = cairoDateString();
   const set = await redis.set(DAILY_CLAIM(userId, day), "1", "EX", 3 * 86400, "NX").catch(() => null);
+
   if (set !== "OK") {
     const quest = await getDailyQuest(userId);
     const xp = await getXpState(userId);
@@ -368,11 +459,27 @@ export async function claimDaily(userId: string): Promise<{
     };
   }
 
+  await bumpField(userId, "claim");
+  try {
+    const last = await redis.get(VISIT_LAST(userId));
+    const yest = yesterdayOf(day);
+    if (last === yest) await redis.incr(VISIT_STREAK(userId));
+    else if (last !== day) await redis.set(VISIT_STREAK(userId), "1");
+    await redis.set(VISIT_LAST(userId), day);
+  } catch { /* */ }
+
   const { leveledUp } = await addXp(userId, XP.DAILY_CLAIM);
+  await redis.set(`ret:last_active:${userId}`, day).catch(() => {});
+
+  const q = await maybeCompleteQuest(userId);
+
   const quest = await getDailyQuest(userId);
   const xp = await getXpState(userId);
   let msg = buildDailyStatusMessage(quest, xp, false);
   if (leveledUp) msg += `\n\n` + buildLevelUpMessage(leveledUp);
+  if (q.completed && q.quest) {
+    msg += `\n\n` + buildQuestCompleteMessage(q.quest);
+  }
   redis.incr("tel:retention:daily_claim").catch(() => {});
   return { ok: true, message: msg };
 }
@@ -384,21 +491,28 @@ export function buildDailyStatusMessage(
 ): string {
   const bar = questProgressBar(quest.progress, quest.target);
   const claimLine = alreadyClaimed
-    ? `✅ _سجّلتَ حضورك اليوم_`
-    : `🎁 *+${XP.DAILY_CLAIM} XP* — تم تسجيل الحضور اليومي!`;
+    ? `✅ _سجّلتُ حضورك اليوم — كفاية وجميل_`
+    : `🌿 *+${XP.DAILY_CLAIM} XP* — مرحباً… حضورك اليوم وصل.`;
+
+  const optNote = quest.optional
+    ? `_لفتة اختيارية — مش مطلوبة للإحساس بالإنجاز_`
+    : `_حضورك وحده يكفي — بلا تحميل إجباري_`;
+
+  const tip = RETENTION_TIPS[Math.floor(Math.random() * RETENTION_TIPS.length)];
 
   return (
-    `☀️ *روتينك اليومي*\n` +
+    `☀️ *يومك مع ${BOT_NAME}*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
     `${claimLine}\n\n` +
-    `🎯 *مهمة اليوم — ${escMd(quest.title)}*\n` +
+    `🌱 *لفتة اليوم — ${escMd(quest.title)}*\n` +
     `_${escMd(quest.description)}_\n` +
     `${bar}  ${quest.progress}/${quest.target}` +
     (quest.done ? ` ✅` : ``) +
-    `\n_مكافأة الإتمام: +${quest.rewardXp} XP_\n\n` +
+    `\n_إن أحببت الإتمام: +${quest.rewardXp} XP_\n` +
+    `${optNote}\n\n` +
     `⭐ *المستوى ${xp.level}* · ${xp.xp} XP\n` +
     `_يتبقّى ${xp.remaining} للمستوى التالي_\n\n` +
-    `💡 _حمّل كتاباً الآن للحفاظ على سلسلتك ومهمتك_`
+    `💬 _${escMd(tip)}_`
   );
 }
 
@@ -410,59 +524,56 @@ function questProgressBar(cur: number, max: number): string {
 
 export function buildQuestCompleteMessage(quest: DailyQuest): string {
   return (
-    `🎯 *أتممت مهمة اليوم!*\n` +
+    `🌱 *لفتة لطيفة اكتملت*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
     `✅ ${escMd(quest.title)}\n` +
     `🎁 +${quest.rewardXp} XP\n\n` +
-    `_عد غداً لمهمة جديدة — الاستمرار يبني مستواك._`
+    `_من غير ضغط… وغدًا لفتة جديدة إن أحببت._`
   );
 }
 
 export function buildLevelUpMessage(level: number): string {
   return (
-    `🌟 *ارتقيت للمستوى ${level}!*\n` +
+    `🌟 *ارتقيت بهدوء للمستوى ${level}*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-    `_قارئ ينمو — استمر في التحميل والمهام اليومية._`
+    `_مش سباق — نمو هادئ مع ${BOT_NAME}._`
   );
 }
 
-// ── Profile block ─────────────────────────────
 export async function buildRetentionProfileBlock(userId: string): Promise<string> {
-  const [quest, xp, qStreak, shield] = await Promise.all([
+  const [quest, xp, vStreak, shield] = await Promise.all([
     getDailyQuest(userId),
     getXpState(userId),
-    redis.get(QUEST_STREAK(userId)).catch(() => "0"),
+    redis.get(VISIT_STREAK(userId)).catch(() => "0"),
     hasShieldAvailable(userId),
   ]);
-  const qs = parseInt(qStreak || "0", 10) || 0;
+  const vs = parseInt(vStreak || "0", 10) || 0;
   const qBar = questProgressBar(quest.progress, quest.target);
   return (
     `⭐ *المستوى ${xp.level}* · ${xp.xp} XP _(يتبقّى ${xp.remaining})_\n` +
-    `🎯 *مهمة اليوم:* ${escMd(quest.title)} ${qBar} ${quest.progress}/${quest.target}` +
+    `🌱 *لفتة اليوم:* ${escMd(quest.title)} ${qBar} ${quest.progress}/${quest.target}` +
     (quest.done ? " ✅" : "") +
-    (qs > 1 ? `\n📅 سلسلة مهام: ${qs} يوم` : "") +
-    `\n🛡️ درع السلسلة: ${shield ? "متاح هذا الأسبوع" : "مستُخدم هذا الأسبوع"}\n` +
-    `_/daily لروتينك اليومي_`
+    (vs > 1 ? `\n📅 أيام مع ${BOT_NAME}: ${vs}` : "") +
+    `\n🛡️ درع السلسلة: ${shield ? "متاح هذا الأسبوع" : "استُخدم هذا الأسبوع"}\n` +
+    `_/daily — حضور يومي دافئ_`
   );
 }
 
-// ── Evening streak reminders ──────────────────
+// ── Worker: صباح دافئ + مساء لطيف ─────────────
 let _bot: TelegramBot | null = null;
 let _timer: ReturnType<typeof setInterval> | null = null;
 
 export function startRetentionWorker(bot: TelegramBot): void {
   _bot = bot;
   if (_timer) return;
-  // tick every 15 minutes
   _timer = setInterval(() => {
     runRetentionTick().catch((e) =>
       L.warn("retention", "tick failed", { err: String(e).slice(0, 100) }),
     );
   }, 15 * 60 * 1000);
   _timer.unref?.();
-  // first run after 3 min
   setTimeout(() => runRetentionTick().catch(() => {}), 3 * 60 * 1000).unref?.();
-  L.info("retention", "worker started (15m tick, evening streak reminders)");
+  L.info("retention", "worker started (warm morning + gentle evening)");
 }
 
 export function stopRetentionWorker(): void {
@@ -473,86 +584,131 @@ export function stopRetentionWorker(): void {
 async function runRetentionTick(): Promise<void> {
   if (!_bot) return;
   const hour = cairoHourNumber();
-  // Streak reminders between 19:00–21:00 Cairo
+  if (hour >= 9 && hour <= 11) {
+    await sendWarmMorningNotes(_bot);
+  }
   if (hour >= 19 && hour <= 21) {
-    await sendStreakReminders(_bot);
+    await sendGentleEveningNotes(_bot);
   }
 }
 
-/**
- * Remind users with active streak who haven't downloaded today.
- * Cap 40 messages per tick to avoid Telegram flood.
- */
-async function sendStreakReminders(bot: TelegramBot): Promise<void> {
+function pickNote(pool: readonly string[], seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 33 + seed.charCodeAt(i)) >>> 0;
+  return pool[h % pool.length];
+}
+
+async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
   const day = cairoDateString();
-  const lock = await redis.set(`ret:remind_lock:${day}:${cairoHourNumber()}`, "1", "EX", 50 * 60, "NX").catch(() => null);
+  const lock = await redis
+    .set(`ret:morning_lock:${day}:${cairoHourNumber()}`, "1", "EX", 50 * 60, "NX")
+    .catch(() => null);
   if (lock !== "OK") return;
 
   try {
-    // Scan streak:last:* for yesterday (active but not today)
-    // Use SCAN — limited batch
+    const weekAgo = Date.now() - 7 * 86400_000;
+    const uids = await redis.zrangebyscore("user:lastSeen", weekAgo, "+inf", "LIMIT", 0, 200).catch(() => [] as string[]);
+    let sent = 0;
+    for (const uid of uids) {
+      if (sent >= 30) break;
+      if (!uid || !/^\d+$/.test(uid)) continue;
+      const already = await redis.sismember(MORNING_KEY(day), uid);
+      if (already === 1) continue;
+      const claimed = await redis.get(DAILY_CLAIM(uid, day)).catch(() => null);
+      if (claimed === "1") {
+        await redis.sadd(MORNING_KEY(day), uid);
+        continue;
+      }
+
+      const note = pickNote(WARM_DAILY_NOTES, `${day}:${uid}`);
+      const text =
+        `🕊 *${BOT_NAME}*\n` +
+        `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
+        `_${escMd(note)}_\n\n` +
+        `☀️ /daily · 🎲 /random · أو اكتب عنوان كتاب`;
+
+      try {
+        await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown" });
+        await redis.sadd(MORNING_KEY(day), uid);
+        await redis.expire(MORNING_KEY(day), 2 * 86400);
+        sent++;
+        redis.incr("tel:retention:morning_note").catch(() => {});
+      } catch { /* blocked */ }
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    if (sent > 0) L.info("retention", "warm morning notes sent", { sent, day });
+  } catch (e) {
+    L.warn("retention", "sendWarmMorningNotes failed", { err: String(e).slice(0, 100) });
+  }
+}
+
+async function sendGentleEveningNotes(bot: TelegramBot): Promise<void> {
+  const day = cairoDateString();
+  const lock = await redis
+    .set(`ret:remind_lock:${day}:${cairoHourNumber()}`, "1", "EX", 50 * 60, "NX")
+    .catch(() => null);
+  if (lock !== "OK") return;
+
+  try {
     let cursor = "0";
     let sent = 0;
-    const yest = (() => {
-      const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/)!;
-      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-      d.setUTCDate(d.getUTCDate() - 1);
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-    })();
+    const yest = yesterdayOf(day);
 
     do {
       const [next, keys] = await redis.scan(cursor, "MATCH", "streak:last:*", "COUNT", 100);
       cursor = next;
       for (const key of keys) {
-        if (sent >= 35) break;
+        if (sent >= 30) break;
         const last = await redis.get(key);
-        if (last !== yest) continue; // only those active yesterday, not yet today
+        if (last !== yest) continue;
         const uid = key.slice("streak:last:".length);
         if (!uid || !/^\d+$/.test(uid)) continue;
 
-        // already reminded today?
         const already = await redis.sismember(REMIND_KEY(day), uid);
         if (already === 1) continue;
 
         const cur = parseInt((await redis.get(`streak:cur:${uid}`)) || "0", 10) || 0;
         if (cur < 2) continue;
 
-        const quest = await getDailyQuest(uid);
+        const claimed = await redis.get(DAILY_CLAIM(uid, day)).catch(() => null);
+        if (claimed === "1") {
+          await redis.sadd(REMIND_KEY(day), uid);
+          continue;
+        }
+
+        const note = pickNote(WARM_EVENING_NOTES, `${day}:${uid}:eve`);
         const text =
-          `🔥 *سلسلتك ${cur} يوم على وشك أن تنكسر!*\n` +
+          `🌙 *${BOT_NAME} · مساء هادئ*\n` +
           `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-          `_حمّل كتاباً واحداً قبل منتصف الليل (القاهرة)_\n\n` +
-          `🎯 مهمة اليوم: ${escMd(quest.title)}\n` +
-          `_${escMd(quest.description)}_\n\n` +
-          `اكتب اسم كتاب… أو /random · /daily`;
+          `_${escMd(note)}_\n\n` +
+          (cur >= 3 ? `🕯 _أيامك المتتالية: ${cur} — لو حابب تحافظ عليها بلطف: /daily_\n\n` : "") +
+          `لا ضغط. أنا هنا لو احتجتني.`;
 
         try {
           await bot.sendMessage(Number(uid), text, { parse_mode: "Markdown" });
           await redis.sadd(REMIND_KEY(day), uid);
           await redis.expire(REMIND_KEY(day), 2 * 86400);
           sent++;
-          redis.incr("tel:retention:streak_remind").catch(() => {});
-        } catch {
-          // user blocked bot — ignore
-        }
-        // gentle pacing
-        await new Promise((r) => setTimeout(r, 80));
+          redis.incr("tel:retention:evening_note").catch(() => {});
+        } catch { /* */ }
+        await new Promise((r) => setTimeout(r, 90));
       }
-    } while (cursor !== "0" && sent < 35);
+    } while (cursor !== "0" && sent < 30);
 
-    if (sent > 0) L.info("retention", "streak reminders sent", { sent, day });
+    if (sent > 0) L.info("retention", "gentle evening notes sent", { sent, day });
   } catch (e) {
-    L.warn("retention", "sendStreakReminders failed", { err: String(e).slice(0, 100) });
+    L.warn("retention", "sendGentleEveningNotes failed", { err: String(e).slice(0, 100) });
   }
 }
 
-// ── Tips for daily claim variety ──────────────
+// ── Tips ──────────────────────────────────────
 export const RETENTION_TIPS = [
-  "📚 كتاب واحد يومياً أفضل من سبعة في يوم واحد ثم انقطاع.",
-  "🔥 السلسلة تُبنى بعادة صغيرة — ليس بعدد الصفحات.",
-  "🎯 أتمم مهمة اليوم قبل أن تغلق تيليجرام.",
-  "⭐ كل تحميل يرفع مستواك… والملخص أسرع طريق للـ XP.",
-  "🛡️ المستويات الأعلى تحمي سلسلتك بدرع أسبوعي.",
-  "👥 ادعُ صديقاً — الإحالات تمنح Premium مجاناً.",
-  "🌙 آخر ساعات الليل أخطر على السلسلة — ثبّتها الآن.",
+  "وجودك يكفي. التحميل لما تحتاجه فعلاً.",
+  "عادة صغيرة أهدأ من اندفاع يوم ثم صمت طويل.",
+  "الاكتشاف(/random) للفضول — مش للحصص.",
+  "الملخص يوفر وقتاً… لو حابب فقط.",
+  "الدرع الأسبوعي يحمي السلسلة بلطف لو غبت يوماً.",
+  "دعوة صديق = مشاركة رفيق، مش سباق.",
+  "بعض الأيام للقراءة، وبعضها للراحة. الاتنين مقبولين.",
+  "رفيق مش بيحسب عليك — بيرافقك.",
 ] as const;
