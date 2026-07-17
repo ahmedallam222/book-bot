@@ -5,6 +5,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { redis } from "./redis.js";
 import { L } from "./logger.js";
 import { GROUP_FREE_TEXT_CHAT_IDS } from "./config.js";
+import { isFeatureOn } from "./featureFlags.js";
 import { GROUP_CLUB_WELCOME_EXTRA } from "./groupClub.js";
 
 const RATE_KEY = (chatId: number, userId: string) =>
@@ -23,6 +24,11 @@ const WELCOME_TTL_SEC = 7 * 86400;
 
 export function isFreeTextGroup(chatId: number): boolean {
   return GROUP_FREE_TEXT_CHAT_IDS.has(String(chatId));
+}
+
+export async function isFreeTextGroupLive(chatId: number): Promise<boolean> {
+  if (!(await isFeatureOn("group_free_text"))) return false;
+  return isFreeTextGroup(chatId);
 }
 
 /**

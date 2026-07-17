@@ -28,6 +28,7 @@ import { L } from "./logger.js";
 import { redis } from "./redis.js";
 import { isAdmin } from "./guards.js";
 import { isPremium } from "./userSettings.js";
+import { isFeatureOn, resolveImageDailyLimit } from "./featureFlags.js";
 import { reactRandom } from "./reactions.js";
 import { REACTION_RECEIVED } from "./uiVariants.js";
 import { escMd, cairoDateString, msUntilCairoMidnight } from "./text.js";
@@ -134,10 +135,9 @@ async function getUserTier(userId: string): Promise<Tier> {
   }
 }
 
-function tierLimit(tier: Tier): number {
-  if (tier === "admin")   return Infinity;
-  if (tier === "premium") return IMAGE_PREMIUM_DAILY_LIMIT;
-  return IMAGE_DAILY_LIMIT;
+async function tierLimit(tier: Tier): Promise<number> {
+  if (tier === "admin") return Infinity;
+  return resolveImageDailyLimit(tier === "premium");
 }
 
 // عداد ذرّي مع TTL ثابت حتى منتصف ليل القاهرة.
@@ -408,11 +408,11 @@ function startProgressUpdater(
   ackMsg: TelegramBot.Message | null,
   tier: Tier,
   used: number,
+  limit: number,
 ): NodeJS.Timeout | null {
   if (!ackMsg) return null;
   const t0 = Date.now();
-  const limit = tierLimit(tier);
-  const counter = tier === "admin" ? "بلا حد" : `${used}/${limit}`;
+  const counter = tier === "admin" ? "بلا حد" : `${used}/${limit === Infinity ? "∞" : limit}`;
   const stages = [
     "🎨 جارٍ تحليل الـ prompt...",
     "✍️ جارٍ تخطيط المشهد...",
@@ -455,7 +455,7 @@ async function runGeneration(
     counted = true;
   }
 
-  const limit = tierLimit(tier);
+  const limit = await tierLimit(tier);
   const counterLine = tier === "admin"
     ? "بلا حد"
     : `${usedAfterBump}/${limit}`;
@@ -471,7 +471,7 @@ async function runGeneration(
   } catch { /* non-fatal */ }
 
   // progress updater (يحدّث الـ ack كل 10s)
-  const progressTimer = startProgressUpdater(bot, chatId, ackMsg, tier, usedAfterBump);
+  const progressTimer = startProgressUpdater(bot, chatId, ackMsg, tier, usedAfterBump, limit);
 
   // call nano-banana
   const t0 = Date.now();
@@ -612,7 +612,7 @@ export async function handleImageCommand(
   const prompt = promptRaw.replace(/\s+/g, " ").trim().slice(0, MAX_PROMPT_LEN);
   if (prompt.length < MIN_PROMPT_LEN) {
     const tier = await getUserTier(userId);
-    const limit = tierLimit(tier);
+    const limit = await tierLimit(tier);
     const limitText = tier === "admin"
       ? "بلا حد"
       : tier === "premium"
@@ -631,7 +631,7 @@ export async function handleImageCommand(
   }
 
   const tier = await getUserTier(userId);
-  const limit = tierLimit(tier);
+  const limit = await tierLimit(tier);
 
   // limit check (admins بلا حد)
   if (tier !== "admin") {
@@ -750,7 +750,7 @@ export async function handleImageCallback(
   }
 
   const tier  = await getUserTier(userId);
-  const limit = tierLimit(tier);
+  const limit = await tierLimit(tier);
   if (tier !== "admin") {
     const used = await getDailyImageCount(userId);
     if (used >= limit) {

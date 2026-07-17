@@ -320,6 +320,9 @@ export function adminPanelKeyboard(isMaint: boolean): {
   return {
     inline_keyboard: [
       [
+        { text: "🎛 مركز التحكم", callback_data: "admin_control" },
+      ],
+      [
         { text: "⚡ بث حي", callback_data: "admin_live" },
         { text: "📊 إحصاءات", callback_data: "admin_stats" },
       ],

@@ -6,6 +6,7 @@ import { handleBookRequest }      from "./bookRequest.js";
 import { escMd }                  from "./text.js";
 import { onSuccessfulRandom } from "./retention.js";
 import { getPrimaryGenre, booksForGenreId } from "./interests.js";
+import { isFeatureOn } from "./featureFlags.js";
 
 // ══════════════════════════════════════════════
 // RANDOM — كتاب مفاجأة بجنس أدبي
@@ -97,6 +98,10 @@ export async function handleRandomCommand(
   username?: string | null,
   genreInput?: string
 ): Promise<void> {
+  if (!(await isFeatureOn("random"))) {
+    await bot.sendMessage(chatId, `🎲 *المفاجأة متوقفة مؤقتاً من الإدارة.*`, { parse_mode: "Markdown" }).catch(() => {});
+    return;
+  }
   if (!genreInput || genreInput.trim() === "") {
     // عرض أزرار الأجناس — زرين في كل سطر
     const entries = Object.entries(GENRE_LABELS);

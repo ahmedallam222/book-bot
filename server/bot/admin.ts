@@ -15,6 +15,11 @@ import {
   buildAdminHomeMessage, buildAdminLiveMessage, buildAdminRetentionMessage,
   buildAdminMonthMessage, buildAdminImagesMessage, adminPanelKeyboard,
 } from "./adminDashboard.js";
+import {
+  handleControlCallback, handleControlPendingText, kbUserControl,
+  getAdminPending, clearAdminPending,
+} from "./adminControl.js";
+import { isBanned } from "./guards.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
@@ -289,6 +294,8 @@ export async function handleAdminCallback(
   queryId?: string
 ): Promise<void> {
   try {
+    // مركز التحكم الكامل
+    if (await handleControlCallback(bot, chatId, userId, data)) return;
 
     // ── قائمة المستخدمين مع pagination ──────────────────
     if (data.startsWith("admin_users_")) {

@@ -34,6 +34,7 @@ import { pickFresh } from "./uiVariants.js";
 import {
   allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
   isFreeTextGroup,
+  isFreeTextGroupLive,
 } from "./groupPolicy.js";
 import { lightNormalizeQuery } from "./queryNormalize.js";
 import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
@@ -901,7 +902,7 @@ export function registerMessageHandler(
         const trigger = GROUP_TRIGGER_WORDS.find((w) => lower.startsWith(w.toLowerCase()));
         if (trigger) {
           bookName = text.slice(trigger.length).trim();
-        } else if (GROUP_FREE_TEXT_CHAT_IDS.has(String(chatId)) && looksLikeBookRequest(text)) {
+        } else if ((await isFreeTextGroupLive(chatId)) && looksLikeBookRequest(text)) {
           // Free-text mode for allowlisted groups (e.g. @kholasa_elktob2):
           // members often type only the book title without "بوت".
           bookName = text;

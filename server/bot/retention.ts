@@ -24,6 +24,7 @@ import { bookOfDayMorningBlock, kbBookOfDayAsync } from "./bookOfDay.js";
 import { sendSundayWeekReports, getPersonalWeekStats } from "./personalWeek.js";
 import { getTopInterests } from "./interests.js";
 import { getPref } from "./notifPrefs.js";
+import { isFeatureOn } from "./featureFlags.js";
 import { hasAnsweredMicro, buildMicroMessage } from "./microHabit.js";
 import { runGroupClubWeeklyPosts } from "./groupClub.js";
 
@@ -645,6 +646,7 @@ export function stopRetentionWorker(): void {
 
 async function runRetentionTick(): Promise<void> {
   if (!_bot) return;
+  if (!(await isFeatureOn("retention_push"))) return;
   const hour = cairoHourNumber();
   if (hour >= 9 && hour <= 11) {
     await sendWarmMorningNotes(_bot);

@@ -9,6 +9,7 @@ import { escMd } from "./text.js";
 import { isFreeTextGroup } from "./groupPolicy.js";
 import { getGroupClubBook, kbClubWithVotes } from "./groupClub.js";
 import { BOT_NAME } from "./brand.js";
+import { isFeatureOn } from "./featureFlags.js";
 
 const CHAT_CD = (chatId: number) => `grp:ix:cd:${chatId}`;
 const REACT_CD = (chatId: number) => `grp:ix:react:${chatId}`;
@@ -28,6 +29,7 @@ export async function tryGroupSocialReply(
   bot: TelegramBot,
   msg: TelegramBot.Message,
 ): Promise<boolean> {
+  if (!(await isFeatureOn("group_interact"))) return false;
   const chatId = msg.chat.id;
   if (msg.chat.type === "private") return false;
   const text = (msg.text || "").trim();

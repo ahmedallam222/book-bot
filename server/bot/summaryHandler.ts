@@ -23,6 +23,7 @@ import type { SummaryResponse } from "./aiProviders/types.js";
 import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
 import { trackSummaryAndAward, buildNewBadgeMessage } from "./badges.js";
 import { onSuccessfulSummary } from "./retention.js";
+import { isFeatureOn } from "./featureFlags.js";
 
 // Per-user dedup window in seconds — the same user spamming the
 // summary button should hit cache; this prevents re-running the
@@ -151,6 +152,10 @@ export async function runSummaryFlow(
   let usageConsumed = false;
 
   try {
+    if (!(await isFeatureOn("summary")) && !((await import("./guards.js")).isAdmin(userId))) {
+      await bot.sendMessage(chatId, `📘 *الملخّصات متوقفة مؤقتاً من الإدارة.*`, { parse_mode: "Markdown" }).catch(() => {});
+      return;
+    }
     // Cache fast-path — skip the quota check entirely for cached
     // hits (no upstream cost, treat as free).
     const cached = await getCachedSummary(bookName, opts.depth || "quick");
