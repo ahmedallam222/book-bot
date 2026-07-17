@@ -33,6 +33,9 @@ import { replyKeyboardMain } from "./replyKeyboard.js";
 import { completeOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge } from "./library.js";
+import { togglePref, isPrefKey, buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
+import { answerMicro, skipMicro } from "./microHabit.js";
+import { voteClubBook } from "./groupClub.js";
 import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries } from "./curated.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
@@ -84,7 +87,7 @@ export function registerCallbackHandler(
                        data === "wishlist_clear"          ||
                        data.startsWith("wishlist_add:")   ||
                        data.startsWith("wishlist_del:")   ||
-                       data.startsWith("sum:")             ||
+                       data.startsWith("sum:") || data.startsWith("sumd:")             ||
                        data.startsWith("img:");
 
     let acquiredDedup = false;
@@ -298,7 +301,7 @@ export function registerCallbackHandler(
     // The "📘 ملخص الكتاب" button under a delivered file. Heavy
     // path (Wikipedia + AI providers + Redis cache) lives in
     // summaryHandler.ts to keep this dispatcher slim.
-    if (data.startsWith("sum:")) {
+    if (data.startsWith("sum:") || data.startsWith("sumd:")) {
       await handleSummaryCallback(bot, chatId, userId, data, query.id);
       return;
     }
@@ -434,6 +437,17 @@ export function registerCallbackHandler(
 
 
     // ── library / curated ──
+    if (data === "prefs_menu") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const text = await buildPrefsMessage(userId);
+        const prefs = await getAllPrefs(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+      } catch (e) {
+        L.error("cb", "prefs_menu failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
     if (data === "my_library") {
       await bot.answerCallbackQuery(query.id).catch(() => {});
       try {

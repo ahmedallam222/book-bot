@@ -56,6 +56,7 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       ],
       [
         { text: "❓  كيف أستخدم رفيق؟", callback_data: "help" },
+        { text: "🔔  إشعارات", callback_data: "prefs_menu" },
       ],
     ],
   };
@@ -80,7 +81,10 @@ export function kbAfterSuccess(
   const rows: TelegramBot.InlineKeyboardButton[][] = [
     [
       { text: "📘  ملخّص سريع", callback_data: safeCb(`sum:${summaryK}`) },
-      { text: "🔖  احفظه",     callback_data: safeCb(`wishlist_add:${retryK}`) },
+      { text: "📗  ملخّص أعمق", callback_data: safeCb(`sumd:${summaryK}`) },
+    ],
+    [
+      { text: "🔖  احفظه", callback_data: safeCb(`wishlist_add:${retryK}`) },
     ],
   ];
   for (const title of related) {

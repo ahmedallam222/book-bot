@@ -12,6 +12,7 @@ import { cairoDateString, cairoHourNumber, escMd, isoWeekKey } from "./text.js";
 import { getTopInterests } from "./interests.js";
 import { BOT_NAME } from "./brand.js";
 import { storeRetryKey } from "./session.js";
+import { getPref } from "./notifPrefs.js";
 
 const BOOKS_KEY = (uid: string, week: string) => `ret:uweek:books:${uid}:${week}`;
 const COUNT_KEY = (uid: string, week: string) => `ret:uweek:cnt:${uid}:${week}`;
@@ -199,7 +200,9 @@ export async function sendSundayWeekReports(bot: TelegramBot): Promise<void> {
       const already = await redis.get(CLAIM_KEY(uid, week));
       if (already === "1") continue;
       const { total, topBooks } = await getPersonalWeekStats(uid, week);
-      if (total < 1) continue; // only those who did something
+      if (total < 1) continue;
+      const sunOn = await getPref(uid, "sunday").catch(() => true);
+      if (!sunOn) continue;
 
       const text =
         `🕯 *ختام أسبوع هادئ مع ${BOT_NAME}*\n` +

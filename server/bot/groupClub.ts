@@ -190,3 +190,50 @@ export const GROUP_CLUB_WELCOME_EXTRA =
   `◦ كل أسبوع كتاب مقترح للمجموعة\n` +
   `◦ اكتب /club لعرضه\n` +
   `◦ شارك العنوان مباشرةً في الشات`;
+
+
+// ── تصويت كتاب النادي ─────────────────────────
+const VOTE_KEY = (chatId: number | string, week: string) => `grp:club:votes:${chatId}:${week}`;
+
+export async function voteClubBook(chatId: number, userId: string, title: string): Promise<number> {
+  const week = isoWeekKey();
+  const userVote = `grp:club:uvote:${chatId}:${week}:${userId}`;
+  try {
+    const prev = await redis.get(userVote);
+    if (prev === title) {
+      return parseInt((await redis.zscore(VOTE_KEY(chatId, week), title)) || "0", 10) || 0;
+    }
+    if (prev) await redis.zincrby(VOTE_KEY(chatId, week), -1, prev);
+    await redis.zincrby(VOTE_KEY(chatId, week), 1, title);
+    await redis.set(userVote, title, "EX", 14 * 86400);
+    await redis.expire(VOTE_KEY(chatId, week), 14 * 86400);
+    const top = await redis.zrevrange(VOTE_KEY(chatId, week), 0, 0, "WITHSCORES");
+    if (top.length >= 2 && parseInt(top[1], 10) >= 2) {
+      await redis.set(CLUB_BOOK_KEY(chatId, week), top[0], "EX", 21 * 86400);
+    }
+    return parseInt((await redis.zscore(VOTE_KEY(chatId, week), title)) || "0", 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function kbClubWithVotes(title: string, alts: string[]): TelegramBot.InlineKeyboardMarkup {
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+  const mainK = storeRetryKey(title);
+  rows.push([{ text: "📥  أرسل كتاب النادي", callback_data: `retry:${mainK}` }]);
+  rows.push([{ text: "👍  صوّت لهذا", callback_data: `cvote:${mainK}` }]);
+  for (const a of alts.slice(0, 3)) {
+    if (a === title) continue;
+    const k = storeRetryKey(a);
+    const label = a.length > 28 ? a.slice(0, 27) + "…" : a;
+    rows.push([
+      { text: `📥 ${label}`, callback_data: `retry:${k}` },
+      { text: "👍", callback_data: `cvote:${k}` },
+    ]);
+  }
+  rows.push([
+    { text: "🎲  مفاجأة", callback_data: "rg:any" },
+    { text: "❓  مساعدة", callback_data: "help" },
+  ]);
+  return { inline_keyboard: rows };
+}

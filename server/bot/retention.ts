@@ -23,6 +23,8 @@ import {
 import { bookOfDayMorningBlock, kbBookOfDayAsync } from "./bookOfDay.js";
 import { sendSundayWeekReports, getPersonalWeekStats } from "./personalWeek.js";
 import { getTopInterests } from "./interests.js";
+import { getPref } from "./notifPrefs.js";
+import { hasAnsweredMicro, buildMicroMessage } from "./microHabit.js";
 import { runGroupClubWeeklyPosts } from "./groupClub.js";
 
 const QUEST_KEY     = (uid: string, day: string) => `ret:quest:${uid}:${day}`;
@@ -680,6 +682,8 @@ async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
       if (!uid || !/^\d+$/.test(uid)) continue;
       const already = await redis.sismember(MORNING_KEY(day), uid);
       if (already === 1) continue;
+      const morningOn = await getPref(uid, "morning").catch(() => true);
+      if (!morningOn) { await redis.sadd(MORNING_KEY(day), uid); continue; }
       const claimed = await redis.get(DAILY_CLAIM(uid, day)).catch(() => null);
       if (claimed === "1") {
         await redis.sadd(MORNING_KEY(day), uid);
@@ -714,6 +718,15 @@ async function sendWarmMorningNotes(bot: TelegramBot): Promise<void> {
         await redis.expire(MORNING_KEY(day), 2 * 86400);
         sent++;
         redis.incr("tel:retention:morning_note").catch(() => {});
+        // عادة يومية خفيفة — ليس كل صباح لكل أحد
+        try {
+          if (sent % 3 === 0 && !(await hasAnsweredMicro(uid))) {
+            const micro = buildMicroMessage();
+            await bot.sendMessage(Number(uid), micro.text, {
+              parse_mode: "Markdown", reply_markup: micro.kb,
+            });
+          }
+        } catch { /* */ }
       } catch { /* blocked */ }
       await new Promise((r) => setTimeout(r, 90));
     }
@@ -747,6 +760,8 @@ async function sendGentleEveningNotes(bot: TelegramBot): Promise<void> {
 
         const already = await redis.sismember(REMIND_KEY(day), uid);
         if (already === 1) continue;
+        const eveOn = await getPref(uid, "evening").catch(() => true);
+        if (!eveOn) { await redis.sadd(REMIND_KEY(day), uid); continue; }
 
         const cur = parseInt((await redis.get(`streak:cur:${uid}`)) || "0", 10) || 0;
         if (cur < 2) continue;

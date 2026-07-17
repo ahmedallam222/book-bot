@@ -689,7 +689,12 @@ async function performFullSearch(
   }
 
   if (usedFuzzy) {
-    await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب نتيجة"));
+    await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب صياغة"));
+    // ثقة شفافة: أخبر المستخدم بلطف أننا نستخدم بحثاً تقريبياً
+    bot.sendMessage(chatId,
+      `🔎 _لم يُعثر على تطابق حرفي — أوسّع البحث بصياغة قريبة. إن لم يكن الملف مطابقاً استخدم «ليس هذا الكتاب؟»._`,
+      { parse_mode: "Markdown" },
+    ).catch(() => {});
     armProgressWatchdog(token, chatId, msgId, 2, bookName);
   }
 

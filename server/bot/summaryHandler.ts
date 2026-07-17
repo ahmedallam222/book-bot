@@ -75,8 +75,9 @@ export async function handleSummaryCallback(
   data:          string,
   callbackQueryId: string,
 ): Promise<void> {
-  // data shape: "sum:<sessionKey>"
-  const sessionKey = data.slice(4).trim();
+  // data: "sum:<key>" | "sumd:<key>" (deep)
+  const isDeep = data.startsWith("sumd:");
+  const sessionKey = (isDeep ? data.slice(5) : data.slice(4)).trim();
   const entry      = await getSession(sessionKey);
   if (!entry?.bookName) {
     await bot.answerCallbackQuery(callbackQueryId, {
@@ -107,6 +108,7 @@ export async function handleSummaryCallback(
   await runSummaryFlow(bot, chatId, userId, entry.bookName, entry.url, {
     callbackQueryId,
     lockKey,
+    depth: isDeep ? "deep" : "quick",
   });
 }
 
@@ -129,8 +131,8 @@ export async function runSummaryFlow(
   sourceUrl:  string | undefined,
   opts: {
     callbackQueryId?: string;
-    /** Lock key already acquired by the caller. We release it on exit. */
     lockKey?: string;
+    depth?: "quick" | "deep";
   } = {},
 ): Promise<void> {
   const lockKey = opts.lockKey;
@@ -151,7 +153,7 @@ export async function runSummaryFlow(
   try {
     // Cache fast-path — skip the quota check entirely for cached
     // hits (no upstream cost, treat as free).
-    const cached = await getCachedSummary(bookName);
+    const cached = await getCachedSummary(bookName, opts.depth || "quick");
     if (cached) {
       if (callbackQueryId) await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
       await deliverSummary(bot, chatId, bookName, cached);
@@ -241,6 +243,7 @@ export async function runSummaryFlow(
       resp = await getBookSummary(bookName, {
         pdfUrl:  sourceUrl,
         premium,
+        depth: opts.depth || "quick",
       });
     } finally {
       clearInterval(typingInterval);

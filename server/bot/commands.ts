@@ -24,8 +24,10 @@ import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
+import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
+import { buildMicroMessage, hasAnsweredMicro } from "./microHabit.js";
 import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList } from "./curated.js";
-import { buildGroupClubMessage, kbGroupClub, getGroupClubBook, maybePostWeeklyClub } from "./groupClub.js";
+import { buildGroupClubMessage, kbGroupClub, getGroupClubBook, maybePostWeeklyClub, kbClubWithVotes } from "./groupClub.js";
 import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
 import { pickFresh } from "./uiVariants.js";
 import {
@@ -307,9 +309,10 @@ export function registerCommands(
     try {
       const text = await buildGroupClubMessage(chatId);
       const { title } = await getGroupClubBook(chatId);
-      await bot.sendMessage(chatId, text, {
+      const alts = ["العادات الذرية", "الأمير الصغير", "فن اللامبالاة", "الرحيق المختوم"].filter((t) => t !== title);
+      await bot.sendMessage(chatId, text + "\n\n_صوّت 👍 لكتاب النادي إن أحببت._", {
         parse_mode: "Markdown",
-        reply_markup: kbGroupClub(title),
+        reply_markup: kbClubWithVotes(title, alts),
       });
     } catch (e) {
       L.error("cmd", "/club error", { err: String(e).slice(0, 100) });

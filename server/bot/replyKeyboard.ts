@@ -23,6 +23,7 @@ import {
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildCuratedMenuMessage, kbCuratedMenu } from "./curated.js";
+import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
 import { buildResetTime } from "./text.js";
 
 /** نصوص الأزرار — تطابق تام مع ضغط المستخدم */
@@ -38,6 +39,7 @@ export const RK = {
   LIBRARY:  "📚 مكتبتي",
   LISTS:    "📖 قوائم",
   CONTINUE: "▶️ أكمل رحلتي",
+  PREFS:    "🔔 إشعارات",
   MENU:     "🏠 القائمة",
 } as const;
 
@@ -56,7 +58,8 @@ export function replyKeyboardMain(): TelegramBot.ReplyKeyboardMarkup {
       [{ text: RK.TODAY }, { text: RK.BALANCE }],
       [{ text: RK.LIBRARY }, { text: RK.CONTINUE }],
       [{ text: RK.LISTS }, { text: RK.MYWEEK }],
-      [{ text: RK.HELP }, { text: RK.MENU }],
+      [{ text: RK.HELP }, { text: RK.PREFS }],
+      [{ text: RK.MENU }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -186,6 +189,13 @@ export async function tryHandleReplyKeyboard(
     case RK.MYWEEK:
       await sendPersonalWeekReport(bot, chatId, userId);
       return true;
+
+    case RK.PREFS: {
+      const text = await buildPrefsMessage(userId);
+      const prefs = await getAllPrefs(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+      return true;
+    }
 
     case RK.HELP:
       await bot.sendMessage(chatId, buildHelpMessage(), {

@@ -13,6 +13,7 @@ import { redis } from "./redis.js";
 import { escMd } from "./text.js";
 import { storeRetryKey } from "./session.js";
 import { BOT_NAME } from "./brand.js";
+import { storage } from "../storage.js";
 
 export type LibStatus = "have" | "reading" | "done" | "want";
 
@@ -127,7 +128,30 @@ export function statusBadge(st: LibStatus): string {
   return `${ST_EMOJI[st]} ${ST_LABEL[st]}`;
 }
 
+
+/** يملأ المكتبة من سجل التحميلات السابق مرة واحدة إن كانت فارغة */
+export async function maybeBackfillLibrary(userId: string): Promise<number> {
+  try {
+    const n = await redis.zcard(ZKEY(userId));
+    if (n > 0) return 0;
+    const flag = await redis.set(`lib:backfilled:${userId}`, "1", "EX", 400 * 86400, "NX");
+    if (flag !== "OK") return 0;
+    const hist = await storage.getUserSearchHistory(userId, 40);
+    let added = 0;
+    for (const h of hist) {
+      const q = (h.query || "").trim();
+      if (q.length < 2) continue;
+      await recordLibraryDownload(userId, q, {});
+      added++;
+    }
+    return added;
+  } catch {
+    return 0;
+  }
+}
+
 export async function buildLibraryMessage(userId: string): Promise<string> {
+  const added = await maybeBackfillLibrary(userId);
   const items = await getLibrary(userId, 15);
   const last = await getLastBook(userId);
 
