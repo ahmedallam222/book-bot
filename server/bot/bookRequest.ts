@@ -51,7 +51,8 @@ import {
   buildMilestoneMessage, buildBrokenStreakMessage,
   type StreakUpdate,
 } from "./streak.js";
-import { checkAndAwardBadges, buildNewBadgeMessage } from "./badges.js";
+import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badges.js";
+import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
 import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
 // buildResetTime مستوردة من text.ts
@@ -1446,10 +1447,34 @@ async function sendSuccessMessage(
   bookName: string, sourceUrl: string, sizeMB?: string, fromCache = false,
   _isSuspect = false, isPrem = false
 ): Promise<void> {
-  // ── Streak update — atomic via Lua (شاهد streak.ts للتفاصيل) ──
-  // نستدعيها قبل buildSuccessMsg عشان نُضيف سطر السلسلة لو ≥ 2 يوم.
-  // فشلها لا يُعطّل الإرسال — fail-open.
-  const streak: StreakUpdate = await updateStreakOnDownload(userId);
+  // ── Streak update — atomic via Lua ──
+  let streak: StreakUpdate = await updateStreakOnDownload(userId);
+
+  // ── Streak shield: if a long streak just broke, try weekly shield ──
+  if (streak.brokenStreak >= 3) {
+    const saved = await tryUseStreakShield(userId, streak.brokenStreak).catch(() => false);
+    if (saved) {
+      try {
+        const today = (await import("./text.js")).cairoDateString();
+        await redis.set(`streak:cur:${userId}`, String(streak.brokenStreak));
+        await redis.set(`streak:last:${userId}`, today);
+        streak = {
+          ...streak,
+          current: streak.brokenStreak,
+          brokenStreak: 0,
+          transitioned: true,
+        };
+        bot.sendMessage(
+          chatId,
+          `🛡️ *درع السلسلة أنقذك!*
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+_حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُستخدم مرة كل أسبوع._`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch { /* shield restore best-effort */ }
+    }
+  }
+
   const streakLine = formatStreakLine(streak) ?? undefined;
 
   const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
@@ -1462,7 +1487,38 @@ async function sendSuccessMessage(
     },
   );
 
-  // ── Engagement signals — fire-and-forget لتجنب تأخير الـ user-facing flow ──
+  // ── Retention: quests / XP / comeback (non-blocking) ──
+  onSuccessfulDownload(userId, {
+    fromCache,
+    streakTransitioned: streak.transitioned,
+  }).then(async (ret) => {
+    for (const m of ret.messages) {
+      await bot.sendMessage(chatId, m, { parse_mode: "Markdown" }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    // extra badges: comeback / level / quest streak
+    const { getXpState } = await import("./retention.js");
+    const xp = await getXpState(userId);
+    if (xp.level >= 5) {
+      const b = await tryAwardBadge(userId, "level5");
+      if (b) {
+        const text = await buildNewBadgeMessage(userId, b);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+      }
+    }
+    const qs = parseInt((await redis.get(`ret:qstreak:${userId}`).catch(() => "0")) || "0", 10) || 0;
+    if (qs >= 7) {
+      const b = await tryAwardBadge(userId, "quest7");
+      if (b) {
+        const text = await buildNewBadgeMessage(userId, b);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+      }
+    }
+  }).catch((e) => {
+    L.warn("retention", "onSuccessfulDownload failed", { userId, err: String(e).slice(0, 100) });
+  });
+
+  // ── Engagement signals — fire-and-forget ──
   dispatchEngagementSignals(bot, chatId, userId, streak).catch((e) => {
     L.warn("engagement", "dispatchEngagementSignals failed", { userId, err: String(e).slice(0, 100) });
   });

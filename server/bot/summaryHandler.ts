@@ -22,6 +22,7 @@ import {
 import type { SummaryResponse } from "./aiProviders/types.js";
 import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
 import { trackSummaryAndAward, buildNewBadgeMessage } from "./badges.js";
+import { onSuccessfulSummary } from "./retention.js";
 
 // Per-user dedup window in seconds — the same user spamming the
 // summary button should hit cache; this prevents re-running the
@@ -275,6 +276,12 @@ export async function runSummaryFlow(
         err: String(e).slice(0, 100),
       });
     });
+    onSuccessfulSummary(userId).then(async (ret) => {
+      for (const m of ret.messages) {
+        await bot.sendMessage(chatId, m, { parse_mode: "Markdown" }).catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }).catch(() => {});
   } catch (e: any) {
     // The per-user counter was incremented by checkAndConsumeUsage
     // before this AI call ran. The user is not getting a summary, so

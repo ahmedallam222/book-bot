@@ -6,6 +6,7 @@ import { registerCallbackHandler }    from "../bot/callbacks.js";
 import { dequeue, completeJob, failJob, recoverStuckJobs } from "./queue.js";
 import { processBookRequest }         from "./bookRequest.js";
 import { cleanOldTempFiles }          from "./tempFiles.js";
+import { startRetentionWorker } from "./retention.js";
 import { startAlertWatcher }          from "./alertWatcher.js";
 import { startFailureRetryWorker }    from "./failureRetry.js";
 import { startAdminAgent }            from "./adminAgent/index.js";
@@ -160,6 +161,7 @@ export async function startBot(): Promise<void> {
 
   // تشغيل مراقب التنبيهات
   startAlertWatcher(_bot);
+  startRetentionWorker(_bot);
 
   // تشغيل عامل إعادة المحاولة — يفحص الفشل المخزّن ويعيد تجربته
   // بعد إصلاحات البحث/التحميل

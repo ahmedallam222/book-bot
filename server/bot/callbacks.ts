@@ -27,6 +27,8 @@ import {
 } from "./wishlist.js";
 import { handleSummaryCallback } from "./summaryHandler.js";
 import { handleImageCallback } from "./imageGen.js";
+import { claimDaily, RETENTION_TIPS } from "./retention.js";
+import { pickFresh } from "./uiVariants.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
@@ -468,6 +470,21 @@ export function registerCallbackHandler(
 
       case "my_history":   await buildHistoryMessage(bot, chatId, userId); break;
       case "top_books":    await buildTopBooksMessage(bot, chatId);        break;
+
+      case "daily_quest": {
+        const res = await claimDaily(userId);
+        const tip = pickFresh([...RETENTION_TIPS], "retip");
+        await bot.sendMessage(chatId, res.message + "\n\n" + tip, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🎲 مفاجأة", callback_data: "rg:any" },
+              { text: "🔍 بحث", callback_data: "new_search" },
+            ]],
+          },
+        }).catch(() => {});
+        break;
+      }
 
       case "my_profile": {
         // ملف المستخدم — Streak / Badges / Premium / Referrals

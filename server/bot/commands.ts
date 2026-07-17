@@ -18,6 +18,8 @@ import { storage } from "../storage.js";
 import { escMd, normalizeArabic, buildResetTime } from "./text.js";
 import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
+import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
+import { pickFresh } from "./uiVariants.js";
 import {
   allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
   isFreeTextGroup,
@@ -213,6 +215,32 @@ export function registerCommands(
     }
   });
 
+
+  // ── /daily  /quest — retention daily loop ─────
+  bot.onText(/^\/(?:daily|quest|مهمة|يومي)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const res = await claimDaily(userId);
+      const tip = pickFresh(RETENTION_TIPS as unknown as string[], "retip");
+      await bot.sendMessage(chatId, res.message + "\n\n" + tip, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🎲 كتاب مفاجأة", callback_data: "rg:any" },
+              { text: "🔍 ابحث", callback_data: "new_search" },
+            ],
+            [{ text: "👤 ملفي", callback_data: "my_profile" }],
+          ],
+        },
+      });
+    } catch (e) {
+      L.error("cmd", "/daily error", { err: String(e).slice(0, 100) });
+    }
+  });
+
   // ── /profile ───────────────────────────────────
   // ملف المستخدم: streak + badges + إجمالي تحميلات + Premium status.
   // مكمّل لـ /stats (اللي بيركّز على الـ daily limit) — مش بديل.
@@ -401,6 +429,7 @@ export function registerCommands(
       `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
       `📊 *حسابك:*\n` +
       `◦ \`/profile\` — ملفك الكامل + شاراتك 👤\n` +
+      `◦ \`/daily\` — مهمتك اليومية + XP + السلسلة ☀️\n` +
       `◦ \`/stats\` — رصيدك اليومي\n` +
       `◦ \`/history\` — آخر بحث لك\n` +
       `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +

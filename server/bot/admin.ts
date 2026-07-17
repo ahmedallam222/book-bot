@@ -16,6 +16,7 @@ import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js"
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
 import { getStreakState } from "./streak.js";
 import { getUserBadges, BADGES }     from "./badges.js";
+import { buildRetentionProfileBlock } from "./retention.js";
 import { getReferralState }          from "./referral.js";
 import { ARABIC_SOURCES }            from "./sources.js";
 import type { SourceStat }           from "./analytics.js";
@@ -138,14 +139,17 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
+  const retentionBlock = await buildRetentionProfileBlock(userId).catch(() => "");
+
   return (
     `👤 *ملفك — ${escMd(name)}*\n` +
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
     `📥 *إجمالي التحميلات:* ${totalDl}\n` +
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
+    (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
-    `_استخدم \`/invite\` لرابط الدعوة، أو \`/stats\` للحد اليومي._`
+    `_/daily للمهمة اليومية · /invite للدعوة · /stats للحد_`
   );
 }
 

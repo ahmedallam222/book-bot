@@ -39,6 +39,9 @@ export function kbMain(): TelegramBot.InlineKeyboardMarkup {
       // Me
       [
         { text: "👤  ملفي",            callback_data: "my_profile"  },
+        { text: "☀️  يومي",            callback_data: "daily_quest" },
+      ],
+      [
         { text: "📚  سجلّي",           callback_data: "my_history"  },
       ],
       [
