@@ -36,6 +36,7 @@ import {
   getUserNote,
 } from "../userSettings.js";
 import { getDeliveryStats } from "../deliveryMetrics.js";
+import { buildProductionPulse, formatProductionPulseArabic } from "../productionPulse.js";
 import {
   buildSystemHealthMessage,
   listBackupFiles,
@@ -873,7 +874,24 @@ const TOOL_SMART_QUERY_STATS: Tool = {
   },
 };
 
+
+const TOOL_PRODUCTION_PULSE: Tool = {
+  name: "get_production_pulse",
+  description:
+    "نبض الإنتاج: health score، نجاح التسليم p50/p95، found_no_send، smartq/intent، ملخص، جروب، طابور، تنبيهات. استخدمه لـ «إيه حال البوت؟» التشغيلي.",
+  parameters: { type: "object", properties: {} },
+  isWrite: false,
+  async run() {
+    const pulse = await buildProductionPulse();
+    return {
+      ...pulse,
+      arabic_report: formatProductionPulseArabic(pulse),
+    };
+  },
+};
+
 export const RAFIQA_TOOLS: Tool[] = [
+  TOOL_PRODUCTION_PULSE,
   TOOL_SMART_QUERY_STATS,
   TOOL_GET_DASHBOARD,
   TOOL_GET_SYSTEM_HEALTH,

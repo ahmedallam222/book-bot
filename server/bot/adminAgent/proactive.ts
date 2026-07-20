@@ -28,6 +28,7 @@ import {
 } from "../analytics.js";
 import { getQueueStats } from "../queue.js";
 import { getDeliveryStats } from "../deliveryMetrics.js";
+import { buildProductionPulse } from "../productionPulse.js";
 import { cairoDateString } from "../text.js";
 
 // ── Thresholds ────────────────────────────────────────────
@@ -241,6 +242,43 @@ async function runHealthCheck(): Promise<ProactiveAlert[]> {
       }
     } catch (e) {
       L.warn("proactive", `delivery check failed: ${String(e).slice(0, 80)}`);
+    }
+
+    // ── 4b. Production pulse quality (found_no_send ratio) ──
+    try {
+      const pulse = await buildProductionPulse();
+      const ratio = pulse.quality.found_no_send_ratio_pct;
+      if (
+        ratio != null &&
+        ratio >= 35 &&
+        pulse.quality.found_no_send >= 5 &&
+        pulse.delivery.samples >= THRESHOLDS.MIN_DELIVERY_SAMPLES
+      ) {
+        alerts.push({
+          type: "found_no_send_high",
+          severity: ratio >= 50 ? "critical" : "warning",
+          ts,
+          message:
+            `وجد نتائج ولم يُرسل PDF: *${ratio}%* ` +
+            `(${pulse.quality.found_no_send} حالة) — الصحة ${pulse.healthScore}/100`,
+          data: {
+            ratio,
+            found_no_send: pulse.quality.found_no_send,
+            healthScore: pulse.healthScore,
+          },
+        });
+      }
+      if (pulse.healthScore < 40 && pulse.delivery.samples >= THRESHOLDS.MIN_DELIVERY_SAMPLES) {
+        alerts.push({
+          type: "health_score_low",
+          severity: "critical",
+          ts,
+          message: `درجة صحة الإنتاج *${pulse.healthScore}/100* (${pulse.healthLabel})`,
+          data: { healthScore: pulse.healthScore, alerts: pulse.alerts },
+        });
+      }
+    } catch (e) {
+      L.warn("proactive", `pulse check failed: ${String(e).slice(0, 80)}`);
     }
 
     // ── Log the check ──

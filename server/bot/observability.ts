@@ -12,6 +12,7 @@ import { cairoDateString } from "./text.js";
 import { L } from "./logger.js";
 import { getDeliveryStats } from "./deliveryMetrics.js";
 import { getQueueStats } from "./queue.js";
+import { buildProductionPulse } from "./productionPulse.js";
 
 const LAT_KEY = (bucket: string) => `obs:lat:${bucket}`;
 const ERR_KEY = (day: string) => `obs:err:${day}`;
@@ -111,12 +112,15 @@ export async function buildOpsMetrics(): Promise<Record<string, unknown>> {
     .sort((a, b) => b.count - a.count)
     .slice(0, 15);
 
+  const pulse = await buildProductionPulse().catch(() => null);
+
   return {
     day,
     ts: Date.now(),
     latency,
     delivery,
     queue,
+    pulse,
     counters: {
       agent_turns: parseInt(agentTurns || "0", 10) || 0,
       agent_tools: parseInt(toolCalls || "0", 10) || 0,
@@ -152,6 +156,8 @@ h1{font-size:1.25rem}
 <table><tr><th>bucket</th><th>n</th><th>p50</th><th>p95</th><th>avg</th></tr>${rows}</table>
 <h2>Delivery today</h2>
 <pre>${JSON.stringify(del, null, 2)}</pre>
+<h2>Production pulse</h2>
+<pre>${JSON.stringify(data.pulse, null, 2)}</pre>
 <h2>Queue</h2>
 <pre>${JSON.stringify(data.queue, null, 2)}</pre>
 <h2>Top errors</h2>
