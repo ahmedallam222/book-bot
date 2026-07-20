@@ -24,7 +24,7 @@ import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { sendPersonalMonthReport } from "./personalMonth.js";
-import { buildShareCardMessage, kbShareCard } from "./shareCard.js";
+import { buildShareCardMessage, buildShareCardHtml, kbShareCard } from "./shareCard.js";
 import { tryGroupSocialReply, sendGroupPlaybook } from "./groupInteract.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
@@ -323,10 +323,18 @@ export function registerCommands(
         return;
       }
       const uname = getBotUsername();
-      await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
-        parse_mode: "Markdown",
-        reply_markup: kbShareCard(title),
-      });
+      try {
+        await bot.sendMessage(chatId, buildShareCardHtml(title, uname), {
+          parse_mode: "HTML",
+          reply_markup: kbShareCard(title),
+          disable_web_page_preview: true,
+        });
+      } catch {
+        await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+          reply_markup: kbShareCard(title),
+          disable_web_page_preview: true,
+        });
+      }
     } catch (e) {
       L.error("cmd", "/share error", { err: String(e).slice(0, 80) });
     }
@@ -1162,6 +1170,11 @@ function looksLikeBookRequest(input: string): boolean {
   const chatty =
     /^(?:مرحبا|مرحباً|السلام\s*عليكم|سلام|هلا|أهلا|اهلا|صباح|مساء|شكرا|شكراً|يسلمو|تمام|اوك|أوك|طيب|هه+|هههه|لول|lol|ok|hi|hello|hey|bye|كيفك|عامل\s*ايه|اخبارك|مين|ايه|إيه|يعني|بجد|والله|يا\s*جماعة|جروب|القناة|ادمن|أدمن|البوت|بوت\??|help|مساعدة)(?:\s|[!?.…]*)$/i;
   if (chatty.test(t)) return false;
+  // instruction-to-bot sentences (common in free-text groups)
+  const instructionStart =
+    /^(?:ارسل|ابعت|ابعث|ود[يّ]|ارسال|ابعثلي|ارسلي|ابعتلي|اريد\s*منك|ممكن\s*تبعت|لو\s*سمحت\s*ابعت)/i;
+  if (instructionStart.test(t) && t.split(/\s+/).length >= 5) return false;
+  if (/(?:وليس\s*رابط|مش\s*رابط|ملف\s*وليس)/i.test(t)) return false;
   // long chat sentences with many conversational markers
   if (t.split(/\s+/).length > 14) return false;
   if (/[؟?]{1}/.test(t) && t.split(/\s+/).length > 8) return false;

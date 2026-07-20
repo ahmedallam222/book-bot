@@ -76,6 +76,23 @@ import { activateReferralOnFirstDownload, sendReferralNotifications } from "./re
 // Latency class for attempt ordering (lower = try first).
 // Cheap direct sources before Playwright-heavy hosts so we spend the
 // job budget on deliverable candidates first.
+
+/** Drop listing/author HTML pages that never yield a PDF for this query. */
+function isJunkDownloadUrl(url: string): boolean {
+  const u = (url || "").toLowerCase();
+  if (!u) return true;
+  // foulabook author index (not a book page)
+  if (/foulabook\.com\/[^/]+\/author\//i.test(u)) return true;
+  if (/foulabook\.com\/author\//i.test(u)) return true;
+  // generic category/search pages
+  if (/[?&](s|search|q|query|category|cat|tag)=/i.test(u) && !/\.pdf(\?|$)/i.test(u)) return true;
+  if (/\/(category|tag|tags|search|author|writers?)\//i.test(u) && !/\.pdf(\?|$)/i.test(u)) {
+    // allow noor-book book pages
+    if (!/noor-book\.com\/book\//i.test(u)) return true;
+  }
+  return false;
+}
+
 function latencyClassForUrl(url: string): number {
   const u = (url || "").toLowerCase();
   if (u.includes("t.me/") || u.startsWith("tg://")) return 1; // MTProto, usually fast
@@ -743,7 +760,9 @@ async function performFullSearch(
     const cleanTitle = (r.title && !r.title.startsWith("http")) ? r.title : "";
     if (r.access === "protected_page") paidSignalCount++;
     if (r.directPdfUrl) {
-      if (!seenPdfUrls.has(r.directPdfUrl)) {
+      if (isJunkDownloadUrl(r.directPdfUrl)) {
+        redis.incr("tel:dl:junk_url_skipped").catch(() => {});
+      } else if (!seenPdfUrls.has(r.directPdfUrl)) {
         seenPdfUrls.add(r.directPdfUrl);
         allPdfUrls.push(r.directPdfUrl);
       }
@@ -756,7 +775,9 @@ async function performFullSearch(
         urlFileSize.set(r.directPdfUrl, r.fileSize);
       }
     } else if (r.url && r.access === "download_page") {
-      if (!seenDownloadPages.has(r.url)) {
+      if (isJunkDownloadUrl(r.url)) {
+        redis.incr("tel:dl:junk_url_skipped").catch(() => {});
+      } else if (!seenDownloadPages.has(r.url)) {
         seenDownloadPages.add(r.url);
         downloadablePageFallbacks.push(r.url);
       }
@@ -1051,6 +1072,28 @@ async function performFullSearch(
     }
   }
 
+
+  // FORCE-RESCUE: production found_no_send often has candidates=1 while
+  // search returned 15+ hits. Score floor drops every fallback → user gets
+  // "no results". Absolute last resort: inject top download pages / page
+  // URLs without score filter (still junk-filtered).
+  if (validUrls.length < RESCUE_MIN_CANDIDATES) {
+    const pool = [
+      ...downloadablePageFallbacks,
+      ...pageUrlFallbacks,
+    ].filter((u) => !isJunkDownloadUrl(u) && !validUrls.includes(u));
+    const forced = [...new Set(pool)].slice(0, Math.max(0, RESCUE_MIN_CANDIDATES - validUrls.length + 2));
+    if (forced.length > 0) {
+      L.info("bot", `force_rescue — injecting ${forced.length} unfiltered fallback(s)`, {
+        book: bookName.slice(0, 50),
+        before: validUrls.length,
+      });
+      validUrls.push(...forced);
+      validUrls = diversifyUrlsByDomain(validUrls);
+      redis.incr("tel:dl:force_rescue").catch(() => {});
+    }
+  }
+
   await editMsg(token, chatId, msgId, buildProgress(5, bookName, tip(isPrem)));
   armProgressWatchdog(token, chatId, msgId, 5, bookName);
 
@@ -1093,6 +1136,15 @@ async function performFullSearch(
   let globalCapReached = false;
   let domainCapHits = 0;
   let tooLargeHits = 0;
+
+  // Final junk filter (author pages, category URLs)
+  {
+    const beforeJ = validUrls.length;
+    validUrls = validUrls.filter((u) => !isJunkDownloadUrl(u));
+    if (validUrls.length < beforeJ) {
+      redis.incrby("tel:dl:junk_url_skipped", beforeJ - validUrls.length).catch(() => {});
+    }
+  }
 
   try {
     for (const pdfUrl of validUrls) {

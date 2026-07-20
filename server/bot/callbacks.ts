@@ -36,7 +36,7 @@ import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libra
 import { togglePref, isPrefKey, buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
 import { answerMicro, skipMicro, buildMicroMessage } from "./microHabit.js";
 import { voteClubBook } from "./groupClub.js";
-import { buildShareCardMessage, kbShareCard } from "./shareCard.js";
+import { buildShareCardMessage, buildShareCardHtml, kbShareCard } from "./shareCard.js";
 import { sendPersonalMonthReport } from "./personalMonth.js";
 import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries, buildCuratedMenuForUser, kbCuratedMenuForUser } from "./curated.js";
 import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
@@ -529,10 +529,20 @@ export function registerCallbackHandler(
           return;
         }
         const uname = getBotUsername?.() || "";
-        await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
-          parse_mode: "Markdown",
-          reply_markup: kbShareCard(title),
-        });
+        const kb = kbShareCard(title);
+        // Prefer HTML (robust); fall back to plain text if entity parse fails
+        try {
+          await bot.sendMessage(chatId, buildShareCardHtml(title, uname), {
+            parse_mode: "HTML",
+            reply_markup: kb,
+            disable_web_page_preview: true,
+          });
+        } catch {
+          await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+            reply_markup: kb,
+            disable_web_page_preview: true,
+          });
+        }
       } catch (e) {
         L.error("cb", "share failed", { err: String(e).slice(0, 80) });
       }

@@ -6,6 +6,10 @@
 /** Very common dialect intent prefixes → strip (leading only) */
 const DIALECT_LEADING = /^(?:عايز|عاوز|عاوزه|عايزه|أبغى|ابغى|ابي|أبي|أريد|اريد|ممكن|جيب|أجيب|اجيب|بدي|ودي|بغيت|أبغى|ابحث\s*عن|دور\s*على|بدور\s*على|فين|فين\s*كتاب)\s+/i;
 
+/** Chat-command noise often typed in groups: "ارسل لي الملف" / "مش رابط" */
+const INSTRUCTION_NOISE = /\b(?:ارسل(?:\s*لي)?|ابعت(?:\s*لي)?|ابعث(?:\s*لي)?|ودّي|ودي|ملف(?:\s*وليس\s*رابط)?|وليس\s*رابط|مش\s*رابط|رابط\s*فقط|بصيغة\s*pdf|كملف)\b/gi;
+const TRAILING_JUNK = /\s*(?:من\s*فضلك|لو\s*سمحت|يارجال|يا\s*أخ|يااخ|pls|please)\s*$/i;
+
 /** Phrase-level fixes (applied once, order matters) */
 const PHRASE_FIXES: Array<[RegExp, string]> = [
   [/السي\s+الي\s+المكان/gi, "السعي إلى المكان"],
@@ -48,6 +52,10 @@ export function lightNormalizeQuery(raw: string): string {
   for (const [re, rep] of PHRASE_FIXES) {
     t = t.replace(re, rep);
   }
+
+  // Strip instructional chat noise (group free-text)
+  t = t.replace(INSTRUCTION_NOISE, " ").replace(/\s+/g, " ").trim();
+  t = t.replace(TRAILING_JUNK, "").trim();
 
   // Word-level fixes
   t = t
