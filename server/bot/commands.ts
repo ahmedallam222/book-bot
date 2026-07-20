@@ -7,7 +7,6 @@ import { REACTION_RECEIVED } from "./uiVariants.js";
 import { handleRandomCommand } from "./random.js";
 import { handleWeeklyCommand } from "./weekly.js";
 import { handleImageCommand } from "./imageGen.js";
-import { handleVideoCommand } from "./videoGen.js";
 import { sendAdminPanel, handleAdminPendingAction } from "./admin.js";
 import { runRetryPass, listPendingFailures } from "./failureRetry.js";
 import { cancelUserJobs, getQueueStats } from "./queue.js";
@@ -18,9 +17,35 @@ import { isPremium, getUserDailyLimit, setPremium, setUserDailyLimit, resetUserD
 import { storage } from "../storage.js";
 import { escMd, normalizeArabic, buildResetTime } from "./text.js";
 import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
+import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
+import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
+import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
+import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard, replyKeyboardRemove, isUiChromeText, matchReplyKeyboardAction } from "./replyKeyboard.js";
+import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
+import { sendPersonalWeekReport } from "./personalWeek.js";
+import { sendPersonalMonthReport } from "./personalMonth.js";
+import { buildShareCardMessage, buildShareCardHtml, kbShareCard } from "./shareCard.js";
+import { tryGroupSocialReply, sendGroupPlaybook, extractEmbeddedBookRequest, extractBookFromReplyContext } from "./groupInteract.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
+import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
+import { buildMicroMessage, hasAnsweredMicro } from "./microHabit.js";
+import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList } from "./curated.js";
+import { buildGroupClubMessage, kbGroupClub, getGroupClubBook, maybePostWeeklyClub, kbClubWithVotes } from "./groupClub.js";
+import { buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
+import { pickFresh } from "./uiVariants.js";
+import {
+  allowGroupBookRequest, maybeSoftNotBookReply, maybeSendGroupWelcome,
+  isFreeTextGroup,
+  isFreeTextGroupLive,
+} from "./groupPolicy.js";
+import { lightNormalizeQuery } from "./queryNormalize.js";
+import { applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
+import { kbDidYouMean } from "./didYouMean.js";
+import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
 import { storeRetryKey } from "./session.js";
 import {
-  MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
+  MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, GROUP_FREE_TEXT_CHAT_IDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
 } from "./config.js";
 import { redis } from "./redis.js";
 import { recordGroup } from "./groupTracker.js";
@@ -78,7 +103,7 @@ export function registerCommands(
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
         await bot.sendMessage(chatId,
-          `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+          `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -100,15 +125,45 @@ export function registerCommands(
       ]);
       const remaining = Math.max(0, limit - dlRaw);
       await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem, isFirstTime),
-        { parse_mode: "Markdown", reply_markup: kbMain() });
+        { parse_mode: "Markdown", reply_markup: replyKeyboardMain() });
+      // قائمة inline إضافية للأفعال المتقدمة
+      await bot.sendMessage(chatId,
+        isFirstTime
+          ? `👇 *اختصارات سريعة* — والأزرار السفلية دائماً معك.`
+          : `👇 *القائمة السريعة*`,
+        { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
       if (isFirstTime) {
         react(bot, chatId, msg.message_id, "🎉").catch(() => {});
+        // ترحيب ذوق — مرّة واحدة
+        try {
+          if (await shouldShowOnboarding(userId)) {
+            await bot.sendMessage(
+              chatId,
+              buildOnboardingMessage(name),
+              { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+            );
+          }
+        } catch { /* */ }
+      } else {
+        // مستخدم قديم لم يكمل onboarding
+        try {
+          if (await shouldShowOnboarding(userId)) {
+            const shown = await redis.set(`ret:onb_nudge:${userId}`, "1", "EX", 14 * 86400, "NX");
+            if (shown === "OK") {
+              await bot.sendMessage(
+                chatId,
+                buildOnboardingMessage(name),
+                { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+              ).catch(() => {});
+            }
+          }
+        } catch { /* */ }
       }
     } catch (e) {
       L.error("cmd", "/start error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId,
-        `📚 *أهلاً! أنا بوت خلاصة الكتب*\n\nاكتب اسم أي كتاب وسأبحث عنه لك!`,
-        { parse_mode: "Markdown", reply_markup: kbMain() }).catch(() => {});
+        `🌿 *أهلاً! أنا رفيق*\n\nاكتب عنوان أي كتاب… وأبحث عنه بهدوء.`,
+        { parse_mode: "Markdown", reply_markup: replyKeyboardMain() }).catch(() => {});
     }
   });
 
@@ -130,7 +185,7 @@ export function registerCommands(
     if (!isAdmin(userId)) {
       const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
       if (maintenance === "1") {
-        await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+        await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
           { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
@@ -162,15 +217,6 @@ export function registerCommands(
     await handleImageCommand(bot, chatId, userId, prompt, msg.message_id);
   });
 
-  // ── /video ─────────────────────────────────────
-  // توليد فيديو عبر veo3 (veoaifree). التفاصيل في videoGen.ts.
-  bot.onText(/^\/video(?:\s+(.+))?$/i, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = String(msg.from?.id || "");
-    if (!userId) return;
-    const prompt = (match?.[1] || "").trim();
-    await handleVideoCommand(bot, chatId, userId, prompt, msg.message_id);
-  });
 
   // ── /stats ─────────────────────────────────────
   bot.onText(/^\/stats$/, async (msg) => {
@@ -206,13 +252,131 @@ export function registerCommands(
             ],
           };
       await bot.sendMessage(chatId,
-        `📊 *إحصائياتك*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
-        `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*\n\n` +
-        `_يتجدد بعد ${buildResetTime()}_ 🕐`,
+        `📊 *رصيدك اليوم*${premBadge}\n━━━━━━━━━━━━━━━━\n\n${statBar}\n\n` +
+        `📥 حمّلت اليوم: *${dlCount}*\n` +
+        `${indicator} يتبقّى لك: *${limit <= 0 ? "∞" : remaining}* تحميل\n\n` +
+        `_الرصيد يتجدد بعد ${buildResetTime()} (بتوقيت القاهرة)_`,
         { parse_mode: "Markdown", reply_markup: statsKb });
     } catch (e) {
       L.error("cmd", "/stats error", { err: String(e).slice(0, 100) });
       await bot.sendMessage(chatId, `⚠️ خطأ مؤقت، حاول مرة أخرى.`).catch(() => {});
+    }
+  });
+
+
+  // ── /daily  /quest — retention daily loop ─────
+  bot.onText(/^\/(?:daily|quest|مهمة|يومي|حضور)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const res = await claimDaily(userId);
+      await bot.sendMessage(chatId, res.message, {
+        parse_mode: "Markdown",
+        reply_markup: kbAfterDaily(),
+      });
+    } catch (e) {
+      L.error("cmd", "/daily error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+  
+  // ── /today — كتاب اليوم ─────────────────────
+  bot.onText(/^\/(?:today|كتاب_اليوم|كتاب اليوم)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    try {
+      const body = await buildBookOfDayMessage(userId || undefined);
+      const kb = await kbBookOfDayAsync();
+      await bot.sendMessage(chatId, body, {
+        parse_mode: "Markdown",
+        reply_markup: kb,
+      });
+    } catch (e) {
+      L.error("cmd", "/today error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+
+  // ── /myweek — تقرير أسبوعي شخصي ────────────
+  
+  bot.onText(/^\/(?:mymonth|month|شهري|شهري)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      await sendPersonalMonthReport(bot, chatId, userId);
+    } catch (e) {
+      L.error("cmd", "/mymonth error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:share|مشاركة)(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    const q = (match?.[1] || "").trim();
+    try {
+      let title = q;
+      if (!title) {
+        const { getLastBook } = await import("./library.js");
+        title = (await getLastBook(userId)) || "";
+      }
+      if (!title) {
+        await bot.sendMessage(chatId, `📤 اكتب: \`/share عنوان الكتاب\` أو حمّل كتاباً أولاً.`, { parse_mode: "Markdown" });
+        return;
+      }
+      const uname = getBotUsername();
+      try {
+        await bot.sendMessage(chatId, buildShareCardHtml(title, uname), {
+          parse_mode: "HTML",
+          reply_markup: kbShareCard(title),
+          disable_web_page_preview: true,
+        });
+      } catch {
+        await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+          reply_markup: kbShareCard(title),
+          disable_web_page_preview: true,
+        });
+      }
+    } catch (e) {
+      L.error("cmd", "/share error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:myweek|weekme|أسبوعي|تقريري)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      await sendPersonalWeekReport(bot, chatId, userId);
+    } catch (e) {
+      L.error("cmd", "/myweek error", { err: String(e).slice(0, 100) });
+    }
+  });
+
+  // ── /club — نادي المجموعة / كتاب النادي ─────
+  
+  bot.onText(/^\/(?:group|جروب|تفاعل)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await sendGroupPlaybook(bot, chatId);
+    } catch (e) {
+      L.error("cmd", "/group error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:club|نادي)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      const text = await buildGroupClubMessage(chatId);
+      const { title } = await getGroupClubBook(chatId);
+      const alts = ["العادات الذرية", "الأمير الصغير", "فن اللامبالاة", "الرحيق المختوم"].filter((t) => t !== title);
+      await bot.sendMessage(chatId, text + "\n\n_صوّت 👍 لكتاب النادي إن أحببت._", {
+        parse_mode: "Markdown",
+        reply_markup: kbClubWithVotes(title, alts),
+      });
+    } catch (e) {
+      L.error("cmd", "/club error", { err: String(e).slice(0, 100) });
     }
   });
 
@@ -254,7 +418,7 @@ export function registerCommands(
         disable_web_page_preview: true,
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}` }],
+            [{ text: "🔗  مشاركة الرابط", switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجّانية\nhttps://t.me/${botUser}?start=ref_${userId}` }],
             [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
           ],
         },
@@ -391,44 +555,131 @@ export function registerCommands(
     await sendWishlist(bot, chatId, userId); // FIX-4: token محذوف
   });
 
+
+  // ── /library /continue /lists /prefs /pulse ───
+  bot.onText(/^\/(?:library|مكتبتي|lib)(?:@\w+)?(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const q = (match?.[1] || "").trim();
+      const text = await buildLibraryMessage(userId, q || undefined);
+      const kb = await kbLibrary(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch (e) {
+      L.error("cmd", "/library error", { err: String(e).slice(0, 80) });
+      await bot.sendMessage(chatId, "⚠️ تعذّر فتح المكتبة.").catch(() => {});
+    }
+  });
+
+  bot.onText(/^\/(?:continue|أكمل|اكمل|resume)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const { text, title } = await buildContinueMessage(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
+    } catch (e) {
+      L.error("cmd", "/continue error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:lists|list|قوائم)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    try {
+      const { getPrimaryGenre } = await import("./interests.js");
+      const { buildCuratedMenuForUser, kbCuratedMenuForUser } = await import("./curated.js");
+      const g = userId ? await getPrimaryGenre(userId) : null;
+      await bot.sendMessage(chatId, buildCuratedMenuForUser(g), {
+        parse_mode: "Markdown",
+        reply_markup: kbCuratedMenuForUser(g),
+      });
+    } catch (e) {
+      L.error("cmd", "/lists error", { err: String(e).slice(0, 80) });
+      try {
+        await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+          parse_mode: "Markdown",
+          reply_markup: kbCuratedMenu(),
+        });
+      } catch { /* */ }
+    }
+  });
+
+  bot.onText(/^\/(?:prefs|notifications|إشعارات|اشعارات)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const text = await buildPrefsMessage(userId);
+      const prefs = await getAllPrefs(userId);
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+    } catch (e) {
+      L.error("cmd", "/prefs error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+  bot.onText(/^\/(?:pulse|moment|لحظة|لحظتي|micro)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!msg.from?.id) return;
+    try {
+      const { text, kb } = buildMicroMessage();
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch (e) {
+      L.error("cmd", "/pulse error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+
+
+  bot.onText(/^\/(?:taste|ذوق|اهتمام|onboard)(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    const name = msg.from?.first_name || "صديقي";
+    try {
+      const { buildTasteResetMessage, kbOnboarding } = await import("./onboarding.js");
+      await bot.sendMessage(chatId, buildTasteResetMessage(), {
+        parse_mode: "Markdown",
+        reply_markup: kbOnboarding(),
+      });
+    } catch (e) {
+      L.error("cmd", "/taste error", { err: String(e).slice(0, 80) });
+    }
+  });
+
+
+  bot.onText(/^\/lang(?:@\w+)?(?:\s+(\w+))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from?.id || "");
+    if (!userId) return;
+    try {
+      const { setUserLocale, getUserLocale, isLocale, t, localeFromTelegram } = await import("./i18n.js");
+      const arg = (match?.[1] || "").toLowerCase();
+      if (arg && isLocale(arg)) {
+        await setUserLocale(userId, arg);
+        await bot.sendMessage(chatId, t(arg, arg === "en" ? "locale.set.en" : "locale.set.ar"));
+        return;
+      }
+      // auto from telegram
+      if (!arg && msg.from?.language_code) {
+        const auto = localeFromTelegram(msg.from.language_code);
+        await setUserLocale(userId, auto);
+        await bot.sendMessage(chatId, t(auto, auto === "en" ? "locale.set.en" : "locale.set.ar") + "\n" + t(auto, "locale.hint"));
+        return;
+      }
+      const cur = await getUserLocale(userId);
+      await bot.sendMessage(chatId, t(cur, "locale.hint") + `\n(current: ${cur})`);
+    } catch (e) {
+      L.error("cmd", "/lang error", { err: String(e).slice(0, 80) });
+    }
+  });
+
   // ── /help ──────────────────────────────────────
   bot.onText(/^\/help$/, async (msg) => {
     const chatId = msg.chat.id;
-    await bot.sendMessage(chatId,
-      `❓ *دليل الاستخدام*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-      `📖 *البحث:*\n` +
-      `◦ اكتب اسم الكتاب مباشرةً\n` +
-      `◦ \`/search عنوان الكتاب\`\n` +
-      `◦ \`/random\` — كتاب مفاجأة\n` +
-      `◦ \`/random روايات\` — من تصنيف معيّن\n\n` +
-      `📊 *حسابك:*\n` +
-      `◦ \`/profile\` — ملفك الكامل + شاراتك 👤\n` +
-      `◦ \`/stats\` — رصيدك اليومي\n` +
-      `◦ \`/history\` — آخر بحث لك\n` +
-      `◦ \`/last\` — أعِد تحميل آخر كتاب\n\n` +
-      `🎨 *الإبداع:*\n` +
-      `◦ \`/img <وصف>\` — ولّد صورة بالـ AI (5/يوم)\n` +
-      `◦ \`/video <وصف>\` — ولّد فيديو veo3 (2/يوم)\n\n` +
-      `🎁 *الإحالات:*\n` +
-      `◦ \`/invite\` — ادعُ صديقاً واحصل على Premium مجاني\n\n` +
-      `🔖 *الإدارة:*\n` +
-      `◦ \`/wishlist عنوان\` — أضف لقائمتك\n` +
-      `◦ \`/wishlist\` — اعرض قائمتك\n` +
-      `◦ \`/queue\` — حالة طلبك في الطابور\n` +
-      `◦ \`/cancel\` — ألغِ طلبك الحالي\n\n` +
-      `🌟 *الترتيبات:*\n` +
-      `◦ \`/top\` — أكثر الكتب تحميلاً\n` +
-      `◦ \`/weekly\` — تقرير الأسبوع\n` +
-      `◦ \`/premium\` — الترقية لـ Premium\n\n` +
-      `👥 *في المجموعات:* اكتب \`بوت\` ثم اسم الكتاب`,
-      { parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [
-          [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
-          [{ text: "🏠  القائمة",           callback_data: "main_menu"   }],
-        ]},
-      }
-    ).catch(() => {});
+    await bot.sendMessage(chatId, buildHelpMessage(), {
+      parse_mode: "Markdown",
+      reply_markup: kbHelp(),
+    }).catch(() => {});
   });
 
   // ── /admin ─────────────────────────────────────
@@ -618,12 +869,12 @@ export function registerCommands(
     }
 
     await bot.sendMessage(chatId,
-      `⭐ *خلاصة الكتب Premium*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
+      `⭐ *رفيق Premium*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
       `📥 *${DAILY_LIMIT} تحميل/يوم* مجاناً ← *${PREMIUM_LIMIT} تحميل/يوم*\n` +
       `⚡ أولوية في الطابور\n` +
       `🔄 تجديد تلقائي كل منتصف ليل\n\n` +
       `💫 *السعر: ${PREMIUM_STARS_PRICE} Stars شهرياً*\n\n` +
-      `_اضغط الزر للدفع عبر Telegram Stars_ 👇`,
+      `_اضغط الزرّ للدفع عبر Telegram Stars_ 👇`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -686,6 +937,30 @@ export function registerCommands(
       }
     } catch (e) {
       L.error("payment", "pre_checkout error", { err: String(e).slice(0, 100), userId });
+    }
+  });
+
+
+  // Ops: delivery latency p50/p95
+  bot.onText(/^\/ops_delivery(?:@\w+)?$/, async (msg) => {
+    const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) return;
+    const stats = await getDeliveryStats();
+    await bot.sendMessage(msg.chat.id, formatDeliveryStatsArabic(stats), { parse_mode: "Markdown" }).catch(() => {});
+  });
+
+
+  // Welcome when bot is added to free-text groups
+  bot.on("my_chat_member", async (upd) => {
+    try {
+      const chat = upd.chat;
+      if (!chat || (chat.type !== "group" && chat.type !== "supergroup")) return;
+      const ns = upd.new_chat_member?.status;
+      if (ns === "member" || ns === "administrator") {
+        await maybeSendGroupWelcome(bot, chat.id, true);
+      }
+    } catch (e) {
+      L.warn("commands", "my_chat_member welcome failed", { err: String(e).slice(0, 80) });
     }
   });
 
@@ -754,7 +1029,7 @@ export function registerMessageHandler(
           `🎉 *تم تفعيل Premium بنجاح!*\n\n` +
           `⭐ الآن لديك *${PREMIUM_LIMIT} تحميل يومياً*\n` +
           `⚡ وأولوية في الطابور\n\n` +
-          `_شكراً لدعمك خلاصة الكتب_ 🙏`,
+          `_شكراً لثقتك في رفيق_ 🙏`,
           { parse_mode: "Markdown", reply_markup: kbMain() }
         ).catch(() => {});
       }
@@ -768,7 +1043,7 @@ export function registerMessageHandler(
     const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
     if (!userId) return;
 
-    // FIX: نسجّل الجروب في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
+    // FIX: نسجّل المجموعة في الـ tracker لما نشوف رسالة فيه — بنستخدمه لإعلان
     // انتهاء الصيانة. fire-and-forget عشان ما يأخّرش الـ message handling.
     if (isGroup) {
       recordGroup(chatId, msg.chat.title || "").catch(() => {});
@@ -776,18 +1051,78 @@ export function registerMessageHandler(
 
     if (text.startsWith("/")) return;
 
+    // أزرار الواجهة / اختصارات — في الخاص والجروب (لا تُفسَّر كعنوان كتاب)
+    {
+      const handledRk = await tryHandleReplyKeyboard(bot, msg, token, getBotUsername).catch(() => false);
+      if (handledRk) return;
+      if (isUiChromeText(text) || matchReplyKeyboardAction(text)) {
+        // دفاع إضافي إن لم تُطابق لوحة الرد
+        if (isGroup) {
+          await bot.sendMessage(chatId, "🌿 _في الجروب اكتب عنوان الكتاب فقط._", {
+            parse_mode: "Markdown",
+            reply_markup: replyKeyboardRemove(),
+            reply_to_message_id: msg.message_id,
+            allow_sending_without_reply: true,
+          } as any).catch(() => {});
+        }
+        return;
+      }
+    }
+
     let bookName = "";
     if (isGroup) {
       const botUsername = getBotUsername().toLowerCase();
       const mention     = `@${botUsername}`;
-      if (text.toLowerCase().startsWith(mention)) {
+      const lower       = text.toLowerCase();
+      if (lower.startsWith(mention)) {
         bookName = text.slice(mention.length).trim();
       } else {
-        const lower   = text.toLowerCase();
         const trigger = GROUP_TRIGGER_WORDS.find((w) => lower.startsWith(w.toLowerCase()));
-        if (trigger) bookName = text.slice(trigger.length).trim();
+        if (trigger) {
+          bookName = text.slice(trigger.length).trim();
+        } else if (await isFreeTextGroupLive(chatId)) {
+          // 1) رد على رسالة: «حمّله» → عنوان من الرسالة الأصلية
+          const fromReply = extractBookFromReplyContext(msg);
+          // 2) جملة فيها عنوان: «فين كتاب X»
+          const embedded = extractEmbeddedBookRequest(text);
+          if (fromReply) {
+            bookName = fromReply;
+            redis.incr("tel:group:reply_context_hit").catch(() => {});
+          } else if (embedded) {
+            bookName = embedded;
+            redis.incr("tel:group:embedded_hit").catch(() => {});
+          } else if (looksLikeBookRequest(text) && !isUiChromeText(text)) {
+            bookName = text;
+            redis.incr("tel:group:free_text_hit").catch(() => {});
+          }
+        }
       }
-      if (!bookName) return;
+      // بعد الاستخراج: ارفض إن كان الناتج واجهة/دردشة
+      if (bookName && (isUiChromeText(bookName) || !looksLikeBookRequest(bookName))) {
+        bookName = "";
+      }
+      if (!bookName) {
+        const social = await tryGroupSocialReply(bot, msg).catch(() => false);
+        if (social) {
+          // أزل لوحة عالقة إن وُجدت
+          await bot.sendMessage(chatId, "\u200c", { reply_markup: replyKeyboardRemove() }).catch(() => {});
+          return;
+        }
+        // Soft tip (rate-limited) so members learn free-text mode
+        if (isFreeTextGroup(chatId) && text.length >= 2) {
+          maybeSoftNotBookReply(bot, chatId, userId, msg.message_id).catch(() => {});
+        }
+        return;
+      }
+      const gate = await allowGroupBookRequest(chatId, userId);
+      if (!gate.ok) {
+        await bot.sendMessage(
+          chatId,
+          `⏳ *تمهل قليلاً* — وصلتَ لحد الطلبات في المجموعة.\nجرّب بعد ${Math.ceil(gate.retryAfterSec / 60)} دقائق.`,
+          { parse_mode: "Markdown", reply_to_message_id: msg.message_id, allow_sending_without_reply: true } as any,
+        ).catch(() => {});
+        return;
+      }
     } else {
       bookName = text;
     }
@@ -802,7 +1137,7 @@ export function registerMessageHandler(
 
     const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
     if (maintenance === "1" && !isAdmin(userId)) {
-      await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
+      await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً… شكراً لصبرك.`,
         { parse_mode: "Markdown" }).catch(() => {});
       return;
     }
@@ -813,13 +1148,113 @@ export function registerMessageHandler(
     // user:lastSeen — يستخدمها dashboard broadcast (target=active7)
     redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
 
-    const wantsSummary = detectSummaryIntent(bookName);
-    const parsedBookName = await parseBookName(bookName);
-    await handleBookRequest(bot, chatId, userId, parsedBookName, token, msg.from?.username, msg.message_id, wantsSummary);
+    // FIX-SPEED: skip AI chat-intent when the text already looks like a book
+    // title. parseChatIntent was adding 1–8s (and Bynara timeouts) before
+    // search even started on every request.
+    let finalBookName: string;
+    let finalWantsSummary: boolean;
+    const summaryHint = detectSummaryIntent(bookName);
+    const likelyBook =
+      looksLikeBookRequest(bookName) &&
+      bookName.split(/\s+/).length <= 12 &&
+      !/^(?:ازيك|عامل|مرحبا|السلام)/i.test(bookName);
+
+    // فهم محلي عميق أولاً (حشو محادثة / مؤلف / نوع / زي كذا) — بدون شبكة
+    const refined = refineBookName(bookName);
+    if (refined.wantsSummary) {
+      /* merge below */
+    }
+    // نوع أدبي بدون عنوان → أزرار اقتراحات بدل بحث أعمى
+    if (refined.mode === "genre" && refined.suggestions && refined.suggestions.length > 0) {
+      const lines = refined.suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n");
+      await bot.sendMessage(
+        chatId,
+        `📚 *${refined.note || "اقتراحات لك"}*\n\n${lines}\n\n_اضغط عنواناً للتحميل_`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: kbDidYouMean(refined.suggestions[0], refined.suggestions),
+          ...(msg.message_id
+            ? { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+            : {}),
+        } as any,
+      ).catch(() => {});
+      redis.incr("tel:intent:genre_menu").catch(() => {});
+      return;
+    }
+
+    if (likelyBook || refined.mode === "author" || refined.mode === "similar" || refined.changed) {
+      finalWantsSummary = summaryHint || refined.wantsSummary;
+      finalBookName = await parseBookName(refined.bookName || bookName);
+      redis.incr("tel:intent:fast_path").catch(() => {});
+    } else {
+      const intent = await parseChatIntent(bookName);
+      if (intent.isChat && intent.response) {
+        await bot.sendMessage(chatId, intent.response, { parse_mode: "Markdown" }).catch(() => {});
+        return;
+      }
+      finalBookName = intent.bookName || refined.bookName || "";
+      finalWantsSummary = !!intent.wantsSummary || summaryHint || refined.wantsSummary;
+      if (!finalBookName || finalBookName.trim().length < 2) {
+        finalBookName = await parseBookName(bookName);
+      }
+    }
+
+    if (!finalBookName || finalBookName.trim().length < 2) return;
+    finalBookName = lightNormalizeQuery(finalBookName) || finalBookName;
+    finalBookName = applyLocalSpellingFixes(finalBookName) || finalBookName;
+
+    bot.sendChatAction(chatId, "typing").catch(() => {});
+    await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
   });
 }
 
 // ── Helpers ───────────────────────────────────
+
+
+/** True when free text in a group is likely a book title, not chat. */
+function looksLikeBookRequest(input: string): boolean {
+  const t = input.replace(/\s+/g, " ").trim();
+  if (t.length < 2 || t.length > 90) return false;
+  if (/^https?:\/\//i.test(t)) return false;
+  if (/@\w+/.test(t) && t.startsWith("@")) return false;
+  if (!/[\u0600-\u06FFa-zA-Z0-9]/.test(t)) return false;
+  const letters = (t.match(/[\u0600-\u06FFa-zA-Z]/g) || []).length;
+  if (letters < 2) return false;
+  // UI chrome / keyboard labels — never a book title
+  if (isUiChromeText(t)) return false;
+  // chatty / social
+  const chatty =
+    /^(?:مرحبا|مرحباً|السلام\s*عليكم|سلام|هلا|أهلا|اهلا|صباح|مساء|شكرا|شكراً|يسلمو|تمام|اوك|أوك|طيب|هه+|هههه|لول|lol|ok|hi|hello|hey|bye|كيفك|عامل\s*ايه|اخبارك|مين|ايه|إيه|يعني|بجد|والله|يا\s*جماعة|جروب|القناة|ادمن|أدمن|البوت|بوت\??|help|مساعدة|تمام|ماشي|حاضر|يلا|يلاه|صباح\s*الخير|مساء\s*الخير|تصبحون|رمضان\s*كريم)(?:\s|[!?.…]*)$/i;
+  if (chatty.test(t)) return false;
+  // short conversational (1 word that is not a known book-like token)
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length === 1) {
+    // single word UI / slang
+    if (/^(?:مفاجأة|مفاجاه|حضور|ملفي|قوائم|أسبوعي|شهري|سجل|مساعدة|ابحث|لحظة|المزيد|نعم|لا|اوك|أوك)$/i.test(words[0])) {
+      return false;
+    }
+    // very short single tokens (< 3 letters) unlikely as book title alone
+    if (letters < 3) return false;
+  }
+  const instructionStart =
+    /^(?:ارسل|ابعت|ابعث|ود[يّ]|ارسال|ابعثلي|ارسلي|ابعتلي|اريد\s*منك|ممكن\s*تبعت|لو\s*سمحت\s*ابعت|هو\s*فين|فين\s*ال|مش\s*عارف|يعني\s*ايه)/i;
+  // Conversational delivery requests WITH a book cue are valid book intents
+  // e.g. "ابعتلي كتاب العادات" — do NOT reject those.
+  if (instructionStart.test(t) && words.length >= 3) {
+    const hasBookCue =
+      /(?:كتاب|رواية|قصة|ملخص|pdf|تحميل)/i.test(t) ||
+      extractEmbeddedBookRequest(t) != null;
+    if (!hasBookCue) return false;
+  }
+  if (/(?:وليس\s*رابط|مش\s*رابط|ملف\s*وليس|ابعت\s*لي|ارسل\s*لي)/i.test(t)) return false;
+  // chatty multi-word without bookish structure
+  if (words.length >= 4 && /(?:يعني|اصلا|أصلا|برضه|كمان|طيب|والله|بس|يعني\s*هو)/i.test(t) && !/(?:كتاب|رواية|تأليف|لـ|للكاتب)/i.test(t)) {
+    return false;
+  }
+  if (words.length > 14) return false;
+  if (/[؟?]{1}/.test(t) && words.length > 6) return false;
+  return true;
+}
 
 function sanitizeBookName(input: string): string {
   const cleaned = input.replace(/\s+/g, " ").trim().slice(0, MAX_BOOK_NAME_LEN);

@@ -17,7 +17,8 @@ import { L }       from "../logger.js";
 import { ADMIN_IDS } from "../config.js";
 import { SYSTEM_PROMPT, CONFIRM_PHRASES_RE, CANCEL_PHRASES_RE } from "./prompt.js";
 import { runLLM, runLLMStream, type LLMMessage, type LLMToolCall } from "./llm.js";
-import { getToolDefinitions, findTool, type ToolRunCtx } from "./tools.js";
+import { getToolDefinitions, getToolDefinitionsForNames, findTool, type ToolRunCtx } from "./tools.js";
+import { inferSkill, toolsForSkill, skillLabelAr, type AgentSkill } from "./skills.js";
 import { loadConversation, saveConversation, clearConversation } from "./conversation.js";
 import { seedDefaultsIfEmpty, ensureCloudflarePrimary, ensureAgentRouterProviders } from "./llmProviders.js";
 import {
@@ -28,6 +29,9 @@ import {
 import { buildMemoryContext } from "./memory.js";
 import { startProactiveMonitoring, stopProactiveMonitoring } from "./proactive.js";
 import { startScheduleRunner, stopScheduleRunner } from "./tools.js";
+import { recordAdminAudit } from "../adminAudit.js";
+import { canWrite, assertCanRunTool, getAdminRole, isAdminAny } from "../adminRoles.js";
+import { recordLatency, incrObs, withLatency } from "../observability.js";
 
 // ── config ────────────────────────────────────────────────
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
@@ -38,8 +42,8 @@ const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN || "";
 // loops far earlier; the higher ceiling is now only there to let
 // legitimate long admin workflows (audit chains, multi-tool reports)
 // run to completion.
-const MAX_LLM_LOOPS   = 24;
-const MAX_TOOL_OUTPUT  = 4000; // chars — keep context tight (bumped from 2500 for quick_overview)
+const MAX_LLM_LOOPS   = 32; // v4: longer diagnostic chains
+const MAX_TOOL_OUTPUT  = 7000; // v4 playbooks can be denser
 
 // ── pending writes (one per admin) ────────────────────────
 interface PendingWrite {
@@ -350,13 +354,18 @@ export async function startAdminAgent(): Promise<void> {
       return;
     }
     await bot.sendMessage(msg.chat.id,
-      "🤖 *وكيل إدارة خلاصة الكتب*\n\n" +
-      "اسألني عن أي حاجة في البوت — إحصاءات، users، sources، logs.\n" +
-      "أو اطلب مني أعمل حاجة — pause source، منح premium، broadcast.\n\n" +
-      "أوامر سريعة:\n" +
-      "/reset — امسح ذاكرة المحادثة\n" +
+      "🤖 *وكيل إدارة رفيق* — v4\n\n" +
+      "وكيل عمليات v4: playbooks · مهارات · حوادث · مقارنة · تنفيذ بعد التأكيد.\n\n" +
+      "أمثلة:\n" +
+      "• إيه حال رفيق؟\n" +
+      "• ليه التسليم بطيء؟\n" +
+      "• عطّل الصور / ارفع الحد اليومي\n" +
+      "• احظر user X · backup الآن\n\n" +
+      "أوامر:\n" +
+      "/reset — امسح المحادثة\n" +
       "/status — لقطة سريعة\n" +
-      "/help — شرح الـ tools المتاحة",
+      "/plan — الخطة الحالية\n" +
+      "/help — قائمة الأدوات",
       { parse_mode: "Markdown" },
     );
   });
@@ -377,6 +386,28 @@ export async function startAdminAgent(): Promise<void> {
     await handleMessage(bot, msg, "ايه حال البوت دلوقتي؟ (ملخص سريع)");
   });
 
+  bot.onText(/^\/brief$/, async (msg) => {
+    const uid = String(msg.from?.id ?? "");
+    if (!ADMIN_IDS.has(uid)) return;
+    await handleMessage(bot, msg, "أعطني موجز عمليات كامل الآن: استخدم auto_ops_brief ثم لخّص بالعربية.");
+  });
+  bot.onText(/^\/diagnose$/, async (msg) => {
+    const uid = String(msg.from?.id ?? "");
+    if (!ADMIN_IDS.has(uid)) return;
+    await handleMessage(bot, msg, "شغّل playbook health_full ثم source_outage إن لزم وشخص المشاكل الجذرية.");
+  });
+  bot.onText(/^\/ops$/, async (msg) => {
+    const uid = String(msg.from?.id ?? "");
+    if (!ADMIN_IDS.has(uid)) return;
+    await handleMessage(bot, msg, "حالة العمليات: طابور + DLQ + تسليم + مصادر ضعيفة + صيانة.");
+  });
+  bot.onText(/^\/report$/, async (msg) => {
+    const uid = String(msg.from?.id ?? "");
+    if (!ADMIN_IDS.has(uid)) return;
+    await handleMessage(bot, msg, "أنشئ تقرير يومي مقارن: daily_brief + compare_periods ثم insights.");
+  });
+
+
   // ── /help ───────────────────────────────────
   bot.onText(/^\/help$/, async (msg) => {
     const uid = String(msg.from?.id ?? "");
@@ -396,7 +427,7 @@ export async function startAdminAgent(): Promise<void> {
     // Skip command messages (already handled above)
     if (msg.text && msg.text.startsWith("/")) return;
     const uid = String(msg.from?.id ?? "");
-    if (!ADMIN_IDS.has(uid)) {
+    if (!isAdminAny(uid) && !ADMIN_IDS.has(uid)) {
       await bot.sendMessage(msg.chat.id, "هذه الواجهة للإدارة فقط.");
       return;
     }
@@ -406,9 +437,37 @@ export async function startAdminAgent(): Promise<void> {
   });
 }
 
+
+// ── Parallel read-tool batch (v3) ─────────────────────────
+// OpenClaw-style: when the model emits multiple independent
+// read tools in one turn, execute them concurrently (except
+// think/reflect which update LiveStatus first).
+async function executeReadTool(
+  tool: NonNullable<ReturnType<typeof findTool>>,
+  args: Record<string, unknown>,
+  ctx: ToolRunCtx,
+): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> {
+  try {
+    const result = await tool.run(args, ctx);
+    return { ok: true, result };
+  } catch (e1) {
+    await new Promise(r => setTimeout(r, 400));
+    try {
+      const result = await tool.run(args, ctx);
+      return { ok: true, result };
+    } catch (e2) {
+      return {
+        ok: false,
+        error: String(e2 instanceof Error ? e2.message : e2).slice(0, 300),
+      };
+    }
+  }
+}
+
 // ══════════════════════════════════════════════════════════
 // Core message handler — orchestrates LLM + tool loop
 // ══════════════════════════════════════════════════════════
+// PARALLEL_TOOL_BATCH_V3
 
 async function handleMessage(
   bot: TelegramBot,
@@ -432,16 +491,40 @@ async function handleMessage(
       }
       try {
         const result = await tool.run(pending.args, ctx);
+        try {
+          await recordAdminAudit(uid, `agent:confirm ${pending.toolName}`);
+        } catch { /* non-fatal */ }
         const resultStr = truncate(JSON.stringify(result, null, 2));
-        await bot.sendMessage(chatId, `✅ تم تنفيذ *${escMd(pending.toolName)}*\n\`\`\`json\n${resultStr}\n\`\`\``, { parse_mode: "Markdown" });
-        // Feed the result back to conversation so LLM knows what happened
+        await bot.sendMessage(
+          chatId,
+          `✅ تم تنفيذ *${escMd(pending.toolName)}* — أُكمل التحليل…`,
+          { parse_mode: "Markdown" },
+        ).catch(async () => {
+          await bot.sendMessage(chatId, `✅ تم تنفيذ ${pending.toolName} — أُكمل التحليل…`);
+        });
+        // v4: re-enter agent loop so model verifies + explains (not raw JSON dump)
         const history = await loadConversation(uid);
         history.push(
           { role: "assistant", content: pending.summary },
-          { role: "user", content: "تم التأكيد" },
-          { role: "assistant", content: `Tool ${pending.toolName} executed:\n${resultStr}` },
+          {
+            role: "user",
+            content:
+              `تم التأكيد ونُفّذ ${pending.toolName} بنجاح.
+` +
+              `النتيجة:
+${resultStr}
+
+` +
+              `لخّص ما تم، تحقّق إن لزم بأدوات قراءة، واقترح الخطوة التالية.`,
+          },
         );
         await saveConversation(uid, history);
+        await handleMessage(
+          bot,
+          msg,
+          `تم تنفيذ ${pending.toolName}. حلّل النتيجة وقدّم ملخصاً تنفيذياً. لا تطلب تأكيداً مجدداً لنفس العملية.`,
+        );
+        return;
       } catch (e) {
         await bot.sendMessage(chatId, `❌ فشل: ${String(e instanceof Error ? e.message : e).slice(0, 300)}`);
       }
@@ -460,21 +543,32 @@ async function handleMessage(
   const status = new LiveStatus(bot, chatId);
   await status.init();
 
-  // ── build messages array (with memory context) ──
+  // ── build messages array (with memory + skill routing v4) ──
   const history = await loadConversation(uid);
   const memoryCtx = await buildMemoryContext(uid);
+  const skill: AgentSkill = inferSkill(userText);
+  const skillHint =
+    `\n\n# مهارة هذه الرسالة\n` +
+    `المهارة النشطة: *${skillLabelAr(skill)}* (\`${skill}\`). ` +
+    `فضّل أدوات هذه المهارة و playbooks. لا تخرج عنها بلا داعٍ.`;
   const messages: LLMMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT + memoryCtx },
+    { role: "system", content: SYSTEM_PROMPT + memoryCtx + skillHint },
     ...history,
     { role: "user", content: userText },
   ];
 
-  const toolDefs = getToolDefinitions();
+  // Skill-scoped tools (core always included). Fall back to full set if too small.
+  const allowed = toolsForSkill(skill);
+  let toolDefs = getToolDefinitionsForNames(allowed);
+  if (toolDefs.length < 12) toolDefs = getToolDefinitions();
 
   // ── per-turn loop guards ────────────────────
   const burstGuard = createBurstGuard();
   let abortedReason: "loop_budget" | "token_budget" | "refusal_storm" | null = null;
 
+  L.info("adminAgent", `turn skill=${skill} tools=${toolDefs.length} role=${getAdminRole(uid)}`);
+  incrObs("agent_turns").catch(() => {});
+  const turnT0 = Date.now();
   // ── tool loop ───────────────────────────────
   let loops = 0;
   while (loops < MAX_LLM_LOOPS) {
@@ -509,6 +603,7 @@ async function handleMessage(
       history.push({ role: "user", content: userText });
       history.push({ role: "assistant", content: reply });
       await saveConversation(uid, history);
+      recordLatency("agent_turn", Date.now() - turnT0).catch(() => {});
       return;
     }
 
@@ -519,48 +614,35 @@ async function handleMessage(
       tool_calls: res.toolCalls,
     });
 
+    // PARALLEL_TOOL_BATCH_V3 — partition write vs read tool calls
+    const writeCalls: typeof res.toolCalls = [];
+    const readCalls: typeof res.toolCalls = [];
     for (const tc of res.toolCalls) {
       const tool = findTool(tc.function.name);
+      if (tool?.isWrite) writeCalls.push(tc);
+      else readCalls.push(tc);
+    }
+
+    // Read path first (parallel): gather context before any write confirm
+    type Prepared = {
+      tc: (typeof res.toolCalls)[0];
+      tool: NonNullable<ReturnType<typeof findTool>>;
+      args: Record<string, unknown>;
+      sig: string;
+    };
+    const prepared: Prepared[] = [];
+    for (const tc of readCalls) {
+      const tool = findTool(tc.function.name);
+      let args: Record<string, unknown>;
+      try { args = JSON.parse(tc.function.arguments || "{}"); } catch { args = {}; }
       if (!tool) {
         messages.push({
-          role:         "tool",
+          role: "tool",
           tool_call_id: tc.id,
-          content:      JSON.stringify({ error: `unknown tool: ${tc.function.name}` }),
+          content: JSON.stringify({ error: `unknown tool: ${tc.function.name}` }),
         });
         continue;
       }
-
-      let args: Record<string, unknown>;
-      try {
-        args = JSON.parse(tc.function.arguments || "{}");
-      } catch {
-        args = {};
-      }
-
-      // ── write tool → confirm flow ──
-      if (tool.isWrite) {
-        const summary = res.content || `تنفيذ ${tool.name}(${JSON.stringify(args)})`;
-        pendingWrites.set(uid, { toolName: tool.name, args, summary, ts: Date.now() });
-
-        // Show final status then delete, send confirm as separate message
-        await status.forceFlush();
-        await status.delete();
-
-        const confirmMsg = (res.content || `هل تريد تنفيذ *${escMd(tool.name)}*؟`) +
-          "\n\n_رد بـ «نعم» للتنفيذ أو «لا» للإلغاء._";
-        try {
-          await bot.sendMessage(chatId, confirmMsg, { parse_mode: "Markdown" });
-        } catch {
-          await bot.sendMessage(chatId, confirmMsg);
-        }
-
-        history.push({ role: "user", content: userText });
-        history.push({ role: "assistant", content: summary + "\n[⏳ في انتظار التأكيد]" });
-        await saveConversation(uid, history);
-        return;
-      }
-
-      // ── duplicate-call guard (read tools only) ──
       const sig = callSignature(tool.name, args);
       const decision = inspectCall(burstGuard, sig);
       if (!decision.allow) {
@@ -570,60 +652,102 @@ async function handleMessage(
           `duplicate tool call refused: ${tool.name} (${decision.reason}, count=${decision.count})`,
         );
         messages.push({
-          role:         "tool",
+          role: "tool",
           tool_call_id: tc.id,
-          content:      refusalToolContent(tool.name, decision),
+          content: refusalToolContent(tool.name, decision),
         });
         continue;
       }
+      prepared.push({ tc, tool, args, sig });
+    }
 
-      // ── Live status: show tool activity ──
-      if (tool.name === "think") {
-        // Think tool → show the thought to admin in real-time
-        const thought = typeof args.thought === "string" ? args.thought : "";
+    for (const item of prepared) {
+      if (item.tool.name === "think") {
+        const thought = typeof item.args.thought === "string" ? item.args.thought : "";
         await status.showThought(thought);
+      } else if (item.tool.name === "reflect") {
+        await status.showToolCall("reflect");
       } else {
-        await status.showToolCall(tool.name);
-      }
-
-      // ── read tool → execute with retry (improvement #7) ──
-      let toolResult: unknown = null;
-      let toolError: string | null = null;
-      try {
-        toolResult = await tool.run(args, ctx);
-      } catch (e1) {
-        // Retry once after a short delay (error recovery)
-        const err1 = String(e1 instanceof Error ? e1.message : e1).slice(0, 200);
-        L.info("adminAgent", `tool ${tool.name} failed, retrying`, { err: err1 });
-        await new Promise(r => setTimeout(r, 500));
-        try {
-          toolResult = await tool.run(args, ctx);
-        } catch (e2) {
-          toolError = String(e2 instanceof Error ? e2.message : e2).slice(0, 300);
-        }
-      }
-      recordExecution(burstGuard, sig);
-      if (toolError) {
-        messages.push({
-          role:         "tool",
-          tool_call_id: tc.id,
-          content:      JSON.stringify({
-            error: toolError,
-            hint:  "الأداة فشلت بعد محاولتين. جرّب أداة بديلة أو صيغة مختلفة.",
-          }),
-        });
-        if (tool.name !== "think") await status.showToolResult(tool.name, false);
-      } else {
-        messages.push({
-          role:         "tool",
-          tool_call_id: tc.id,
-          content:      truncate(JSON.stringify(toolResult)),
-        });
-        if (tool.name !== "think") await status.showToolResult(tool.name, true);
+        await status.showToolCall(item.tool.name);
       }
     }
 
-    // ── Refusal-storm bail-out ──
+    const results = await Promise.all(
+      prepared.map(async (item) => {
+        const outcome = await executeReadTool(item.tool, item.args, ctx);
+        incrObs("agent_tools").catch(() => {});
+        recordExecution(burstGuard, item.sig);
+        return { item, outcome };
+      }),
+    );
+
+    for (const { item, outcome } of results) {
+      if (!outcome.ok) {
+        messages.push({
+          role: "tool",
+          tool_call_id: item.tc.id,
+          content: JSON.stringify({
+            error: outcome.error,
+            hint: "الأداة فشلت بعد محاولتين. جرّب أداة بديلة أو صيغة مختلفة.",
+          }),
+        });
+        if (item.tool.name !== "think") await status.showToolResult(item.tool.name, false);
+      } else {
+        messages.push({
+          role: "tool",
+          tool_call_id: item.tc.id,
+          content: truncate(JSON.stringify(outcome.result)),
+        });
+        if (item.tool.name !== "think") await status.showToolResult(item.tool.name, true);
+      }
+    }
+
+    // Write tools require confirm — first write only (after reads in same turn)
+    if (writeCalls.length > 0) {
+      const tc = writeCalls[0];
+      const tool = findTool(tc.function.name);
+      if (!tool) {
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: `unknown tool: ${tc.function.name}` }),
+        });
+      } else {
+        let args: Record<string, unknown>;
+        try { args = JSON.parse(tc.function.arguments || "{}"); } catch { args = {}; }
+        try {
+          assertCanRunTool(uid, tool.name, true);
+        } catch (e) {
+          await status.delete();
+          await bot.sendMessage(chatId, `🚫 ${String(e instanceof Error ? e.message : e)}`);
+          return;
+        }
+        const summary = res.content || `تنفيذ ${tool.name}(${JSON.stringify(args)})`;
+        pendingWrites.set(uid, { toolName: tool.name, args, summary, ts: Date.now() });
+        for (const extra of writeCalls.slice(1)) {
+          messages.push({
+            role: "tool",
+            tool_call_id: extra.id,
+            content: JSON.stringify({ deferred: true, note: "انتظر تأكيد العملية الأولى أولاً" }),
+          });
+        }
+        await status.forceFlush();
+        await status.delete();
+        const confirmMsg = (res.content || `هل تريد تنفيذ *${escMd(tool.name)}*؟`) +
+          "\n\n_رد بـ «نعم» للتنفيذ أو «لا» للإلغاء._";
+        try {
+          await bot.sendMessage(chatId, confirmMsg, { parse_mode: "Markdown" });
+        } catch {
+          await bot.sendMessage(chatId, confirmMsg);
+        }
+        history.push({ role: "user", content: userText });
+        history.push({ role: "assistant", content: summary + "\n[⏳ في انتظار التأكيد]" });
+        await saveConversation(uid, history);
+        return;
+      }
+    }
+
+    // ── Refusal-storm bail-out    // ── Refusal-storm bail-out ──
     if (burstGuard.refusedCount >= MAX_REFUSALS_BEFORE_BAIL) {
       abortedReason = "refusal_storm";
       L.warn(

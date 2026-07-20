@@ -4,6 +4,9 @@ import { L }        from "./logger.js";
 import { GENRE_MAP, SUGGESTIONS } from "./suggestions.js";
 import { handleBookRequest }      from "./bookRequest.js";
 import { escMd }                  from "./text.js";
+import { onSuccessfulRandom } from "./retention.js";
+import { getPrimaryGenre, booksForGenreId } from "./interests.js";
+import { isFeatureOn } from "./featureFlags.js";
 
 // ══════════════════════════════════════════════
 // RANDOM — كتاب مفاجأة بجنس أدبي
@@ -95,6 +98,10 @@ export async function handleRandomCommand(
   username?: string | null,
   genreInput?: string
 ): Promise<void> {
+  if (!(await isFeatureOn("random"))) {
+    await bot.sendMessage(chatId, `🎲 *المفاجأة متوقفة مؤقتاً من الإدارة.*`, { parse_mode: "Markdown" }).catch(() => {});
+    return;
+  }
   if (!genreInput || genreInput.trim() === "") {
     // عرض أزرار الأجناس — زرين في كل سطر
     const entries = Object.entries(GENRE_LABELS);
@@ -114,7 +121,7 @@ export async function handleRandomCommand(
     await bot.sendMessage(chatId,
       `🎲 *اختر نوع الكتاب*\n` +
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n` +
-      `_سأختار لك كتاباً مميزاً من هذا النوع_`,
+      `_سأختار لك كتاباً بلطف — بلا ضغط_`,
       { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } }
     ).catch(() => {});
     return;
@@ -146,7 +153,17 @@ async function handleRandomByGenre(
   username: string | null | undefined,
   genreKey: string
 ): Promise<void> {
-  const books    = getBooksForGenre(genreKey);
+  let books    = getBooksForGenre(genreKey);
+  // تخصيص: عند «أي كتاب» انحز لذوق المستخدم إن وُجد
+  if (genreKey === "any" || genreKey === "أي") {
+    try {
+      const g = await getPrimaryGenre(userId);
+      if (g && g !== "other") {
+        const pref = booksForGenreId(g);
+        if (pref.length >= 5) books = pref;
+      }
+    } catch { /* */ }
+  }
   const bookName = await pickUniqueRandom(userId, books);
 
   // إحصاءات الجنس
@@ -166,8 +183,8 @@ async function handleRandomByGenre(
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [[
-          { text: "🎲 كتاب تاني", callback_data: `rg:${genreKey}` },
-          { text: "🔙 اختر نوع",  callback_data: "rg:menu" },
+          { text: "🎲 كتاب آخر", callback_data: `rg:${genreKey}` },
+          { text: "🔙 اختر التصنيف",  callback_data: "rg:menu" },
         ]],
       },
     }
@@ -179,5 +196,6 @@ async function handleRandomByGenre(
     userId,
   });
 
+  onSuccessfulRandom(userId).catch(() => {});
   await handleBookRequest(bot, chatId, userId, bookName, token, username);
 }

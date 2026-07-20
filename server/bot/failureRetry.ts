@@ -42,6 +42,9 @@ import { L } from "./logger.js";
 import { redis } from "./redis.js";
 import { canonicalizeForCache, escMd, urlFilenameRelevance } from "./text.js";
 import { searchAllSources } from "./engine.js";
+import { searchWithFuzzyFallback } from "./fuzzy.js";
+import { smartResolveBookQuery, learnSuccessfulCorrection } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { isBanned } from "./guards.js";
@@ -51,11 +54,11 @@ import type { BookResult } from "./types.js";
 // ── Tunables ───────────────────────────────────────────────────────
 const KEY_PREFIX                = "retry:fail";
 const RETRY_TTL_DAYS            = 7;
-const RETRY_MAX_ATTEMPTS        = 3;
-const RETRY_MIN_COOLDOWN_MS     = 30 * 60 * 1000;        // 30 min between attempts on the same record
+const RETRY_MAX_ATTEMPTS        = 5;
+const RETRY_MIN_COOLDOWN_MS     = 20 * 60 * 1000;        // 20 min between attempts on the same record
 const RETRY_WORKER_INTERVAL_MS  = 30 * 60 * 1000;        // sweeper period
 const RETRY_WORKER_STARTUP_MS   = 5 * 60 * 1000;         // startup delay (let DB/redis stabilize)
-const RETRY_BATCH_LIMIT         = 25;                    // max records per pass
+const RETRY_BATCH_LIMIT         = 40;                    // max records per pass
 const RETRY_RESCUE_BEST_PDF_THRESHOLD = 0.30;            // mirrors bookRequest.ts
 const RETRY_RESCUE_FALLBACK_THRESHOLD = 0.50;            // mirrors bookRequest.ts
 const RETRY_RESCUE_MAX_FALLBACKS      = 3;               // mirrors bookRequest.ts
@@ -63,7 +66,7 @@ const RETRY_RESCUE_MAX_FALLBACKS      = 3;               // mirrors bookRequest.
 // Lock key — only one retry worker pass at a time across the whole
 // fleet (we run a single bot instance, but this guards against the
 // admin command and the scheduled sweep colliding).
-const PASS_LOCK_KEY     = "retry:fail:lock";
+const PASS_LOCK_KEY     = "retry:worker:pass_lock"; // outside retry:fail:* SCAN space
 const PASS_LOCK_TTL_SEC = 10 * 60;
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -87,6 +90,8 @@ export interface FailedSearch {
   lastTs:        number;
   /** Retry count (0 on first record, bumped each pass). */
   attempts:      number;
+  /** URLs that already failed for this query — skip on retry. */
+  skippedUrls?:  string[];
 }
 
 export interface RetryPassResult {
@@ -199,7 +204,20 @@ export async function listPendingFailures(
         const v = vals[i];
         if (!v) continue;
         try {
-          collected.push({ key: keys[i], rec: JSON.parse(v) as FailedSearch });
+          // skip non-record keys (legacy lock collision defense)
+          if (keys[i].endsWith(":lock") || keys[i].split(":").length < 4) {
+            continue;
+          }
+          const rec = JSON.parse(v) as FailedSearch;
+          if (!rec || typeof rec !== "object" || typeof rec.bookName !== "string" || rec.bookName.trim().length < 2) {
+            await redis.del(keys[i]).catch(() => {});
+            continue;
+          }
+          if (!Number.isFinite(Number(rec.chatId)) || !rec.userId) {
+            await redis.del(keys[i]).catch(() => {});
+            continue;
+          }
+          collected.push({ key: keys[i], rec });
         } catch {
           // corrupt entry — drop it
           await redis.del(keys[i]).catch(() => {});
@@ -228,6 +246,13 @@ async function retryOne(
   key:    string,
   rec:    FailedSearch,
 ): Promise<{ outcome: "delivered" | "still_no_pdf" | "expired" | "cooldown" | "blocked" | "error" }> {
+  // Guard corrupt/legacy records (e.g. old lock key scanned as failure)
+  if (!rec || typeof rec.bookName !== "string" || rec.bookName.trim().length < 2) {
+    await removeFailure(key);
+    return { outcome: "expired" };
+  }
+  rec.bookName = rec.bookName.trim();
+
   // Cooldown — don't hammer the same record too often. The first
   // attempt fires immediately (lastTs === firstTs), subsequent
   // attempts wait at least RETRY_MIN_COOLDOWN_MS.
@@ -257,17 +282,38 @@ async function retryOne(
   };
   await redis.set(key, JSON.stringify(updated), "EX", RETRY_TTL_DAYS * 86400).catch(() => {});
 
-  // ── Run the search ─────────────────────────────────────────────
+  // ── Run the search (understand → smart spelling → fuzzy) ───────
+  let query = rec.bookName;
+  try {
+    const refined = refineBookName(query);
+    if (refined.bookName && refined.bookName.length >= 2) query = refined.bookName;
+    const smart = await smartResolveBookQuery(query, { useAi: true }).catch(() => null);
+    if (smart?.changed && smart.resolved.length >= 2) {
+      L.info("retry", "smart query on failure-retry", {
+        from: query.slice(0, 40),
+        to: smart.resolved.slice(0, 40),
+        source: smart.source,
+      });
+      query = smart.resolved;
+    }
+  } catch { /* keep original */ }
+
   let results: BookResult[];
   try {
-    results = await searchAllSources(rec.bookName);
+    const fuzzy = await searchWithFuzzyFallback(query);
+    results = fuzzy.results;
+    if ((!results || results.length === 0) && query !== rec.bookName) {
+      results = await searchAllSources(rec.bookName).catch(() => [] as BookResult[]);
+    }
   } catch (e) {
-    L.warn("retry", "searchAllSources threw", { book: rec.bookName.slice(0, 40), err: String(e).slice(0, 100) });
+    L.warn("retry", "search threw", { book: (query || "").slice(0, 40), err: String(e).slice(0, 100) });
     return { outcome: "error" };
   }
   if (!results || results.length === 0) {
     return { outcome: "still_no_pdf" };
   }
+  // use resolved query for download scoring / titles
+  const searchBookName = query;
 
   // Gather candidates — same triage as bookRequest.ts but without
   // the verbose UI scaffolding.
@@ -300,6 +346,10 @@ async function retryOne(
 
   const verify = await findValidPdfUrls(allPdfUrls).catch(() => null);
   let validUrls: string[] = verify?.urls ?? [];
+  if (rec.skippedUrls?.length) {
+    const skip = new Set(rec.skippedUrls);
+    validUrls = validUrls.filter((u) => !skip.has(u));
+  }
 
   // Fallbacks: replicate the same chain bookRequest.ts uses so retries
   // see the same candidate set as a fresh search.
@@ -313,11 +363,11 @@ async function retryOne(
   // retries pick up the same fix that motivated this whole feature.
   if (validUrls.length > 0 && downloadablePageFallbacks.length > 0) {
     const score = (u: string): number => {
-      const a = urlFilenameRelevance(rec.bookName, u);
+      const a = urlFilenameRelevance(searchBookName, u);
       const t = urlSearchTitle.get(u);
       if (!t) return a;
       const titleAsUrl = `https://x/${encodeURIComponent(t)}.pdf`;
-      return Math.max(a, urlFilenameRelevance(rec.bookName, titleAsUrl));
+      return Math.max(a, urlFilenameRelevance(searchBookName, titleAsUrl));
     };
     const bestPdfScore = score(validUrls[0]);
     if (bestPdfScore < RETRY_RESCUE_BEST_PDF_THRESHOLD) {
@@ -336,6 +386,38 @@ async function retryOne(
     return { outcome: "still_no_pdf" };
   }
 
+  // Score by filename/title relevance, then diversify domains
+  {
+    const score = (u: string): number => {
+      const a = urlFilenameRelevance(searchBookName, u);
+      const t = urlSearchTitle.get(u);
+      if (!t) return a;
+      const titleAsUrl = `https://x/${encodeURIComponent(t)}.pdf`;
+      return Math.max(a, urlFilenameRelevance(searchBookName, titleAsUrl));
+    };
+    validUrls = [...validUrls].sort((a, b) => score(b) - score(a));
+    const buckets = new Map<string, string[]>();
+    const order: string[] = [];
+    for (const u of validUrls) {
+      let host = "x";
+      try { host = new URL(u).hostname.toLowerCase(); } catch { /* */ }
+      if (!buckets.has(host)) { buckets.set(host, []); order.push(host); }
+      buckets.get(host)!.push(u);
+    }
+    if (buckets.size > 1) {
+      const mixed: string[] = [];
+      let progress = true;
+      while (progress) {
+        progress = false;
+        for (const h of order) {
+          const arr = buckets.get(h)!;
+          if (arr.length) { mixed.push(arr.shift()!); progress = true; }
+        }
+      }
+      validUrls = mixed;
+    }
+  }
+
   // ── Try each candidate until one delivers ──────────────────────
   // 2026-05-24: The apology was previously sent BEFORE the download
   // loop. That caused two user-visible bugs:
@@ -347,11 +429,11 @@ async function retryOne(
   // The apology is now sent INSIDE the `if (dl?.ok)` branch, right
   // before `removeFailure`, so it fires exactly once per record and
   // only when a PDF actually goes out with it.
-  for (const url of validUrls.slice(0, 3)) {
+  for (const url of validUrls.slice(0, 5)) {
     const title = urlSearchTitle.get(url) ?? "";
     let dl;
     try {
-      dl = await downloadAndSend(bot, rec.chatId, url, rec.bookName, token, false, false, title);
+      dl = await downloadAndSend(bot, rec.chatId, url, searchBookName, token, false, false, title);
     } catch (e) {
       L.warn("retry", "downloadAndSend threw", { url: url.slice(0, 60), err: String(e).slice(0, 100) });
       continue;
@@ -388,6 +470,9 @@ async function retryOne(
       });
       await removeFailure(key);
       await redis.incr("tel:retry:delivered").catch(() => {});
+      if (searchBookName !== rec.bookName) {
+        learnSuccessfulCorrection(rec.bookName, searchBookName).catch(() => {});
+      }
       return { outcome: "delivered" };
     }
   }

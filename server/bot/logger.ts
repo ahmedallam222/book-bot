@@ -1,8 +1,9 @@
 // ══════════════════════════════════════════════
-// LOGGER — خلاصة الكتب
+// LOGGER — رفيق
 // ══════════════════════════════════════════════
 
 import { pushLog } from "./logBuffer.js";
+// audit persist is lazy-imported to avoid cycles
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -37,7 +38,10 @@ export const L = {
   dlTimeout: (url: string, ms: number)              => log("warn",  "download", `⏱️  Timeout`, { url: url.slice(0,80), ms }),
   dlTooLarge:(url: string, mb: number)              => log("warn",  "download", `📦 Too large`, { url: url.slice(0,80), mb }),
 
-  adminAction: (who: string, action: string) => log("info", "admin", `🔧 ${action}`, { who }),
+  adminAction: (who: string, action: string) => {
+    log("info", "admin", `🔧 ${action}`, { who });
+    import("./adminAudit.js").then((m) => m.recordAdminAudit(who, action)).catch(() => {});
+  },
 
   queueProcess: (jobId: string, userId: string, book: string) =>
     log("info", "worker", `⏳ Job ${jobId} processing`, { userId, book: book.slice(0, 50) }),

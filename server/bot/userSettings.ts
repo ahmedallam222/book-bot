@@ -1,3 +1,4 @@
+import { resolveBookDailyLimit } from "./featureFlags.js";
 import { redis }                    from "./redis.js";
 import { L }                        from "./logger.js";
 import { PREMIUM_SET_KEY, DAILY_LIMIT, PREMIUM_LIMIT } from "./config.js";
@@ -262,7 +263,11 @@ export async function getUserDailyLimit(userId: string, premHint?: boolean): Pro
       premHint !== undefined ? Promise.resolve(premHint) : isPremium(userId),
       redis.get(ULIMIT_KEY(userId)),
     ]);
-    return computeDailyLimit(prem, override);
+    // تجاوز المستخدم يفوز؛ وإلا حدود الأدمن العامة
+    if (override !== null && override !== undefined) {
+      return computeDailyLimit(prem, override);
+    }
+    return resolveBookDailyLimit(prem, null);
   } catch {
     return DAILY_LIMIT;
   }

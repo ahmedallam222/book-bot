@@ -8,8 +8,8 @@
 //   - `isWrite`        — destructive ops require confirm flow
 //   - `run(args)`      — actual handler; returns serialisable result
 //
-// To add a tool: append an entry to TOOLS. The LLM picks it up
-// automatically via TOOL_DEFINITIONS — no other plumbing needed.
+// To add a tool: append an entry to TOOLS (or RAFIQA_TOOLS in rafiqaTools.ts).
+// The LLM picks it up automatically via getToolDefinitions().
 
 import { redis, scanKeys } from "../redis.js";
 import { getRecentLogs, getLogBufferStats } from "../logBuffer.js";
@@ -44,47 +44,18 @@ import { promisify } from "node:util";
 import { readFile, writeFile, stat, readdir } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
 import { L } from "../logger.js";
+import { RAFIQA_TOOLS } from "./rafiqaTools.js";
+import { V4_TOOLS, getSubAgentTool } from "./agentV4Tools.js";
+import { createParallelBriefsTool } from "./subAgents.js";
+import { recordAdminAudit } from "../adminAudit.js";
 const execAsync = promisify(execCb);
 
 // ──────────────────────────────────────────────────────────
-export interface ToolRunCtx {
-  userId: string;
-}
-
-export interface Tool {
-  name:        string;
-  description: string;
-  parameters:  Record<string, unknown>; // JSON schema
-  isWrite:     boolean;                 // requires confirm flow
-  run(args: Record<string, unknown>, ctx: ToolRunCtx): Promise<unknown>;
-}
-
-// ── helpers ───────────────────────────────────────────────
-function asStr(v: unknown, fallback = ""): string {
-  return typeof v === "string" ? v : fallback;
-}
-function asNum(v: unknown, fallback = 0): number {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-function asBool(v: unknown, fallback = false): boolean {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "string")  return /^(true|1|yes|on)$/i.test(v);
-  return fallback;
-}
-
-function sanitizePattern(pat: string): string {
-  // Reject dangerous patterns. We never let the LLM nuke everything.
-  if (!pat || pat === "*" || pat === "**" || pat.startsWith("*")) {
-    throw new Error("pattern too broad — must include a literal prefix (e.g. 'cache:welib:*')");
-  }
-  // Forbid clearing core system keys.
-  const FORBIDDEN_PREFIXES = ["flag:", "premium:", "ai:breaker:", "admin:agent:"];
-  for (const p of FORBIDDEN_PREFIXES) {
-    if (pat.startsWith(p)) throw new Error(`pattern protected (${p}*)`);
-  }
-  return pat;
-}
+// Types + helpers extracted to toolTypes.ts / toolHelpers.ts (tech pack)
+import type { Tool, ToolRunCtx } from "./toolTypes.js";
+export type { Tool, ToolRunCtx } from "./toolTypes.js";
+import { asStr, asNum, asBool, sanitizePattern, deriveRates } from "./toolHelpers.js";
+export { asStr, asNum, asBool, sanitizePattern, deriveRates } from "./toolHelpers.js";
 
 // ══════════════════════════════════════════════════════════
 // READ TOOLS (15)
@@ -152,24 +123,7 @@ const TOOL_GET_DLQ_JOBS: Tool = {
 // today/weekly/quick_overview tools — keeps the LLM from having to
 // do the math (and from saying "غير متاح" when the answer is right
 // there but expressed as a ratio).
-function deriveRates(d: Record<string, number>) {
-  const requests   = d.requests   ?? 0;
-  const found      = d.found      ?? 0;
-  const downloads  = d.downloads  ?? 0;
-  const cacheHits  = d.cache_hits ?? 0;
-  const searches   = d.searches   ?? 0;
-  const pct = (n: number, d2: number) => d2 > 0 ? Math.round((n / d2) * 1000) / 10 : null;
-  return {
-    raw: d,
-    derived: {
-      success_rate_pct:    pct(found, requests),         // found / requests
-      delivery_rate_pct:   pct(downloads + cacheHits, requests),
-      cache_hit_rate_pct:  pct(cacheHits, requests),
-      search_to_request_pct: pct(requests, searches),    // how many searches turn into downloads attempts
-      totals: { searches, requests, found, downloads, cache_hits: cacheHits },
-    },
-  };
-}
+// deriveRates imported from toolHelpers
 
 const TOOL_GET_TODAY_STATS: Tool = {
   name:        "get_today_stats",
@@ -2230,6 +2184,11 @@ export const TOOLS: Tool[] = [
   TOOL_REMOVE_LLM_PROVIDER,
   TOOL_SET_LLM_PRIORITY,
   TOOL_RESET_LLM_STATS,
+  // ── Rafiqa control plane (v3) ──
+  ...RAFIQA_TOOLS,
+  // ── Agent power tools (v4) ──
+  ...V4_TOOLS,
+  getSubAgentTool(),
 ];
 
 export function getToolDefinitions(): Array<{
@@ -2244,4 +2203,17 @@ export function getToolDefinitions(): Array<{
 
 export function findTool(name: string): Tool | undefined {
   return TOOLS.find(t => t.name === name);
+}
+
+/** Subset of tool definitions by name (skill routing). */
+export function getToolDefinitionsForNames(names: Set<string>): Array<{
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}> {
+  return TOOLS
+    .filter((t) => names.has(t.name))
+    .map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
 }

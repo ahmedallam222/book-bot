@@ -2,20 +2,20 @@ import { redis } from "./redis.js";
 import { L }     from "./logger.js";
 
 // ══════════════════════════════════════════════
-// GROUP TRACKER — تتبّع الجروبات اللي البوت موجود فيها
+// GROUP TRACKER — تتبّع المجموعةات اللي البوت موجود فيها
 // ══════════════════════════════════════════════
 //
-// الـ Telegram bot ما عندوش API بيرجّع كل الجروبات اللي عضو فيها (تصميم
-// متعمّد للحفاظ على الـ privacy). الحل المعتمد: نتعرّف على الجروب لأول مرة
+// الـ Telegram bot ما عندوش API بيرجّع كل المجموعةات اللي عضو فيها (تصميم
+// متعمّد للحفاظ على الـ privacy). الحل المعتمد: نتعرّف على المجموعة لأول مرة
 // لما يبعت رسالة + نسجّله في Redis. لما يحصل event عام (مثلاً انتهاء الصيانة)
-// نعمل announcement لكل الجروبات المعروفة.
+// نعمل announcement لكل المجموعةات المعروفة.
 //
 // Redis schema:
 //   - SET   `bot:known_groups`               → كل الـ chat IDs (string)
 //   - HASH  `bot:known_groups:meta`          → field=chatId → value={title,lastSeen}
 //
 // الـ TTL ضمني: نزيل أي chatId الـ sendMessage بترجع له خطأ "kicked" أو
-// "chat not found" — يعني الجروب اتشال أو طُرد البوت منه. كده الـ set
+// "chat not found" — يعني المجموعة اتشال أو طُرد البوت منه. كده الـ set
 // بيتنضف ذاتياً مع الوقت بدون cron.
 
 const SET_KEY  = "bot:known_groups";

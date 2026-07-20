@@ -18,7 +18,7 @@ import { buildProgress } from "./ui.js";
 import {
   WAIT_REASSURANCE_15S,
   WAIT_REASSURANCE_30S,
-  pickRandom,
+  pickFresh,
 } from "./uiVariants.js";
 
 interface WatchdogState {
@@ -45,13 +45,13 @@ export function armProgressWatchdog(
   clearProgressWatchdog(msgId);
 
   const t15 = setTimeout(() => {
-    const reassurance = pickRandom(WAIT_REASSURANCE_15S);
+    const reassurance = pickFresh(WAIT_REASSURANCE_15S, "wait15");
     editMsg(token, chatId, msgId, buildProgress(step, bookName, reassurance))
       .catch(() => {});
   }, 15_000);
 
   const t30 = setTimeout(() => {
-    const reassurance = pickRandom(WAIT_REASSURANCE_30S);
+    const reassurance = pickFresh(WAIT_REASSURANCE_30S, "wait30");
     editMsg(token, chatId, msgId, buildProgress(step, bookName, reassurance))
       .catch(() => {});
   }, 30_000);

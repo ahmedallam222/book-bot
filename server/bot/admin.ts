@@ -11,12 +11,26 @@ import {
   setSourceManuallyDisabled, isSourceManuallyDisabled, sanitizeDomainKey,
 } from "./analytics.js";
 import { getImageGenStats } from "./imageGen.js";
-import { getVideoGenStats } from "./videoGen.js";
+import {
+  buildAdminHomeMessage, buildAdminLiveMessage, buildAdminRetentionMessage,
+  buildAdminMonthMessage, buildAdminImagesMessage, buildAdminLibraryTasteMessage, adminPanelKeyboard,
+} from "./adminDashboard.js";
+import {
+  handleControlCallback, handleControlPendingText, kbUserControl,
+  getAdminPending, clearAdminPending,
+} from "./adminControl.js";
+import { isBanned } from "./guards.js";
+import { buildAdminAuditMessage } from "./adminAudit.js";
+import { buildSystemHealthMessage, buildBackupStatusMessage, runBackupNow } from "./adminHealth.js";
 import { isPremium, getUserDailyLimit, setPremium, getPremiumExpiry } from "./userSettings.js";
 import { MAINTENANCE_KEY, BOT_ANNOUNCE_KEY, PREMIUM_SET_KEY } from "./config.js";
 import { announceMaintenanceEnd }                              from "./maintenanceAnnounce.js";
 import { getStreakState } from "./streak.js";
 import { getUserBadges, BADGES }     from "./badges.js";
+import { buildRetentionProfileBlock } from "./retention.js";
+import { buildInterestProfileLine } from "./interests.js";
+import { buildPersonalWeekProfileLine } from "./personalWeek.js";
+import { getLastBook } from "./library.js";
 import { getReferralState }          from "./referral.js";
 import { ARABIC_SOURCES }            from "./sources.js";
 import type { SourceStat }           from "./analytics.js";
@@ -34,38 +48,44 @@ export function buildWelcome(
   const premBadge = isPrem ? " ⭐" : "";
   let balanceLine: string;
   if (limit <= 0) {
-    balanceLine = "♾️ رصيد غير محدود";
+    balanceLine = "♾️ *رصيد غير محدود*";
   } else {
     const used   = Math.max(0, limit - remaining);
-    const filled = Math.round((used / limit) * 8);
-    const bar    = "█".repeat(Math.min(filled, 8)) + "░".repeat(Math.max(0, 8 - filled));
+    const filled = Math.round((used / limit) * 10);
+    const bar    = "█".repeat(Math.min(filled, 10)) + "░".repeat(Math.max(0, 10 - filled));
     const emoji  = remaining === 0 ? "⛔" : remaining <= 2 ? "🟡" : "🟢";
-    balanceLine  = `${emoji} \`${bar}\` *${remaining}/${limit}* كتاب متبقٍّ`;
+    balanceLine  = `${emoji} \`${bar}\`  *${remaining}/${limit}* متبقٍّ اليوم`;
   }
 
+  const DIV = "━━━━━━━━━━━━━━━━";
+
   if (isFirstTime) {
-    // ترحيب موسّع للمستخدم الجديد فقط — جولة سريعة
     return (
-      `🎉 *أهلاً وسهلاً يا ${escMd(name)}!*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n` +
-      `_أنا بوت خلاصة الكتب — أبحث لك في أكبر المكتبات العربية_\n\n` +
-      `🚀 *كيف أستخدمك؟*\n` +
-      `◦ اكتب اسم أي كتاب مباشرةً\n` +
-      `◦ \`/random\` لكتاب مفاجأة\n` +
-      `◦ \`/wishlist عنوان\` لحفظ كتاب لاحقاً\n` +
-      `◦ \`/help\` للقائمة الكاملة\n\n` +
+      `🌿 *أهلاً ${escMd(name)} — أنا رفيق*\n` +
+      `${DIV}\n` +
+      `أساعدك تجيب *كتب PDF* بسهولة.\n\n` +
+      `*ابدأ الآن:*\n` +
+      `① اكتب *اسم الكتاب* في الشات\n` +
+      `② انتظر لحظات بينما أبحث\n` +
+      `③ يصلك الملف جاهزاً للقراءة\n\n` +
+      `*أزرار مهمة:*\n` +
+      `◦ ✅ سجّل حضورك — مرة في اليوم (اختياري)\n` +
+      `◦ 🎲 كتاب مفاجأة — إن لم تعرف ماذا تطلب\n` +
+      `◦ ❓ كيف أستخدم رفيق؟ — شرح بسيط\n\n` +
       `${balanceLine}\n` +
-      `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
-      `_اكتب اسم كتابك الأول وانطلق_ 📖✨`
+      `🌍 أدور في *${sourceCount}* مصدر عربي\n\n` +
+      `_جرّب: اكتب عنوان أيّ كتاب تحبّه._ 📖`
     );
   }
 
   return (
     `📚 *أهلاً ${escMd(name)}${premBadge}*\n` +
-    `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
+    `${DIV}\n` +
     `${balanceLine}\n` +
-    `🔍 *${sourceCount}* مصدر عربي تحت أمرك\n\n` +
-    `_اكتب اسم أي كتاب وسأحضره لك فوراً_ ✨`
+    `🌍 أدور لك في *${sourceCount}* مصدر\n\n` +
+    `*أتريد كتاباً؟* اكتب عنوانه في المحادثة.\n` +
+    `*ألست متأكّداً؟* مفاجأة · كتاب اليوم · /myweek لتقريرك.\n\n` +
+    `_رفيق جاهز._ ✨`
   );
 }
 
@@ -94,11 +114,11 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       streak.active >= 14 ? "🔥🔥🔥" :
       streak.active >= 7  ? "🔥🔥" :
       "🔥";
-    streakBlock = `${fire} *السلسلة:* ${streak.active} يوم${streak.max > streak.active ? ` _(أعلى: ${streak.max})_` : ""}`;
+    streakBlock = `${fire} *أيام النشاط المتتالية:* ${streak.active}${streak.max > streak.active ? ` _(أطول: ${streak.max})_` : ""}`;
   } else if (streak.max > 0) {
-    streakBlock = `🔥 *السلسلة:* ابدأ اليوم! _(أعلاك: ${streak.max} يوم)_`;
+    streakBlock = `🔥 *أيّام النشاط:* ابدأ من جديد _(أطول سلسلة سابقة: ${streak.max})_`;
   } else {
-    streakBlock = `🔥 *السلسلة:* ابدأ اليوم — حمّل كتاباً وافتح أول milestone!`;
+    streakBlock = `🔥 *أيّام النشاط المتتالية:* لم تبدأ بعد — سجّل حضورك أو حمّل كتاباً متى شئت`;
   }
 
   // ── Premium block ──
@@ -117,7 +137,7 @@ export async function buildProfileMessage(userId: string, name: string): Promise
   // ── Badges block ──
   let badgesBlock: string;
   if (badges.length === 0) {
-    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— حمّل كتباً واصنع سلسلة لفتحها_`;
+    badgesBlock = `🎓 *الشارات:* 0 / ${BADGES.length} _— تُفتح تدريجياً وأنت تستخدم رفيق_`;
   } else {
     // FIX (PR #103): escMd على اسم كل شارة. الأسماء الحالية كلها نظيفة،
     // لكن أي شارة جديدة فيها `_` أو `*` كانت ستكسر `/profile` بنفس
@@ -135,87 +155,48 @@ export async function buildProfileMessage(userId: string, name: string): Promise
       : `\n🎁 *الإحالات:* ${refState.count} _— رابطك في_ \`/invite\``;
   }
 
+  const [retentionBlock, interestLine, weekLine, lastBook, libCount] = await Promise.all([
+    buildRetentionProfileBlock(userId).catch(() => ""),
+    buildInterestProfileLine(userId).catch(() => ""),
+    buildPersonalWeekProfileLine(userId).catch(() => ""),
+    getLastBook(userId).catch(() => null),
+    (async () => {
+      try {
+        const { getLibrary } = await import("./library.js");
+        return (await getLibrary(userId, 80)).length;
+      } catch { return 0; }
+    })(),
+  ]);
+
   return (
-    `👤 *ملفك — ${escMd(name)}*\n` +
-    `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-    `📥 *إجمالي التحميلات:* ${totalDl}\n` +
+    `👤 *ملفي الشخصي — ${escMd(name)}*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `هذا ملخّص حسابك في رفيق:\n\n` +
+    `📥 *الكتب التي حمّلتها (إجمالاً):* ${totalDl}\n` +
     `${streakBlock}\n` +
     `${premBlock}${refBlock}\n\n` +
+    (interestLine ? `${interestLine}\n` : "") +
+    (weekLine ? `${weekLine}\n` : "") +
+    (libCount ? `📚 *مكتبتي:* ${libCount} عنواناً · /library\n` : "") +
+    (lastBook ? `🕯 *آخر كتاب:* «${escMd(lastBook)}» · /continue\n` : "") +
+    (retentionBlock ? `${retentionBlock}\n\n` : "") +
     `${badgesBlock}\n\n` +
-    `_استخدم \`/invite\` لرابط الدعوة، أو \`/stats\` للحد اليومي._`
+    `*أوامر سريعة:*\n` +
+    `◦ /daily — حضور · /library — مكتبتي\n` +
+    `◦ /myweek · /mymonth · /history\n` +
+    `◦ /taste — ذوقك · /stats — رصيدك\n` +
+    `◦ /invite — ادعُ صديقاً`
   );
 }
 
 // ── لوحة التحكم الرئيسية ─────────────────────
 export async function sendAdminPanel(bot: TelegramBot, chatId: number): Promise<void> {
   try {
-    const [today, total, qs, blStats, pdfStats, dbStats] = await Promise.all([
-      getDailyStats(),
-      getTotalStats(),
-      getQueueStats(),
-      blacklistStats(),
-      getPdfValidationStats(),
-      storage.getStats(),
-    ]);
-
-    const isMaint  = await redis.get(MAINTENANCE_KEY).catch(() => null);
-    const announce = await redis.get(BOT_ANNOUNCE_KEY).catch(() => null);
-    const successRate = (today.requests ?? 0) > 0
-      ? Math.round(((today.found ?? 0) / (today.requests ?? 1)) * 100)
-      : 0;
-
-    const msg =
-      `🔧 *لوحة التحكم — خلاصة الكتب*\n` +
-      `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-      `📊 *اليوم:*\n` +
-      `◦ طلبات: *${today.requests ?? 0}* | نجح: *${today.found ?? 0}* (${successRate}%)\n` +
-      `◦ تحميل: *${today.downloads ?? 0}* | كاش: *${today.cache_hits ?? 0}*\n\n` +
-      `📈 *الإجمالي:*\n` +
-      `◦ مستخدمون: *${dbStats.totalUsers}*\n` +
-      `◦ تحميلات: *${total.downloads ?? 0}* | بحث: *${total.searches ?? 0}*\n\n` +
-      `📋 *الطابور:*\n` +
-      `◦ High: *${qs.highQueue}* | Normal: *${qs.normalQueue}* | DLQ: *${qs.dlqSize}*\n\n` +
-      `🛡️ *PDF Validator:*\n` +
-      `◦ قبول: *${pdfStats.accepted}* | رفض: *${pdfStats.rejected}* (${pdfStats.rejectionRate})\n` +
-      `◦ Mistral: *${pdfStats.mistralUsed}* مرة\n\n` +
-      `🚫 *Blacklist:* ${blStats.total} رابط\n` +
-      `📢 *إعلان:* ${announce ? `"${announce.slice(0, 30)}..."` : "لا يوجد"}\n` +
-      `🔧 *الصيانة:* ${isMaint === "1" ? "✅ مفعّلة" : "❌ معطّلة"}`;
-
+    const isMaint = await redis.get(MAINTENANCE_KEY).catch(() => null);
+    const msg = await buildAdminHomeMessage();
     await bot.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "📊 إحصاءات",      callback_data: "admin_stats"    },
-            { text: "📋 الطابور",       callback_data: "admin_queue"    },
-          ],
-          [
-            { text: "👥 المستخدمون",    callback_data: "admin_users_0"  },
-            { text: "🏆 أكثر تحميلاً", callback_data: "admin_top"      },
-          ],
-          [
-            { text: "🚫 Blacklist",     callback_data: "admin_blacklist" },
-            { text: "💾 الكاش",         callback_data: "admin_cache"     },
-          ],
-          [
-            { text: "📡 المصادر",       callback_data: "admin_sources"   },
-            { text: "🔭 الـ Funnel",    callback_data: "admin_funnel"    },
-          ],
-          [
-            { text: "🎨 نانو بنانا",   callback_data: "admin_nano_banana" },
-            { text: "🎬 veo3 فيديو", callback_data: "admin_veo3" },
-          ],
-          [
-            { text: isMaint === "1" ? "✅ إيقاف الصيانة" : "🔧 تفعيل الصيانة",
-              callback_data: "admin_toggle_maintenance" },
-          ],
-          [
-            { text: "📢 بث جماعي",      callback_data: "admin_broadcast" },
-            { text: "🗑️ مسح DLQ",       callback_data: "admin_clear_dlq" },
-          ],
-        ],
-      },
+      reply_markup: adminPanelKeyboard(isMaint === "1"),
     }).catch(() => {});
   } catch (e) {
     L.error("admin", `sendAdminPanel error`, { err: String(e).slice(0, 100) });
@@ -268,12 +249,15 @@ export async function handleAdminPendingAction(
 // ── عرض تفاصيل مستخدم بـ ID ──────────────────
 async function showUserDetail(bot: TelegramBot, chatId: number, targetId: string): Promise<void> {
   try {
-    const [prem, limit, dlCount, history, expiry] = await Promise.all([
+    const [prem, limit, dlCount, history, expiry, libItems, interests, lastBook] = await Promise.all([
       isPremium(targetId),
       getUserDailyLimit(targetId),
       storage.getDailyDownloadCount(targetId).catch(() => 0),
       storage.getUserSearchHistory(targetId, 5).catch(() => [] as { query: string; createdAt: Date | null }[]),
       getPremiumExpiry(targetId),
+      (async () => { try { const { getLibrary } = await import("./library.js"); return await getLibrary(targetId, 8); } catch { return []; } })(),
+      (async () => { try { const { getTopInterests } = await import("./interests.js"); return await getTopInterests(targetId, 3); } catch { return []; } })(),
+      (async () => { try { const { getLastBook } = await import("./library.js"); return await getLastBook(targetId); } catch { return null; } })(),
     ]);
 
     const premLabel  = prem
@@ -291,8 +275,13 @@ async function showUserDetail(bot: TelegramBot, chatId: number, targetId: string
       `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
       `◦ نوع الحساب: *${premLabel}*\n` +
       `◦ الحد اليومي: *${limitLabel}*\n` +
-      `◦ حمّل اليوم: *${dlCount}*\n\n` +
-      `*آخر الكتب:*\n${histLines}`,
+      `◦ حمّل اليوم: *${dlCount}*\n` +
+      (lastBook ? `◦ آخر كتاب: _${escMd(String(lastBook).slice(0, 40))}_\n` : "") +
+      `◦ مكتبة: *${(libItems as any[]).length}* عنوان\n` +
+      (interests && (interests as any[]).length
+        ? `◦ ذوق: ${(interests as any[]).map((x: any) => x.label).join(" · ")}\n`
+        : "") +
+      `\n*آخر الكتب:*\n${histLines}`,
       {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [
@@ -322,6 +311,8 @@ export async function handleAdminCallback(
   queryId?: string
 ): Promise<void> {
   try {
+    // مركز التحكم الكامل
+    if (await handleControlCallback(bot, chatId, userId, data)) return;
 
     // ── قائمة المستخدمين مع pagination ──────────────────
     if (data.startsWith("admin_users_")) {
@@ -433,6 +424,139 @@ export async function handleAdminCallback(
     switch (data) {
 
       // ── إحصاءات تفصيلية ─────────────────────────────
+
+
+      case "admin_health": {
+        const text = await buildSystemHealthMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_health" },
+            { text: "🔙 اللوحة", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+      case "admin_audit": {
+        const text = await buildAdminAuditMessage(40);
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+      case "admin_backup": {
+        const text = await buildBackupStatusMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            [{ text: "▶️ تشغيل نسخة الآن", callback_data: "admin_backup_run" }],
+            [{ text: "🔄 تحديث القائمة", callback_data: "admin_backup" }],
+            [{ text: "🔙 اللوحة", callback_data: "admin_panel" }],
+          ]},
+        }).catch(() => {});
+        break;
+      }
+      case "admin_backup_run": {
+        await bot.sendMessage(chatId, `⏳ *جارٍ تشغيل النسخة الاحتياطية…* قد يستغرق دقيقة.`, { parse_mode: "Markdown" }).catch(() => {});
+        const res = await runBackupNow();
+        L.adminAction(userId, res.ok ? "backup ok" : "backup fail");
+        await bot.sendMessage(chatId,
+          (res.ok ? `✅ *اكتملت النسخة*\n\n` : `⚠️ *فشلت النسخة*\n\n`) +
+          "```\n" + res.log.slice(0, 1200).replace(/```/g, "") + "\n```",
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+        const status = await buildBackupStatusMessage();
+        await bot.sendMessage(chatId, status, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+      case "admin_help_doc": {
+        await bot.sendMessage(chatId,
+          `📖 *دليل الأدمن — رفيق*\n` +
+          `━━━━━━━━━━━━━━━━\n\n` +
+          `*المراقبة:*\n` +
+          `◦ /admin — اللوحة\n` +
+          `◦ بث حي · إحصاءات · Funnel · Retention · صور · أحداث\n` +
+          `◦ 🏥 صحة النظام · 📜 سجل التحكم\n\n` +
+          `*السيطرة:*\n` +
+          `◦ 🎛 مركز التحكم — ميزات ON/OFF · حدود · حظر · Premium\n` +
+          `◦ إعلان · صيانة · تفريغ كاش · مجموعات\n` +
+          `◦ 💾 نسخ احتياطي يدوي\n\n` +
+          `*أوامر نصية:*\n` +
+          `◦ /ban ID · /unban ID\n` +
+          `◦ /premium_add ID · /premium_remove ID\n` +
+          `◦ /set_limit ID N\n\n` +
+          `*تنبيهات تلقائية كل 5 دقائق:*\n` +
+          `◦ DLQ · نجاح منخفض · Firecrawl · بطء p95 · صور · طابور\n\n` +
+          `_كل إجراء مهم يُسجَّل في سجل التحكم._`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[{ text: "🔙 اللوحة", callback_data: "admin_panel" }]] },
+          },
+        ).catch(() => {});
+        break;
+      }
+
+      case "admin_live": {
+        const text = await buildAdminLiveMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_live" },
+            { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+      case "admin_images": {
+        const text = await buildAdminImagesMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_images" },
+            { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+            case "admin_lib_taste": {
+        const text = await buildAdminLibraryTasteMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[
+            { text: "🔄 تحديث", callback_data: "admin_lib_taste" },
+            { text: "🔙 اللوحة", callback_data: "admin_panel" },
+          ]]},
+        }).catch(() => {});
+        break;
+      }
+
+case "admin_retention": {
+        const text = await buildAdminRetentionMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }]] },
+        }).catch(() => {});
+        break;
+      }
+
+      case "admin_month": {
+        const text = await buildAdminMonthMessage();
+        await bot.sendMessage(chatId, text, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            [{ text: "📤 CSV", callback_data: "admin_export_csv" }],
+            [{ text: "🔙 لوحة التحكم", callback_data: "admin_panel" }],
+          ]},
+        }).catch(() => {});
+        break;
+      }
+
       case "admin_stats": {
         const [today, total, topBooks] = await Promise.all([
           getDailyStats(),
@@ -605,40 +729,6 @@ export async function handleAdminCallback(
         break;
       }
 
-      // ── veo3 (video generation) usage ───────────────
-      case "admin_veo3": {
-        const stats = await getVideoGenStats(10);
-        const total = stats.totalSuccess + stats.totalFail;
-        const successRate = total > 0
-          ? Math.round((stats.totalSuccess / total) * 100)
-          : 0;
-
-        const topLines = stats.topUsers.length
-          ? stats.topUsers.map((u, i) => {
-              const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}\\.`;
-              return `${medal} \`${u.userId}\` — *${u.count}* فيديو`;
-            }).join("\n")
-          : "_لا يوجد استخدام بعد_";
-
-        await bot.sendMessage(chatId,
-          `🎬 *veo3 — إحصاءات توليد الفيديو*\n` +
-          `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `*الإجمالي (مدى الحياة):*\n` +
-          `◦ ناجح: *${stats.totalSuccess}*\n` +
-          `◦ فاشل: *${stats.totalFail}*\n` +
-          `◦ نسبة النجاح: *${successRate}%*\n\n` +
-          `*اليوم:*\n` +
-          `◦ فيديوهات ناجحة: *${stats.todayCount}*\n\n` +
-          `*أعلى المستخدمين (Top 10):*\n${topLines}`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[
-              { text: "🔙 لوحة التحكم", callback_data: "admin_panel" },
-            ]]},
-          }
-        ).catch(() => {});
-        break;
-      }
 
       // ── Funnel ───────────────────────────────────────
       case "admin_funnel": {
@@ -679,7 +769,7 @@ export async function handleAdminCallback(
             { parse_mode: "Markdown" }
           ).catch(() => {});
           // FIX (maintenance-announce): لما المشرف يطفي الصيانة، البوت يعلن
-          // تلقائياً في كل الجروبات المعروفة. fire-and-forget عشان ما يوقفش
+          // تلقائياً في كل المجموعةات المعروفة. fire-and-forget عشان ما يوقفش
           // الـ callback handler لو الإرسال طوّل.
           announceMaintenanceEnd(bot).catch((e) =>
             L.error("admin", "announceMaintenanceEnd failed", { err: String(e).slice(0, 100) })
@@ -819,25 +909,65 @@ export async function buildHistoryMessage(
   bot: TelegramBot, chatId: number, userId: string
 ): Promise<void> {
   try {
-    const history = await storage.getUserSearchHistory(userId, 7);
+    const history = await storage.getUserSearchHistory(userId, 10);
     if (!history.length) {
       await bot.sendMessage(chatId,
-        `📚 *سجل كتبك*\n\n_لم تطلب أي كتاب بعد!_\n\nابحث عن كتاب وسيظهر هنا.`,
-        { parse_mode: "Markdown" }
+        `📚 *سجلّك في رفيق*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `_لم تطلب أي كتاب بعد._\n\n` +
+        `اكتب عنواناً في المحادثة، أو جرّب:\n` +
+        `◦ /today — كتاب اليوم\n` +
+        `◦ /lists — قوائم مختارة\n` +
+        `◦ /random — مفاجأة`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "📖  كتاب اليوم", callback_data: "botd:show" },
+                { text: "🎲  مفاجأة", callback_data: "rg:any" },
+              ],
+              [{ text: "🏠  الرئيسية", callback_data: "main_menu" }],
+            ],
+          },
+        },
       ).catch(() => {});
       return;
     }
-    const lines = history.map((h, i) =>
-      `${i + 1}\\. _${escMd(h.query.slice(0, 55))}_`
-    ).join("\n");
+
+    // unique titles preserving order
+    const seen = new Set<string>();
+    const titles: string[] = [];
+    for (const h of history) {
+      const q = (h.query || "").trim();
+      if (!q || seen.has(q.toLowerCase())) continue;
+      seen.add(q.toLowerCase());
+      titles.push(q);
+      if (titles.length >= 8) break;
+    }
+
+    const lines = titles
+      .map((q, i) => `${i + 1}. _${escMd(q.slice(0, 55))}_`)
+      .join("\n");
+
+    const rows: TelegramBot.InlineKeyboardButton[][] = [];
+    for (const q of titles.slice(0, 6)) {
+      const { storeRetryKey } = await import("./session.js");
+      const k = storeRetryKey(q);
+      const label = q.length > 28 ? q.slice(0, 27) + "…" : q;
+      rows.push([{ text: `📥  ${label}`, callback_data: `retry:${k}` }]);
+    }
+    rows.push([
+      { text: "📚  مكتبتي", callback_data: "my_library" },
+      { text: "🏠  الرئيسية", callback_data: "main_menu" },
+    ]);
+
     await bot.sendMessage(chatId,
-      `📚 *آخر كتبك*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${lines}`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[
-          { text: "🏠 القائمة", callback_data: "main_menu" },
-        ]]},
-      }
+      `📚 *آخر طلباتك*\n` +
+      `━━━━━━━━━━━━━━━━\n\n` +
+      `${lines}\n\n` +
+      `_اضغط عنواناً لإعادة البحث والتحميل._`,
+      { parse_mode: "Markdown", reply_markup: { inline_keyboard: rows } },
     ).catch(() => {});
   } catch (e) {
     L.error("admin", `buildHistoryMessage error`, { err: String(e).slice(0, 100) });

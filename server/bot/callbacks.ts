@@ -26,6 +26,22 @@ import {
   getWishlist, saveWishlist, buildWishlistMsg, buildWishlistKb, getWishlistMax,
 } from "./wishlist.js";
 import { handleSummaryCallback } from "./summaryHandler.js";
+import { handleImageCallback } from "./imageGen.js";
+import { claimDaily, RETENTION_TIPS } from "./retention.js";
+import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
+import { replyKeyboardMain, replyKeyboardRemove } from "./replyKeyboard.js";
+import { completeOnboarding } from "./onboarding.js";
+import { sendPersonalWeekReport } from "./personalWeek.js";
+import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge, exportLibraryText } from "./library.js";
+import { togglePref, isPrefKey, buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
+import { answerMicro, skipMicro, buildMicroMessage } from "./microHabit.js";
+import { voteClubBook } from "./groupClub.js";
+import { buildShareCardMessage, buildShareCardHtml, kbShareCard } from "./shareCard.js";
+import { sendPersonalMonthReport } from "./personalMonth.js";
+import { buildCuratedMenuMessage, kbCuratedMenu, getCuratedList, buildCuratedListMessage, kbCuratedList, seriesAfter, buildSeriesMessage, kbSeries, buildCuratedMenuForUser, kbCuratedMenuForUser } from "./curated.js";
+import { cycleStatus, statusLabel, getJourneyMap, journeySummary } from "./journey.js";
+import { buildHelpMessage, kbHelp, kbAfterDaily, kbAfterProfile, buildSearchPrompt, buildImgPrompt } from "./copy.js";
+import { pickFresh } from "./uiVariants.js";
 
 // ══════════════════════════════════════════════
 // CALLBACK HANDLER
@@ -73,7 +89,8 @@ export function registerCallbackHandler(
                        data === "wishlist_clear"          ||
                        data.startsWith("wishlist_add:")   ||
                        data.startsWith("wishlist_del:")   ||
-                       data.startsWith("sum:");
+                       data.startsWith("sum:") || data.startsWith("sumd:")             ||
+                       data.startsWith("img:");
 
     let acquiredDedup = false;
     if (needsDedup) {
@@ -194,10 +211,10 @@ export function registerCallbackHandler(
         // Toast يؤكد الحذف — يظهر الآن بعد إصلاح الترتيب
         await bot.answerCallbackQuery(query.id, { text: `🗑️ حُذف: ${removed.slice(0, 30)}` }).catch(() => {});
         if (query.message?.message_id) {
-          await bot.editMessageText(buildWishlistMsg(list), {
+          await bot.editMessageText(buildWishlistMsg(list, false, 50, await getJourneyMap(userId), await journeySummary(userId, list)), {
             chat_id: chatId, message_id: query.message.message_id,
             parse_mode: "Markdown",
-            reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+            reply_markup: await buildWishlistKb(list, userId), // FIX-4: token محذوف — لم يكن مستخدماً
           }).catch(() => {});
         }
       } else {
@@ -212,10 +229,10 @@ export function registerCallbackHandler(
       // Toast يؤكد المسح — يظهر الآن بعد إصلاح الترتيب
       await bot.answerCallbackQuery(query.id, { text: "🗑️ تم مسح القائمة" }).catch(() => {});
       if (query.message?.message_id) {
-        await bot.editMessageText(buildWishlistMsg([]), {
+        await bot.editMessageText(buildWishlistMsg([], false, 50), {
           chat_id: chatId, message_id: query.message.message_id,
           parse_mode: "Markdown",
-          reply_markup: buildWishlistKb([]), // FIX-4: token محذوف
+          reply_markup: await buildWishlistKb([], userId), // FIX-4: token محذوف
         }).catch(() => {});
       }
       return;
@@ -240,7 +257,7 @@ export function registerCallbackHandler(
       try {
         await (bot as any).sendInvoice(
           chatId,
-          "خلاصة الكتب Premium ⭐",
+          "رفيق Premium ⭐",
           `احصل على ${PREMIUM_LIMIT} تحميل يومياً بدلاً من ${DAILY_LIMIT} — لمدة 30 يوماً`,
           `premium:${userId}`,  // payload — يُستخدم عند successful_payment
           "",                   // provider_token — فارغ لـ Telegram Stars
@@ -286,8 +303,14 @@ export function registerCallbackHandler(
     // The "📘 ملخص الكتاب" button under a delivered file. Heavy
     // path (Wikipedia + AI providers + Redis cache) lives in
     // summaryHandler.ts to keep this dispatcher slim.
-    if (data.startsWith("sum:")) {
+    if (data.startsWith("sum:") || data.startsWith("sumd:")) {
       await handleSummaryCallback(bot, chatId, userId, data, query.id);
+      return;
+    }
+
+    // ── image generation buttons (regenerate / variation / HD) ──
+    if (data.startsWith("img:")) {
+      await handleImageCallback(bot, chatId, userId, data, query.id);
       return;
     }
 
@@ -350,14 +373,344 @@ export function registerCallbackHandler(
     // بعد الـ general answer — لا تحتاج toast خاص
     if (data === "wishlist_view") {
       const list = await getWishlist(userId);
-      await bot.sendMessage(chatId, buildWishlistMsg(list), {
+      await bot.sendMessage(chatId, buildWishlistMsg(list, false, 50, await getJourneyMap(userId), await journeySummary(userId, list)), {
         parse_mode: "Markdown",
-        reply_markup: buildWishlistKb(list), // FIX-4: token محذوف — لم يكن مستخدماً
+        reply_markup: await buildWishlistKb(list, userId), // FIX-4: token محذوف — لم يكن مستخدماً
       }).catch(() => {});
       return;
     }
 
     // ── switch ────────────────────────────────────
+
+    // ── onboarding genre pick ──
+    if (data === "onb_restart") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { buildOnboardingMessage, kbOnboarding, buildTasteResetMessage } = await import("./onboarding.js");
+        const name = query.from.first_name || "صديقي";
+        await bot.sendMessage(
+          chatId,
+          buildTasteResetMessage() + "\n\nاختر مجالاً:",
+          { parse_mode: "Markdown", reply_markup: kbOnboarding() },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "onb_restart failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+    if (data.startsWith("onb:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const genre = data.slice(4) || "skip";
+      try {
+        const res = await completeOnboarding(userId, genre === "skip" ? "skip" : genre);
+        const text = res.text;
+        const kb = res.kb;
+        if (query.message?.message_id) {
+          await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "Markdown",
+            reply_markup: kb,
+          }).catch(async () => {
+            await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+          });
+        } else {
+          await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+        }
+      } catch (e) {
+        L.error("cb", "onb failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
+    // ── wishlist journey cycle ──
+    if (data.startsWith("wlj:")) {
+      const idx = parseInt(data.slice(4), 10);
+      try {
+        const list = await getWishlist(userId);
+        if (!isNaN(idx) && idx >= 0 && idx < list.length) {
+          const title = list[idx];
+          const st = await cycleStatus(userId, title);
+          await bot.answerCallbackQuery(query.id, {
+            text: `${statusLabel(st)} — ${title.slice(0, 40)}`,
+            show_alert: false,
+          }).catch(() => {});
+          // refresh wishlist view
+          const prem = await isPremium(userId).catch(() => false);
+          const maxSlots = await getWishlistMax(userId, prem);
+          const journey = await getJourneyMap(userId);
+          const summary = await journeySummary(userId, list);
+          if (query.message?.message_id) {
+            await bot.editMessageText(buildWishlistMsg(list, prem, maxSlots, journey, summary), {
+              chat_id: chatId,
+              message_id: query.message.message_id,
+              parse_mode: "Markdown",
+              reply_markup: await buildWishlistKb(list, userId),
+            }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        L.error("cb", "wlj failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
+
+
+    // ── micro habit (كان import بلا handler — إصلاح) ──
+    if (data === "micro_open") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { text, kb } = buildMicroMessage();
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "micro_open failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+    if (data === "micro:skip" || data.startsWith("micro:")) {
+      try {
+        if (data === "micro:skip" || data === "micro:skip:x") {
+          const msg = await skipMicro(userId);
+          await bot.answerCallbackQuery(query.id, { text: "حسناً" }).catch(() => {});
+          if (query.message?.message_id) {
+            await bot.editMessageText(msg, {
+              chat_id: chatId,
+              message_id: query.message.message_id,
+              parse_mode: "Markdown",
+            }).catch(async () => {
+              await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" }).catch(() => {});
+            });
+          }
+          return;
+        }
+        const parts = data.split(":");
+        const qid = parts[1] || "";
+        const oid = parts[2] || "";
+        const msg = await answerMicro(userId, qid, oid);
+        await bot.answerCallbackQuery(query.id, { text: "+5" }).catch(() => {});
+        if (query.message?.message_id) {
+          await bot.editMessageText(msg, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "Markdown",
+          }).catch(async () => {
+            await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" }).catch(() => {});
+          });
+        }
+      } catch (e) {
+        L.error("cb", "micro failed", { err: String(e).slice(0, 80) });
+        await bot.answerCallbackQuery(query.id, { text: "تعذّر" }).catch(() => {});
+      }
+      return;
+    }
+    if (data === "lib_export") {
+      try {
+        const body = await exportLibraryText(userId, 30);
+        await bot.sendMessage(chatId, body).catch(() => {});
+        await bot.answerCallbackQuery(query.id, { text: "📋 أُرسلت القائمة" }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_export failed", { err: String(e).slice(0, 80) });
+        await bot.answerCallbackQuery(query.id, { text: "تعذّر" }).catch(() => {});
+      }
+      return;
+    }
+
+    // ── library / curated ──
+    if (data.startsWith("share:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const key = data.slice(6);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة.").catch(() => {});
+          return;
+        }
+        const uname = getBotUsername?.() || "";
+        const kb = kbShareCard(title);
+        // Prefer HTML (robust); fall back to plain text if entity parse fails
+        try {
+          await bot.sendMessage(chatId, buildShareCardHtml(title, uname), {
+            parse_mode: "HTML",
+            reply_markup: kb,
+            disable_web_page_preview: true,
+          });
+        } catch {
+          await bot.sendMessage(chatId, buildShareCardMessage(title, uname), {
+            reply_markup: kb,
+            disable_web_page_preview: true,
+          });
+        }
+      } catch (e) {
+        L.error("cb", "share failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+    if (data === "my_month") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try { await sendPersonalMonthReport(bot, chatId, userId); } catch { /* */ }
+      return;
+    }
+    if (data === "prefs_menu") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const text = await buildPrefsMessage(userId);
+        const prefs = await getAllPrefs(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbPrefs(prefs) });
+      } catch (e) {
+        L.error("cb", "prefs_menu failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+    
+    
+    if (data.startsWith("lib_done:")) {
+      await bot.answerCallbackQuery(query.id, { text: "✅ أنهيتُه" }).catch(() => {});
+      try {
+        const key = data.slice("lib_done:".length);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة.").catch(() => {});
+          return;
+        }
+        const { setLibStatus } = await import("./library.js");
+        await setLibStatus(userId, title, "done");
+        await bot.sendMessage(
+          chatId,
+          `✅ *أحسنت — سُجّل أنهيتُه*\n«${title.slice(0, 60)}»\n\n_مكتبتك: /library_`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_done failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+if (data.startsWith("lib_reading:")) {
+      await bot.answerCallbackQuery(query.id, { text: "📖 أقرؤه" }).catch(() => {});
+      try {
+        const key = data.slice("lib_reading:".length);
+        const entry = await getSession(key);
+        const title = entry?.bookName || "";
+        if (!title) {
+          await bot.sendMessage(chatId, "⏰ انتهت الجلسة — افتح مكتبتي.").catch(() => {});
+          return;
+        }
+        const { setLibStatus } = await import("./library.js");
+        await setLibStatus(userId, title, "reading");
+        await bot.sendMessage(
+          chatId,
+          `📖 *سُجّل في مكتبتي: أقرؤه*\n«${title.slice(0, 60)}»\n\n_/library لعرض المكتبة_`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch (e) {
+        L.error("cb", "lib_reading failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+    if (data === "my_history") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { buildHistoryMessage } = await import("./admin.js");
+        await buildHistoryMessage(bot, chatId, userId);
+      } catch (e) {
+        L.error("cb", "my_history failed", { err: String(e).slice(0, 80) });
+      }
+      return;
+    }
+
+if (data === "my_library") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const text = await buildLibraryMessage(userId);
+        const kb = await kbLibrary(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kb });
+      } catch (e) {
+        L.error("cb", "my_library failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data === "lib_continue") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { text, title } = await buildContinueMessage(userId);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: kbContinue(title) });
+      } catch (e) {
+        L.error("cb", "lib_continue failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data.startsWith("libst:")) {
+      const idx = parseInt(data.slice(6), 10);
+      try {
+        const title = await libraryTitleAt(userId, idx);
+        if (title) {
+          const st = await cycleLibStatus(userId, title);
+          await bot.answerCallbackQuery(query.id, { text: statusBadge(st) }).catch(() => {});
+          const text = await buildLibraryMessage(userId);
+          const kb = await kbLibrary(userId);
+          if (query.message?.message_id) {
+            await bot.editMessageText(text, {
+              chat_id: chatId, message_id: query.message.message_id,
+              parse_mode: "Markdown", reply_markup: kb,
+            }).catch(() => {});
+          }
+        } else {
+          await bot.answerCallbackQuery(query.id).catch(() => {});
+        }
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        L.error("cb", "libst failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+    if (data === "curated_menu") {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      try {
+        const { getPrimaryGenre } = await import("./interests.js");
+        const g = await getPrimaryGenre(userId);
+        await bot.sendMessage(chatId, buildCuratedMenuForUser(g), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenuForUser(g),
+        }).catch(() => {});
+      } catch {
+        await bot.sendMessage(chatId, buildCuratedMenuMessage(), {
+          parse_mode: "Markdown", reply_markup: kbCuratedMenu(),
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (data.startsWith("clist:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const id = data.slice(6);
+      const list = getCuratedList(id);
+      if (list) {
+        await bot.sendMessage(chatId, buildCuratedListMessage(list), {
+          parse_mode: "Markdown", reply_markup: kbCuratedList(list),
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (data.startsWith("series:")) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      const key = data.slice(7);
+      try {
+        const entry = await getSession(key);
+        const bookName = entry?.bookName || "";
+        const next = seriesAfter(bookName, 4);
+        await bot.sendMessage(chatId, buildSeriesMessage(bookName || "كتابك", next), {
+          parse_mode: "Markdown",
+          reply_markup: kbSeries(next),
+        }).catch(() => {});
+      } catch (e) {
+        L.error("cb", "series failed", { err: String(e).slice(0, 100) });
+      }
+      return;
+    }
+
     switch (data) {
       case "main_menu": {
         const name = query.from.first_name || "صديقي";
@@ -371,51 +724,27 @@ export function registerCallbackHandler(
         await bot.sendMessage(chatId, buildWelcome(name, remaining, limit, SOURCES.length, prem), {
           parse_mode: "Markdown", reply_markup: kbMain(),
         });
+        await bot.sendMessage(chatId, `_الأزرار السفلية جاهزة._`, {
+          parse_mode: "Markdown",
+          reply_markup: (query.message?.chat?.type === "private")
+            ? replyKeyboardMain()
+            : replyKeyboardRemove(),
+        }).catch(() => {});
         break;
       }
 
       case "new_search":
-        await bot.sendMessage(chatId,
-          `🔍 *ابحث عن أي كتاب*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\nاكتب اسم الكتاب — أو اسم الكتاب + المؤلف لنتائج أدق`, {
+        await bot.sendMessage(chatId, buildSearchPrompt(), {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "🏠  الرئيسية", callback_data: "main_menu" }]] },
         });
         break;
 
       case "img_gen":
-        await bot.sendMessage(chatId,
-          `🎨 *إنشاء صورة بالـ AI (Nano Banana)*\n` +
-          `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-          `اكتب الأمر مع وصف الصورة:\n` +
-          `\`/img وصف الصورة هنا\`\n\n` +
-          `📌 *مثال:*\n` +
-          `\`/img A red sports car drifting in a neon city\`\n\n` +
-          `⏱ التوليد يستغرق ~40 ثانية`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
-          },
-        );
-        break;
-
-      case "video_gen":
-        await bot.sendMessage(chatId,
-          `🎬 *إنشاء فيديو بالـ AI (veo3)*\n` +
-          `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-          `اكتب الأمر مع وصف الفيديو:\n` +
-          `\`/video وصف الفيديو هنا\`\n\n` +
-          `📐 *نِسَب الأبعاد المدعومة:*\n` +
-          `◦ \`/video 9:16 <وصف>\` — عمودي (افتراضي)\n` +
-          `◦ \`/video 16:9 <وصف>\` — أفقي\n` +
-          `◦ \`/video 1:1 <وصف>\` — مربع\n\n` +
-          `📌 *مثال:*\n` +
-          `\`/video A cinematic shot of a cat playing piano\`\n\n` +
-          `⏱ التوليد يستغرق ~2-3 دقائق`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🏠  القائمة", callback_data: "main_menu" }]] },
-          },
-        );
+        await bot.sendMessage(chatId, buildImgPrompt(), {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "🏠  الرئيسية", callback_data: "main_menu" }]] },
+        });
         break;
 
       case "my_stats": {
@@ -450,8 +779,8 @@ export function registerCallbackHandler(
               ],
             };
         await bot.sendMessage(chatId,
-          `📊 *إحصائياتك*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
-          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} المتبقّي:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
+          `📊 *رصيدك اليوم*${premBadge}\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n${statBar}\n\n` +
+          `📥 حمّلت اليوم:  *${dlCount}* كتاب\n${indicator} يتبقّى لك:  *${limit <= 0 ? "∞" : remaining}*${expiryLine}\n\n` +
           `_يتجدد بعد ${buildResetTime()}_ 🕐`,
           { parse_mode: "Markdown", reply_markup: statsKb }
         );
@@ -481,19 +810,22 @@ export function registerCallbackHandler(
       case "my_history":   await buildHistoryMessage(bot, chatId, userId); break;
       case "top_books":    await buildTopBooksMessage(bot, chatId);        break;
 
+      case "daily_quest": {
+        const res = await claimDaily(userId);
+        await bot.sendMessage(chatId, res.message, {
+          parse_mode: "Markdown",
+          reply_markup: kbAfterDaily(),
+        }).catch(() => {});
+        break;
+      }
+
       case "my_profile": {
-        // ملف المستخدم — Streak / Badges / Premium / Referrals
         const name = query.from.first_name || "صديقي";
         try {
           const text = await buildProfileMessage(userId, name);
           await bot.sendMessage(chatId, text, {
             parse_mode: "Markdown",
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "🎁  ادعُ صديقاً",       callback_data: "invite_view" }],
-                [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu"   }],
-              ],
-            },
+            reply_markup: kbAfterProfile(),
           });
         } catch (e) {
           L.error("cb", "my_profile error", { err: String(e).slice(0, 100) });
@@ -519,7 +851,7 @@ export function registerCallbackHandler(
               inline_keyboard: [
                 [{
                   text: "📤  مشاركة الرابط",
-                  switch_inline_query: `🎁 جرّب بوت خلاصة الكتب — كتب عربية مجانية!\nhttps://t.me/${botUser}?start=ref_${userId}`,
+                  switch_inline_query: `🌿 جرّب رفيق — رفيقك لكتب عربية مجّانية\nhttps://t.me/${botUser}?start=ref_${userId}`,
                 }],
                 [{ text: "🏠  القائمة الرئيسية", callback_data: "main_menu" }],
               ],
@@ -531,19 +863,44 @@ export function registerCallbackHandler(
         break;
       }
 
+      case "my_week": {
+        try {
+          await sendPersonalWeekReport(bot, chatId, userId);
+        } catch (e) {
+          L.error("cb", "my_week failed", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "botd:go": {
+        try {
+          const { title } = await getBookOfDay();
+          await bot.sendMessage(chatId,
+            `📖 *كتاب اليوم:* «${title.slice(0, 80)}»\n_جارٍ البحث…_`,
+            { parse_mode: "Markdown" }).catch(() => {});
+          await handleBookRequest(bot, chatId, userId, title, token, query.from?.username);
+        } catch (e) {
+          L.error("cb", "botd:go failed", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
+      case "botd:show": {
+        try {
+          const body = await buildBookOfDayMessage();
+          const kb = await kbBookOfDayAsync();
+          await bot.sendMessage(chatId, body, { parse_mode: "Markdown", reply_markup: kb });
+        } catch (e) {
+          L.error("cb", "botd:show failed", { err: String(e).slice(0, 100) });
+        }
+        break;
+      }
+
       case "help":
-        await bot.sendMessage(chatId,
-          `❓ *كيف تستخدم البوت؟*\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n` +
-          `*في المحادثة الخاصة:*\n◦ اكتب اسم أي كتاب مباشرةً\n◦ /search اسم الكتاب\n\n` +
-          `*في المجموعات — ٣ طرق:*\n◦ بوت اسم الكتاب\n◦ bot اسم الكتاب\n◦ @اسم\\_البوت اسم الكتاب\n\n` +
-          `*أوامر مفيدة:*\n/stats · /history · /top · /queue · /cancel · /last · /random · /weekly · /wishlist · /premium`,
-          { parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [
-              [{ text: "⭐  ترقية للـ Premium", callback_data: "premium_buy" }],
-              [{ text: "🏠  القائمة",           callback_data: "main_menu"   }],
-            ]},
-          }
-        );
+        await bot.sendMessage(chatId, buildHelpMessage(), {
+          parse_mode: "Markdown",
+          reply_markup: kbHelp(),
+        }).catch(() => {});
         break;
     }
 

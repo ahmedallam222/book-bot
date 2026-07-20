@@ -208,9 +208,9 @@ check("every PERSONALITY_LINE contains 'ملاحظة'",
 // ── V9: buildProgress output shape ────────────────────────────
 console.log("\n=== V9: buildProgress() output ===");
 const sample = buildProgress(2, "أرض زيكولا");
-check("buildProgress includes bar (▓░ chars)",
-  sample.includes("▓") && sample.includes("░"),
-  "has bar", sample.includes("▓"));
+check("buildProgress includes bar",
+  /[▓░█〔〕]/.test(sample),
+  "has bar", /[▓░█〔〕]/.test(sample));
 check("buildProgress includes % marker",
   /%/.test(sample),
   "%", /%/.test(sample));

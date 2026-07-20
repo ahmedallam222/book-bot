@@ -9,7 +9,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import { L } from "./logger.js";
 import { redis } from "./redis.js";
-import { getSession } from "./session.js";
+import { getSession, storeSummaryKey, storeRetryKey } from "./session.js";
 import { isPremium } from "./userSettings.js";
 import { escMd, canonicalizeForCache } from "./text.js";
 import {
@@ -22,6 +22,8 @@ import {
 import type { SummaryResponse } from "./aiProviders/types.js";
 import { SUMMARY_DAILY_LIMIT_FREE } from "./config.js";
 import { trackSummaryAndAward, buildNewBadgeMessage } from "./badges.js";
+import { onSuccessfulSummary } from "./retention.js";
+import { isFeatureOn } from "./featureFlags.js";
 
 // Per-user dedup window in seconds — the same user spamming the
 // summary button should hit cache; this prevents re-running the
@@ -48,17 +50,40 @@ function inflightKey(userId: string, bookName: string): string {
   return `summary:lock:${userId}:${canonicalizeForCache(bookName)}`;
 }
 
-function pickHeader(resp: SummaryResponse): string {
+function pickHeader(resp: SummaryResponse, depth: "quick" | "deep" = "quick"): string {
+  const deepTag = depth === "deep" ? " · _عميق_" : "";
   if (resp.bookType === "novel") {
     if (resp.spoilerLevel === "critical")
-      return "📖 *ملخص الرواية* — _بدون أي حرق_";
-    return "📖 *ملخص الرواية*";
+      return `📖 *ملخص الرواية* — _بدون أي حرق_${deepTag}`;
+    return `📖 *ملخص الرواية*${deepTag}`;
   }
-  if (resp.bookType === "poetry")     return "📝 *مقدمة عن الديوان*";
-  if (resp.bookType === "religion")   return "🕌 *عرض الكتاب*";
-  if (resp.bookType === "textbook")   return "📚 *عرض الكتاب الدراسي*";
-  if (resp.bookType === "non-fiction") return "📘 *ملخص الكتاب*";
-  return "📘 *ملخص الكتاب*";
+  if (resp.bookType === "poetry")      return `📝 *مقدمة عن الديوان*${deepTag}`;
+  if (resp.bookType === "religion")    return `🕌 *عرض الكتاب*${deepTag}`;
+  if (resp.bookType === "textbook")    return `📚 *عرض الكتاب الدراسي*${deepTag}`;
+  if (resp.bookType === "non-fiction") return `📘 *ملخص الكتاب*${deepTag}`;
+  return `📘 *ملخص الكتاب*${deepTag}`;
+}
+
+function kbAfterSummary(
+  bookName: string,
+  depth: "quick" | "deep",
+  sourceUrl?: string,
+): TelegramBot.InlineKeyboardMarkup {
+  const sumK = storeSummaryKey(bookName, sourceUrl);
+  const retryK = storeRetryKey(bookName);
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+  if (depth !== "deep") {
+    rows.push([{ text: "📗  ملخّص أعمق", callback_data: `sumd:${sumK}`.slice(0, 64) }]);
+  }
+  rows.push([
+    { text: "📖  أقرؤه", callback_data: `lib_reading:${retryK}`.slice(0, 64) },
+    { text: "✅  أنهيتُه", callback_data: `lib_done:${retryK}`.slice(0, 64) },
+  ]);
+  rows.push([
+    { text: "🔍  كتاب آخر", callback_data: "new_search" },
+    { text: "🏠  الرئيسية", callback_data: "main_menu" },
+  ]);
+  return { inline_keyboard: rows };
 }
 
 function renderProvenance(resp: SummaryResponse): string {
@@ -74,8 +99,9 @@ export async function handleSummaryCallback(
   data:          string,
   callbackQueryId: string,
 ): Promise<void> {
-  // data shape: "sum:<sessionKey>"
-  const sessionKey = data.slice(4).trim();
+  // data: "sum:<key>" | "sumd:<key>" (deep)
+  const isDeep = data.startsWith("sumd:");
+  const sessionKey = (isDeep ? data.slice(5) : data.slice(4)).trim();
   const entry      = await getSession(sessionKey);
   if (!entry?.bookName) {
     await bot.answerCallbackQuery(callbackQueryId, {
@@ -106,6 +132,7 @@ export async function handleSummaryCallback(
   await runSummaryFlow(bot, chatId, userId, entry.bookName, entry.url, {
     callbackQueryId,
     lockKey,
+    depth: isDeep ? "deep" : "quick",
   });
 }
 
@@ -128,8 +155,8 @@ export async function runSummaryFlow(
   sourceUrl:  string | undefined,
   opts: {
     callbackQueryId?: string;
-    /** Lock key already acquired by the caller. We release it on exit. */
     lockKey?: string;
+    depth?: "quick" | "deep";
   } = {},
 ): Promise<void> {
   const lockKey = opts.lockKey;
@@ -148,12 +175,19 @@ export async function runSummaryFlow(
   let usageConsumed = false;
 
   try {
+    if (!(await isFeatureOn("summary")) && !((await import("./guards.js")).isAdmin(userId))) {
+      await bot.sendMessage(chatId, `📘 *الملخّصات متوقفة مؤقتاً من الإدارة.*`, { parse_mode: "Markdown" }).catch(() => {});
+      return;
+    }
     // Cache fast-path — skip the quota check entirely for cached
     // hits (no upstream cost, treat as free).
-    const cached = await getCachedSummary(bookName);
+    const cached = await getCachedSummary(bookName, opts.depth || "quick");
     if (cached) {
       if (callbackQueryId) await bot.answerCallbackQuery(callbackQueryId).catch(() => {});
-      await deliverSummary(bot, chatId, bookName, cached);
+      await deliverSummary(bot, chatId, bookName, cached, undefined, {
+        depth: opts.depth === "deep" ? "deep" : "quick",
+        sourceUrl,
+      });
       return;
     }
 
@@ -240,6 +274,7 @@ export async function runSummaryFlow(
       resp = await getBookSummary(bookName, {
         pdfUrl:  sourceUrl,
         premium,
+        depth: opts.depth || "quick",
       });
     } finally {
       clearInterval(typingInterval);
@@ -255,7 +290,10 @@ export async function runSummaryFlow(
       ms:       Date.now() - t0,
       bookType: resp.bookType,
     });
-    await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId);
+    await deliverSummary(bot, chatId, bookName, resp, placeholderMsgId, {
+      depth: opts.depth === "deep" ? "deep" : "quick",
+      sourceUrl,
+    });
 
     // ── Engagement signal: 📘 ملخّصاتي badge (10 ملخصات) ──
     // FIX (PR #103): trackSummaryAndAward كان dead code — معرّف
@@ -275,6 +313,12 @@ export async function runSummaryFlow(
         err: String(e).slice(0, 100),
       });
     });
+    onSuccessfulSummary(userId).then(async (ret) => {
+      for (const m of ret.messages) {
+        await bot.sendMessage(chatId, m, { parse_mode: "Markdown" }).catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }).catch(() => {});
   } catch (e: any) {
     // The per-user counter was incremented by checkAndConsumeUsage
     // before this AI call ran. The user is not getting a summary, so
@@ -385,12 +429,16 @@ async function deliverSummary(
   bookName:          string,
   resp:              SummaryResponse,
   placeholderMsgId?: number,
+  opts?:             { depth?: "quick" | "deep"; sourceUrl?: string },
 ): Promise<void> {
-  const header = pickHeader(resp);
+  const depth = opts?.depth === "deep" ? "deep" : "quick";
+  const header = pickHeader(resp, depth);
+  const replyMarkup = kbAfterSummary(bookName, depth, opts?.sourceUrl);
   // Trim very long bodies to stay safely under Telegram's 4096-char
   // message limit (we use Markdown which adds escape overhead).
-  const body   = resp.summary.length > 3500
-    ? resp.summary.slice(0, 3500) + "…"
+  const maxBody = depth === "deep" ? 3800 : 3500;
+  const body   = resp.summary.length > maxBody
+    ? resp.summary.slice(0, maxBody) + "…"
     : resp.summary;
   const footer = renderProvenance(resp);
 
@@ -410,6 +458,7 @@ async function deliverSummary(
         message_id:                placeholderMsgId,
         parse_mode:               "Markdown",
         disable_web_page_preview: true,
+        reply_markup:             replyMarkup,
       });
       return;
     } catch {
@@ -419,6 +468,7 @@ async function deliverSummary(
           chat_id:                  chatId,
           message_id:                placeholderMsgId,
           disable_web_page_preview: true,
+          reply_markup:             replyMarkup,
         });
         return;
       } catch {
@@ -430,9 +480,11 @@ async function deliverSummary(
   await bot.sendMessage(chatId, text, {
     parse_mode:               "Markdown",
     disable_web_page_preview: true,
+    reply_markup:             replyMarkup,
   }).catch(async () => {
     await bot.sendMessage(chatId, plainFallback, {
       disable_web_page_preview: true,
+      reply_markup:             replyMarkup,
     }).catch(() => {});
   });
 }

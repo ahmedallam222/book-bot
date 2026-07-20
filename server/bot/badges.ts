@@ -38,23 +38,31 @@ export interface BadgeDef {
  *   - early — اللي عمل /start قبل تاريخ معيّن (loyalty)
  */
 export const BADGES: BadgeDef[] = [
+  { id: "first_dl",  emoji: "🌱", name: "الخطوة الأولى",   description: "حمّلت أول كتاب",                 order: 5 },
   { id: "dl5",       emoji: "📚", name: "قارئ مبتدئ",      description: "حمّلت أوّل ٥ كتب",            order: 10 },
+  { id: "dl10",      emoji: "📗", name: "عشرة كاملة",      description: "١٠ كتب — بداية قوية",           order: 15 },
   { id: "dl20",      emoji: "📖", name: "قارئ منتظم",      description: "٢٠ كتاباً — العادة ثبتت",       order: 20 },
   { id: "dl50",      emoji: "🏆", name: "قارئ شغوف",       description: "٥٠ كتاباً — مستوى نادر",       order: 30 },
   { id: "dl100",     emoji: "🎓", name: "موسوعة مشت",      description: "١٠٠ كتاب — أنت مكتبة بحالك",  order: 40 },
   { id: "dl250",     emoji: "👑", name: "سيد المكتبة",     description: "٢٥٠ كتاباً — الأسطورة الحيّة",  order: 50 },
   { id: "streak3",   emoji: "🔥", name: "ثلاثة أيام",      description: "ثلاثة أيام متتالية من القراءة", order: 60 },
   { id: "streak7",   emoji: "🔥🔥", name: "أسبوع كامل",     description: "سبعة أيام متتالية",            order: 70 },
+  { id: "streak14",  emoji: "🔥🔥🔥", name: "أسبوعان",      description: "أربعة عشر يوماً متتالية",      order: 75 },
   { id: "streak30",  emoji: "🌟", name: "شهر كامل",        description: "ثلاثون يوماً من الانضباط",     order: 80 },
   { id: "summary10", emoji: "📘", name: "ملخّصاتي",        description: "استخدمت ميزة الملخص ١٠ مرات",  order: 90 },
+  { id: "quest7",    emoji: "🎯", name: "مهامّي أسبوع",    description: "٧ أيام أنهيت فيها المهمة اليومية", order: 95 },
+  { id: "comeback",  emoji: "👋", name: "العائد",          description: "عدت بعد غياب ٣ أيام فأكثر",     order: 98 },
   { id: "social3",   emoji: "👥", name: "اجتماعي",         description: "دعوت ٣ أصدقاء انضمّوا للبوت", order: 100 },
+  { id: "level5",    emoji: "⭐", name: "نجم صاعد",        description: "وصلت للمستوى ٥",               order: 110 },
 ];
 
 const BADGES_BY_ID = new Map(BADGES.map(b => [b.id, b]));
 
 // ── Thresholds (يجب أن تطابق دلالة الـ description) ──
 const DOWNLOAD_THRESHOLDS = [
+  { count: 1,   id: "first_dl" },
   { count: 5,   id: "dl5"   },
+  { count: 10,  id: "dl10"  },
   { count: 20,  id: "dl20"  },
   { count: 50,  id: "dl50"  },
   { count: 100, id: "dl100" },
@@ -64,6 +72,7 @@ const DOWNLOAD_THRESHOLDS = [
 const STREAK_THRESHOLDS = [
   { count: 3,  id: "streak3"  },
   { count: 7,  id: "streak7"  },
+  { count: 14, id: "streak14" },
   { count: 30, id: "streak30" },
 ];
 
@@ -76,6 +85,11 @@ const SOCIAL_THRESHOLD      = 3;
  * إضافة badge لو غير موجودة. atomic.
  * ترجع true لو دي **أول مرة** المستخدم يكسبها (عشان الـ caller يُرسل رسالة).
  */
+export async function tryAwardBadge(userId: string, id: string): Promise<BadgeDef | null> {
+  if (await awardBadge(userId, id)) return BADGES_BY_ID.get(id) || null;
+  return null;
+}
+
 async function awardBadge(userId: string, id: string): Promise<boolean> {
   try {
     const added = await redis.sadd(BADGES_KEY(userId), id);

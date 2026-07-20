@@ -217,23 +217,35 @@ async function fetchNonce(
   ua: string, overallSignal: AbortSignal,
 ): Promise<NonceResult | null> {
   const url = `${VEO3_BASE_URL}${VEO3_GENERATOR_PATH}`;
-  // POST في الـ POC، لكن GET بيرجع نفس الصفحة. نستخدم GET لأنه
-  // الـ idiomatic + بيدّينا الـ cookies من غير side-effect.
-  const res = await timedFetch(url, {
-    method: "GET",
-    headers: { "user-agent": ua, "accept": "text/html,*/*" },
-  }, TIMEOUT_VIDEO_HTTP_STEP, overallSignal);
-  if (!res.ok) {
-    L.warn("videoGen", "fetchNonce non-200", { status: res.status });
-    return null;
+  // User POC uses POST; some WP installs only set session cookies on POST.
+  // Try POST first, then GET.
+  for (const method of ["POST", "GET"] as const) {
+    try {
+      const res = await timedFetch(url, {
+        method,
+        headers: {
+          "user-agent": ua,
+          "accept": "text/html,*/*",
+          ...(method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}),
+        },
+        body: method === "POST" ? "" : undefined,
+      }, TIMEOUT_VIDEO_HTTP_STEP, overallSignal);
+      if (!res.ok) {
+        L.warn("videoGen", "fetchNonce non-200", { status: res.status, method });
+        continue;
+      }
+      const body = await res.text();
+      const m = body.match(/"nonce":"([a-f0-9]{6,32})"/i);
+      if (!m) {
+        L.warn("videoGen", "fetchNonce no nonce", { bodyLen: body.length, method });
+        continue;
+      }
+      return { nonce: m[1], cookie: extractCookies(res) };
+    } catch (e) {
+      L.warn("videoGen", "fetchNonce error", { method, err: String(e).slice(0, 80) });
+    }
   }
-  const body = await res.text();
-  const m = body.match(/"nonce":"([a-f0-9]{6,32})"/i);
-  if (!m) {
-    L.warn("videoGen", "fetchNonce no nonce in body", { bodyLen: body.length });
-    return null;
-  }
-  return { nonce: m[1], cookie: extractCookies(res) };
+  return null;
 }
 
 // extractSceneId — يقرأ الرد على full-video-generate.
@@ -257,6 +269,10 @@ function extractSceneId(text: string): string | null {
 // عن طريق فحصها هنا.
 function initialResponseSignalsTerminalError(text: string): string | null {
   const t = text.toLowerCase();
+  // Free tier: "Limit Reached: You have already generated your maximum allowance of 2 videos."
+  if (/limit\s*reached|maximum\s*allowance|rate-limit-exceed|already\s+generated/.test(t)) {
+    return "source_daily_limit";
+  }
   if (/in.?progress/.test(t))     return "in_progress_other_user";
   if (/rate.?limit/.test(t))      return "rate_limit";
   if (/\b(error|failed|retry)\b/.test(t)) return text.slice(0, 120);
@@ -394,7 +410,22 @@ async function callVeo3(
           // رسائل فشل صريحة (Rate Limit / Error / failed / retry).
           const err = pollResponseSignalsError(pollText);
           if (err) return { error: `poll_terminal: ${err}` };
-          const url = normalizeVideoUrl(pollText, VEO3_BASE_URL);
+          // JSON responses: { video, url, video_url, result }
+          let candidate = pollText;
+          try {
+            if (pollText.startsWith("{") || pollText.startsWith("[")) {
+              const j = JSON.parse(pollText) as Record<string, unknown>;
+              const pick =
+                (j.video as string) ||
+                (j.url as string) ||
+                (j.video_url as string) ||
+                (j.result as string) ||
+                (typeof j.data === "string" ? j.data : "") ||
+                "";
+              if (pick) candidate = pick;
+            }
+          } catch { /* not JSON */ }
+          const url = normalizeVideoUrl(candidate, VEO3_BASE_URL);
           if (url) return { url };
         }
       }
@@ -434,165 +465,13 @@ function parseAspectAndPrompt(input: string): { prompt: string; aspectFull: stri
   return { prompt: trimmed, aspectFull: DEFAULT_ASPECT_FULL, aspectKey: DEFAULT_ASPECT_KEY };
 }
 
-// ── Command handler ──────────────────────────
+// ── Command handler (REMOVED bot-wide) ────────
 export async function handleVideoCommand(
   bot: TelegramBot,
   chatId: number,
-  userId: string,
-  promptRaw: string,
-  userMessageId?: number,
+  _userId: string,
+  _promptRaw: string,
+  _userMessageId?: number,
 ): Promise<void> {
-  // ── Maintenance gate (admins يتجاوزون) ──
-  if (!isAdmin(userId)) {
-    const maintenance = await redis.get(MAINTENANCE_KEY).catch(() => null);
-    if (maintenance === "1") {
-      await bot.sendMessage(chatId,
-        `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`,
-        { parse_mode: "Markdown" }).catch(() => {});
-      return;
-    }
-  }
-
-  // ── Feature gate ──
-  if (!VEO3_ENABLED) {
-    L.info("videoGen", "veo3 disabled by config");
-    await bot.sendMessage(chatId,
-      `⚠️ ميزة توليد الفيديو غير مفعّلة حالياً.`).catch(() => {});
-    return;
-  }
-
-  // ── Prompt validation ──
-  const parsed = parseAspectAndPrompt(promptRaw.replace(/\s+/g, " "));
-  const prompt = parsed.prompt.slice(0, MAX_PROMPT_LEN);
-  if (prompt.length < MIN_PROMPT_LEN) {
-    await bot.sendMessage(chatId,
-      `🎬 *إنشاء فيديو بالـ AI (veo3)*\n` +
-      `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-      `الاستخدام: \`/video <وصف الفيديو>\`\n\n` +
-      `📌 *أمثلة:*\n` +
-      `\`/video A red sports car drifting in a neon city\`\n` +
-      `\`/video 16:9 sunset over the pyramids, cinematic\`\n` +
-      `\`/video 1:1 a cat playing piano, studio light\`\n\n` +
-      `📐 *النِسَب:* \`9:16\` (افتراضي) · \`16:9\` · \`1:1\`\n` +
-      `⏱ التوليد بياخد حوالي *1-3 دقائق*\n` +
-      `🎫 لديك *${VIDEO_DAILY_LIMIT}* فيديو/يوم مجاناً`,
-      { parse_mode: "Markdown" }).catch(() => {});
-    return;
-  }
-
-  // ── Daily limit (admins بلا حد) ──
-  if (!isAdmin(userId)) {
-    const used = await getDailyVideoCount(userId);
-    if (used >= VIDEO_DAILY_LIMIT) {
-      await bot.sendMessage(chatId,
-        `⛔ *وصلت الحد اليومي للفيديو*\n\n` +
-        `استخدمت: *${used}/${VIDEO_DAILY_LIMIT}* فيديو اليوم\n` +
-        `🕐 يتجدد عند منتصف ليل القاهرة`,
-        { parse_mode: "Markdown" }).catch(() => {});
-      return;
-    }
-  }
-
-  // 👀 reaction فوري — يحس أن البوت "شاف" الطلب
-  reactRandom(bot, chatId, userMessageId || 0, REACTION_RECEIVED).catch(() => {});
-  redis.zadd("user:lastSeen", Date.now(), userId).catch(() => {});
-
-  // ── Bump counter قبل الـ call (admins استثناء) ──
-  let counted = false;
-  if (!isAdmin(userId)) {
-    await bumpDailyVideoCount(userId);
-    counted = true;
-  }
-
-  // ── ack message — نظهر progress placeholder ──
-  let ackMsg: TelegramBot.Message | null = null;
-  try {
-    ackMsg = await bot.sendMessage(chatId,
-      `🎬 جارٍ توليد الفيديو...\n_قد يستغرق حتى 3 دقائق_ ⏳`,
-      { parse_mode: "Markdown" });
-  } catch { /* non-fatal */ }
-
-  // ── call veo3 ──
-  const t0 = Date.now();
-  const result = await callVeo3(prompt, parsed.aspectFull);
-  const elapsedMs = Date.now() - t0;
-
-  if (result.error || !result.url) {
-    // refund العداد عشان المستخدم ما يخسرش credit على فشلنا
-    if (counted) await decrDailyVideoCount(userId);
-
-    L.warn("videoGen", "veo3 failed", {
-      userId,
-      err: result.error?.slice(0, 100),
-      elapsedMs,
-    });
-    redis.incr(VID_TOTAL_FAIL_KEY).catch(() => {});
-
-    const friendly = result.error === "timeout"
-      ? `⏱ انتهى الوقت قبل اكتمال الفيديو. حاول مرة أخرى.`
-      : `❌ خطأ في توليد الفيديو. حاول لاحقاً.`;
-
-    if (ackMsg) {
-      await bot.editMessageText(friendly, {
-        chat_id: chatId,
-        message_id: ackMsg.message_id,
-      }).catch(() => bot.sendMessage(chatId, friendly).catch(() => {}));
-    } else {
-      await bot.sendMessage(chatId, friendly).catch(() => {});
-    }
-    return;
-  }
-
-  // ── success — أرسل الفيديو ──
-  L.info("videoGen", "generated", {
-    userId,
-    elapsedMs,
-    promptLen: prompt.length,
-    aspect:    parsed.aspectKey,
-  });
-  redis.incr(VID_TOTAL_SUCCESS_KEY).catch(() => {});
-  recordSuccessfulVideo(userId).catch(() => {});
-
-  // عدد المتبقّي اليوم (admins يرون ∞)
-  let remainingLine = "";
-  if (!isAdmin(userId)) {
-    const used = await getDailyVideoCount(userId);
-    const remaining = Math.max(0, VIDEO_DAILY_LIMIT - used);
-    remainingLine = `\n\n🎫 المتبقّي اليوم: *${remaining}/${VIDEO_DAILY_LIMIT}*`;
-  } else {
-    remainingLine = `\n\n👑 admin — بلا حد يومي`;
-  }
-
-  const seconds = (elapsedMs / 1000).toFixed(0);
-  const caption =
-    `🎬 *الفيديو جاهز* (${seconds}s · ${parsed.aspectKey})\n\n` +
-    `📝 \`${escMd(prompt.slice(0, 200))}\`${remainingLine}`;
-
-  try {
-    await bot.sendVideo(chatId, result.url, {
-      caption,
-      parse_mode: "Markdown",
-    });
-    if (ackMsg) {
-      bot.deleteMessage(chatId, ackMsg.message_id).catch(() => {});
-    }
-  } catch (e) {
-    L.warn("videoGen", "sendVideo failed, falling back to URL", {
-      userId, err: String(e).slice(0, 100),
-    });
-    // fallback: ابعت الـ URL كنص لو تيليغرام رفض الفيديو
-    const fallback =
-      `🎬 *الفيديو جاهز* — اضغط الرابط:\n${result.url}${remainingLine}`;
-    if (ackMsg) {
-      await bot.editMessageText(fallback, {
-        chat_id: chatId,
-        message_id: ackMsg.message_id,
-        parse_mode: "Markdown",
-      }).catch(() => bot.sendMessage(chatId, fallback,
-        { parse_mode: "Markdown" }).catch(() => {}));
-    } else {
-      await bot.sendMessage(chatId, fallback,
-        { parse_mode: "Markdown" }).catch(() => {});
-    }
-  }
+  await bot.sendMessage(chatId, "🎬 ميزة توليد الفيديو أُلغيت من البوت.").catch(() => {});
 }

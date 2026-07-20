@@ -9,15 +9,23 @@ import { searchWithFuzzyFallback } from "./fuzzy.js";
 import { isFirecrawlDown } from "./engine.js";
 import { warmRelatedCache } from "./suggestions.js";
 import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
+import { buildDidYouMeanMessage, kbDidYouMean } from "./didYouMean.js";
 import {
   correctTransliteration,
   TEL_TLIT_RETRY_RECOVERED,
 } from "./aiProviders/llamaTransliteration.js";
+import { smartResolveBookQuery, applyLocalSpellingFixes, learnSuccessfulCorrection } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
+import { localDidYouMean } from "./didYouMean.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
+import { isBlacklisted } from "./blacklist.js";
 import { hasUninformativeFilename } from "./pdfValidator.js";
+import { parseTelegramUrl } from "./telegramFallback.js";
 import { recordFailure, removeFailure, failureKey } from "./failureRetry.js";
-import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage } from "./ui.js";
+import { recordDelivery } from "./deliveryMetrics.js";
+import { lightNormalizeQuery } from "./queryNormalize.js";
+import { editMsg, deleteMsg, buildProgress, tip, buildSuccessMsg, buildNoResults, buildLinksOnly, buildDailyLimit, buildRateLimitMsg, buildQueueAccepted, buildPendingMsg, buildTurnNotification, buildPaidBookMessage, buildTooLargeMsg } from "./ui.js";
 import {
   REACTION_RECEIVED, REACTION_SUCCESS, REACTION_CACHE_HIT,
   REACTION_NO_RESULT, REACTION_ERROR,
@@ -33,6 +41,10 @@ import {
   MAX_DOWNLOAD_ATTEMPTS_PER_REQUEST,
   MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN,
   LOW_SUCCESS_RATE_PENALTY_THRESHOLD,
+  RESCUE_MIN_CANDIDATES,
+  RESCUE_MAX_FALLBACKS,
+  RESCUE_BEST_PDF_THRESHOLD,
+  RESCUE_FALLBACK_THRESHOLD,
 } from "./config.js";
 import { trackSearch, trackDownload, getSourceStatsCached, trackFunnel, trackSourceAttempt, trackSourceMistralReject, sanitizeDomainKey } from "./analytics.js";
 import { RequestTrace, claimFunnelSlot } from "./telemetry.js";
@@ -43,7 +55,15 @@ import {
   buildMilestoneMessage, buildBrokenStreakMessage,
   type StreakUpdate,
 } from "./streak.js";
-import { checkAndAwardBadges, buildNewBadgeMessage } from "./badges.js";
+import { checkAndAwardBadges, buildNewBadgeMessage, tryAwardBadge } from "./badges.js";
+import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
+import { recordInterest } from "./interests.js";
+import { maybeGroupDeliveryWhisper } from "./groupClub.js";
+import { celebrateGroupDelivery } from "./groupInteract.js";
+import { recordLibraryDownload, maybeLibraryWelcomeTip } from "./library.js";
+import { buildQualityBlock } from "./quality.js";
+import { seriesAfter } from "./curated.js";
+import { getRelatedBooks, pickReadingTip, buildDiscoverFooter } from "./discover.js";
 import { activateReferralOnFirstDownload, sendReferralNotifications } from "./referral.js";
 
 // buildResetTime مستوردة من text.ts
@@ -51,6 +71,74 @@ import { activateReferralOnFirstDownload, sendReferralNotifications } from "./re
 // ══════════════════════════════════════════════
 // ENTRY POINT — Guards → Enqueue
 // ══════════════════════════════════════════════
+
+
+// Round-robin URLs by domain so one noisy host cannot monopolize the first
+// N attempts (e.g. five t.me hits before a good hindawi PDF).
+
+// Latency class for attempt ordering (lower = try first).
+// Cheap direct sources before Playwright-heavy hosts so we spend the
+// job budget on deliverable candidates first.
+
+/** Drop listing/author HTML pages that never yield a PDF for this query. */
+function isJunkDownloadUrl(url: string): boolean {
+  const u = (url || "").toLowerCase();
+  if (!u) return true;
+  // foulabook author index (not a book page)
+  if (/foulabook\.com\/[^/]+\/author\//i.test(u)) return true;
+  if (/foulabook\.com\/author\//i.test(u)) return true;
+  // generic category/search pages
+  if (/[?&](s|search|q|query|category|cat|tag)=/i.test(u) && !/\.pdf(\?|$)/i.test(u)) return true;
+  if (/\/(category|tag|tags|search|author|writers?)\//i.test(u) && !/\.pdf(\?|$)/i.test(u)) {
+    // allow noor-book book pages
+    if (!/noor-book\.com\/book\//i.test(u)) return true;
+  }
+  return false;
+}
+
+function latencyClassForUrl(url: string): number {
+  const u = (url || "").toLowerCase();
+  if (u.includes("t.me/") || u.startsWith("tg://")) return 1; // MTProto, usually fast
+  if (u.includes("downloads.hindawi.org") || u.includes("hindawi.org")) return 0; // direct PDFs
+  if (u.includes("archive.org")) return 3; // often slow / skipped
+  if (u.includes("noor-book.com")) return 4; // Playwright
+  if (u.includes("welib.st") || u.includes("welib.org") || u.includes("welib-public")) return 5; // Playwright+wait
+  if (u.includes("foulabook") || u.includes("mktbtypdf") || u.includes("kotobati")) return 2;
+  return 2; // default mid
+}
+
+function diversifyUrlsByDomain(urls: string[]): string[] {
+  if (urls.length <= 2) return urls;
+  const buckets = new Map<string, string[]>();
+  const order: string[] = [];
+  for (const u of urls) {
+    let host = "";
+    try { host = new URL(u.startsWith("tg://") ? "https://t.me.local" : u).hostname.toLowerCase(); } catch {
+      host = (u.split("/")[2] || "unknown").toLowerCase();
+    }
+    // collapse telegram synthetic hosts
+    if (u.includes("t.me/") || u.startsWith("tg://")) host = "t.me";
+    if (!buckets.has(host)) {
+      buckets.set(host, []);
+      order.push(host);
+    }
+    buckets.get(host)!.push(u);
+  }
+  if (buckets.size <= 1) return urls;
+  const out: string[] = [];
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const h of order) {
+      const arr = buckets.get(h)!;
+      if (arr.length > 0) {
+        out.push(arr.shift()!);
+        progress = true;
+      }
+    }
+  }
+  return out;
+}
 
 export async function handleBookRequest(
   bot: TelegramBot,
@@ -62,6 +150,22 @@ export async function handleBookRequest(
   userMessageId?: number,
   wantsSummary?: boolean,
 ): Promise<void> {
+  // فهم نية الطلب مبكراً (حشو/مؤلف/نوع) — محلي وسريع
+  {
+    const refined = refineBookName(bookName);
+    if (refined.bookName && refined.bookName.trim().length >= 2) {
+      if (refined.changed) {
+        L.info("bot", "query understood", {
+          mode: refined.mode,
+          from: bookName.slice(0, 40),
+          to: refined.bookName.slice(0, 40),
+        });
+      }
+      bookName = refined.bookName;
+      if (refined.wantsSummary) wantsSummary = true;
+    }
+  }
+
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
   // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
   // ندعم انتهاء الاشتراك الصحيح + lazy cleanup. كلهم في نفس الـ pipeline
@@ -84,6 +188,25 @@ export async function handleBookRequest(
       .get(`ulimit:${userId}`)
       .exec();
     if (pipelineRes) {
+  // Light dialect + local spelling + (cheap) AI title repair
+  {
+    const normed = lightNormalizeQuery(bookName);
+    if (normed && normed !== bookName) {
+      L.info("bot", "query light-normalized", {
+        from: bookName.slice(0, 40), to: normed.slice(0, 40),
+      });
+      redis.incr("tel:query:light_normalized").catch(() => {});
+      bookName = normed;
+    }
+    const localFixed = applyLocalSpellingFixes(bookName);
+    if (localFixed && localFixed !== bookName) {
+      L.info("bot", "query local-spelling-fixed", {
+        from: bookName.slice(0, 40), to: localFixed.slice(0, 40),
+      });
+      bookName = localFixed;
+    }
+  }
+
       [bannedResult, maintenanceResult, premiumSetResult, premiumExpResult,
        premiumManualResult, limitOverrideResult] =
         pipelineRes as [Error|null, unknown][];
@@ -102,13 +225,13 @@ export async function handleBookRequest(
   const isBannedUser = (bannedResult?.[1] as number) === 1 ||
     BANNED_USERS.has(userId);
   if (isBannedUser) {
-    await bot.sendMessage(chatId, `🚫 تم حظرك من استخدام هذا البوت.`).catch(() => {});
+    await bot.sendMessage(chatId, `🚫 تم حظرك من استخدام رفيق.`).catch(() => {});
     return;
   }
 
   // ── Maintenance ───────────────────────────────
   if ((maintenanceResult?.[1] as string) === "1" && !isAdmin(userId)) {
-    await bot.sendMessage(chatId, `🔧 *البوت في وضع الصيانة حالياً*\n\nسنعود قريباً! ⏳`, { parse_mode: "Markdown" }).catch(() => {});
+    await bot.sendMessage(chatId, `🔧 *رفيق في صيانة خفيفة حالياً*\n\nسنعود قريباً! ⏳`, { parse_mode: "Markdown" }).catch(() => {});
     return;
   }
 
@@ -184,12 +307,19 @@ export async function handleBookRequest(
   const pos    = result.position ?? 1;
   const isHighPriority = priority === "high"; // يشمل admins + premium
 
+  // SPEED UX: عند المركز 1 نختصر الرسالة (الطابور فاضي فعلياً)
+  const safeName = bookName.slice(0, 60).replace(/[_*`\[]/g, "");
+  const queueText = pos <= 1
+    ? (
+        `⏳ *بدأ البحث*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `📗 «${safeName}»\n` +
+        `_أجهّز الملف… ثوانٍ معدودة._`
+      )
+    : buildQueueAccepted(bookName, pos, isHighPriority);
   await bot.sendMessage(
     chatId,
-    buildQueueAccepted(bookName, pos, isHighPriority),
-    // BUG-4 FIX: كان يُرسَل بدون reply_markup → المستخدم لا يرى أزرار الإلغاء/الحالة inline
-    // kbQueued معرَّفة في keyboards.ts منذ البداية لكن لم تكن تُستخدَم أبداً هنا
-    // الآن: المستخدم يرى زر "إلغاء طلبي" و"حالة الطابور" مباشرة تحت رسالة القبول
+    queueText,
     { parse_mode: "Markdown", reply_markup: kbQueued(pos) }
   ).catch(() => {});
 
@@ -249,23 +379,15 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
     ).catch(() => {});
   }
 
-  // FIX: msgId=0 آمن — editMsg وdeleteMsg كلاهما يتحققان من msgId قبل العمل
+  // SPEED: cache-first — لا نرسل رسالة تقدّم إن وُجد file_id جاهز
+  // يوفّر ~1-2 round-trip تيليجرام على أغلب الطلبات الشائعة.
   let msgId = 0;
-  // Typing indicator while we send the initial progress message —
-  // makes the bot feel responsive even before the first edit fires.
   bot.sendChatAction(chatId, "typing").catch(() => {});
-  try {
-    const qm = await bot.sendMessage(chatId, buildProgress(0, bookName), { parse_mode: "Markdown" });
-    msgId = qm.message_id;
-    armProgressWatchdog(token, chatId, msgId, 0, bookName);
-  } catch {}
-
   storage.getOrCreateUser(userId).catch(() => {});
 
   try {
     const servedFromCache = await serveFromCache(bot, chatId, userId, bookName, token, userName, dlCount, dailyLimit, isPrem, t0, trace);
     if (servedFromCache) {
-      await deleteMsg(token, chatId, msgId);
       if (job.userMessageId) reactRandom(bot, chatId, job.userMessageId, REACTION_CACHE_HIT).catch(() => {});
       await trace.finish("sent_from_cache");
       trackFunnelOnce(job.id, {
@@ -276,17 +398,33 @@ export async function processBookRequest(bot: TelegramBot, job: QueueJob): Promi
         sendSuccess:   true,
       });
       await sendAnnouncement(bot, chatId, userId);
-      // PR G — auto-summary trigger after cache hit. The
-      // sourceUrl is whatever the cached entry held (may be empty
-      // for legacy file_id-only cache); runSummaryFlow falls back
-      // to text-only providers when no PDF URL is available.
       if (job.wantsSummary) {
         const cachedEntry = await storage.getCachedBook(bookName).catch(() => null);
         await maybeAutoSummary(bot, chatId, userId, bookName, cachedEntry?.sourceUrl ?? undefined, true);
       }
       return;
     }
-    const fullSearchResult = await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
+
+    // Cache miss — أظهر التقدّم ثم ابحث
+    bot.sendChatAction(chatId, "typing").catch(() => {});
+    try {
+      const qm = await bot.sendMessage(chatId, buildProgress(0, bookName), { parse_mode: "Markdown" });
+      msgId = qm.message_id;
+      armProgressWatchdog(token, chatId, msgId, 0, bookName);
+    } catch {}
+
+    // typing pulse during long search (non-blocking)
+    const typingPulse = setInterval(() => {
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+    }, 4000);
+    typingPulse.unref?.();
+
+    let fullSearchResult: { sent: boolean; sourceUrl?: string };
+    try {
+      fullSearchResult = await performFullSearch(bot, chatId, userId, bookName, token, userName, msgId, dlCount, dailyLimit, isPrem, t0, trace, job.id, job.userMessageId);
+    } finally {
+      clearInterval(typingPulse);
+    }
     await sendAnnouncement(bot, chatId, userId);
     if (job.wantsSummary && fullSearchResult?.sent) {
       await maybeAutoSummary(bot, chatId, userId, bookName, fullSearchResult.sourceUrl, true);
@@ -366,11 +504,11 @@ function cacheHitMatchesQuery(
   }
   const matched = reqTokens.filter((w) => cachedTokens.has(w)).length;
   const overlap = matched / reqTokens.length;
-  if (overlap >= 0.40) return true;
+  if (overlap >= 0.80) return true;
 
   // Low overlap — only allow if URL filename gives independent signal
   const filenameScore = sourceUrl ? urlFilenameRelevance(requestedBook, sourceUrl) : 0;
-  if (filenameScore >= 0.40) return true;
+  if (filenameScore >= 0.80) return true;
 
   return false;
 }
@@ -384,16 +522,16 @@ async function serveFromCache(
   trace: RequestTrace
 ): Promise<boolean> {
   // BUG-7 FIX: await A || await B ينتظر A كاملاً قبل B — نُشغّل الاثنين بالتوازي
+  // SPEED: always parallel dual-key lookup (raw + normalized)
   const normalizedName = normalizeForCache(bookName);
   let cached: Awaited<ReturnType<typeof storage.getCachedBook>>;
-  if (normalizedName === bookName) {
-    cached = await storage.getCachedBook(bookName).catch(() => null);
-  } else {
-    const [a, b] = await Promise.all([
-      storage.getCachedBook(bookName).catch(() => null),
-      storage.getCachedBook(normalizedName).catch(() => null),
-    ]);
-    cached = a ?? b;
+  {
+    const keys = normalizedName === bookName
+      ? [bookName]
+      : [bookName, normalizedName];
+    // also try canonicalize path if storage supports same key as normalize
+    const looks = await Promise.all(keys.map((k) => storage.getCachedBook(k).catch(() => null)));
+    cached = looks.find(Boolean) ?? null;
   }
   if (!cached) return false;
 
@@ -427,9 +565,10 @@ async function serveFromCache(
 
   if (cached.telegramFileId) {
     try {
+      const escHtmlLocal = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       await bot.sendDocument(chatId, cached.telegramFileId, {
-        caption: `📚 *${escMd(cached.bookName)}*\n\n⚡ من مكتبة خلاصة الكتب`,
-        parse_mode: "Markdown",
+        caption: `📚 <b>${escHtmlLocal(cached.bookName)}</b>\n\n⚡ من رفيق`,
+        parse_mode: "HTML",
       });
       // FIX-3: دمج 3 عمليات increment في Promise.all بدل 3 fire-and-forget منفصلة
       Promise.all([
@@ -447,6 +586,7 @@ async function serveFromCache(
       // re-deliver the same book with an "وجدتُ الكتاب الآن" apology.
       removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
       await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl || "", undefined, true, false, isPrem);
+      recordDelivery(Date.now() - t0, "ok_cache").catch(() => {});
       return true;
     } catch {
       L.warn("cache", `file_id expired for "${bookName}", trying sourceUrl`);
@@ -479,6 +619,7 @@ async function serveFromCache(
         // Clear any stale failure record — see comment on file_id path.
         removeFailure(failureKey(userId, chatId, bookName)).catch(() => {});
         await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, cached.sourceUrl, qr.sizeMB, true, false, isPrem);
+      recordDelivery(Date.now() - t0, "ok_cache").catch(() => {});
         return true;
       }
     } catch (e) {
@@ -505,6 +646,24 @@ async function performFullSearch(
 ): Promise<{ sent: boolean; sourceUrl?: string }> {
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
   armProgressWatchdog(token, chatId, msgId, 1, bookName);
+
+  // AI-assisted title understanding (local map + optional model)
+  // useAi: true but cached — fixes typos before first Firecrawl call
+  {
+    const smart = await smartResolveBookQuery(bookName, { useAi: false }).catch(() => null);
+    if (smart && smart.changed && smart.resolved.length >= 2) {
+      L.info("bot", "smart query pre-search", {
+        from: bookName.slice(0, 40),
+        to: smart.resolved.slice(0, 40),
+        source: smart.source,
+      });
+      bookName = smart.resolved;
+      await editMsg(
+        token, chatId, msgId,
+        buildProgress(1, bookName, `💡 فهمتُ: _"${escMd(bookName.slice(0, 40))}"_`),
+      ).catch(() => {});
+    }
+  }
 
   const { results: rawResults, usedFuzzy } = await searchWithFuzzyFallback(bookName);
 
@@ -538,6 +697,7 @@ async function performFullSearch(
   // popular bad queries don't re-burn neurons.
   // Module: server/bot/aiProviders/llamaTransliteration.ts
   if (results.length === 0) {
+    // 1) legacy transliteration module
     const tlit = await correctTransliteration(bookName).catch(() => null);
     if (tlit && tlit.changed) {
       const { results: tlitResults } = await searchWithFuzzyFallback(tlit.corrected);
@@ -550,6 +710,7 @@ async function performFullSearch(
           corrected: tlit.corrected.slice(0, 50),
           results:   tlitResults.length,
         });
+        learnSuccessfulCorrection(bookName, tlit.corrected).catch(() => {});
         await editMsg(
           token, chatId, msgId,
           buildProgress(2, tlit.corrected, `💡 صححت لـ: _"${escMd(tlit.corrected)}"_`),
@@ -558,11 +719,62 @@ async function performFullSearch(
       }
     }
   }
+  // 2) broader AI spelling repair (Arabic + foreign) if still empty
+  if (results.length === 0) {
+    const smart = await smartResolveBookQuery(bookName, { useAi: true }).catch(() => null);
+    if (smart && smart.changed && smart.resolved !== cleanedQuery) {
+      const { results: smartResults } = await searchWithFuzzyFallback(smart.resolved);
+      if (smartResults.length > 0) {
+        results = smartResults;
+        cleanedQuery = smart.resolved;
+        redis.incr("tel:smartq:retry_recovered").catch(() => {});
+        L.info("bot", "Auto-retry with smartBookQuery succeeded", {
+          original: bookName.slice(0, 50),
+          corrected: smart.resolved.slice(0, 50),
+          source: smart.source,
+          results: smartResults.length,
+        });
+        learnSuccessfulCorrection(bookName, smart.resolved).catch(() => {});
+        if (smart.original && smart.original !== bookName) {
+          learnSuccessfulCorrection(smart.original, smart.resolved).catch(() => {});
+        }
+        await editMsg(
+          token, chatId, msgId,
+          buildProgress(2, smart.resolved, `💡 فهمتُ: _"${escMd(smart.resolved.slice(0, 40))}"_`),
+        );
+        armProgressWatchdog(token, chatId, msgId, 2, smart.resolved);
+      }
+    }
+  }
   trace.phase("search_done", {
     results:   results.length,
     usedFuzzy: usedFuzzy || false,
     ms:        Date.now() - t0,
   });
+
+  // High-confidence spelling from didYouMean map → one more search
+  if (results.length === 0) {
+    const local = localDidYouMean(bookName, 1);
+    if (local.spellingFix && local.spellingFix !== bookName) {
+      const prevQuery = bookName;
+      const { results: fixResults } = await searchWithFuzzyFallback(local.spellingFix);
+      if (fixResults.length > 0) {
+        results = fixResults;
+        cleanedQuery = local.spellingFix;
+        bookName = local.spellingFix;
+        redis.incr("tel:smartq:dym_auto_recovered").catch(() => {});
+        learnSuccessfulCorrection(prevQuery, local.spellingFix).catch(() => {});
+        L.info("bot", "Auto-retry with didYouMean spellingFix", {
+          to: local.spellingFix.slice(0, 50),
+          results: fixResults.length,
+        });
+        await editMsg(
+          token, chatId, msgId,
+          buildProgress(2, local.spellingFix, `💡 هل تقصد: _"${escMd(local.spellingFix.slice(0, 40))}"_`),
+        ).catch(() => {});
+      }
+    }
+  }
 
   if (results.length === 0) {
     await deleteMsg(token, chatId, msgId);
@@ -587,27 +799,32 @@ async function performFullSearch(
       }).catch(() => {});
     }
 
-    await bot.sendMessage(
-      chatId,
-      await buildNoResultMessage(bookName, /* apologetic */ true),
-      {
-        parse_mode:   "Markdown",
-        reply_markup: kbNoResults(bookName),
-        // Reply-quote the user's original message so the failure is
-        // attributed to them. In groups this surfaces as a quoted reply
-        // (effective @mention); in private chats it's a polite anchor.
-        // allow_sending_without_reply guards against the user having
-        // deleted their original message.
-        ...(userMessageId
-          ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
-          : {}),
-      },
-    );
+    {
+      const dym = await buildDidYouMeanMessage(bookName, /* apologetic */ true);
+      await bot.sendMessage(
+        chatId,
+        dym.text,
+        {
+          parse_mode:   "Markdown",
+          reply_markup: dym.suggestions.length > 0
+            ? kbDidYouMean(bookName, dym.suggestions)
+            : kbNoResults(bookName),
+          ...(userMessageId
+            ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
+            : {}),
+        },
+      );
+    }
     return { sent: false };
   }
 
   if (usedFuzzy) {
-    await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب نتيجة"));
+    await editMsg(token, chatId, msgId, buildProgress(2, bookName, "💡 لم أجد تطابقاً تاماً — أجرّب أقرب صياغة"));
+    // ثقة شفافة: أخبر المستخدم بلطف أننا نستخدم بحثاً تقريبياً
+    bot.sendMessage(chatId,
+      `🔎 _لم يُعثر على تطابق حرفي — أوسّع البحث بصياغة قريبة. إن لم يكن الملف مطابقاً استخدم «ليس هذا الكتاب؟»._`,
+      { parse_mode: "Markdown" },
+    ).catch(() => {});
     armProgressWatchdog(token, chatId, msgId, 2, bookName);
   }
 
@@ -628,6 +845,9 @@ async function performFullSearch(
   // unreadable. Strip URL-only fallbacks (engine.ts uses url as title
   // when the page has no <title> tag).
   const urlSearchTitle = new Map<string, string>();
+  // url → known file size (Telegram search). Used to prefer smaller PDFs
+  // in the download order and to surface openable t.me links when too large.
+  const urlFileSize = new Map<string, number>();
   // Count results flagged as paid/protected by classifyAccess() in
   // engine.ts. When all download attempts fail AND the search returned
   // ANY paid signals, we tell the user the book is paid rather than
@@ -637,7 +857,9 @@ async function performFullSearch(
     const cleanTitle = (r.title && !r.title.startsWith("http")) ? r.title : "";
     if (r.access === "protected_page") paidSignalCount++;
     if (r.directPdfUrl) {
-      if (!seenPdfUrls.has(r.directPdfUrl)) {
+      if (isJunkDownloadUrl(r.directPdfUrl)) {
+        redis.incr("tel:dl:junk_url_skipped").catch(() => {});
+      } else if (!seenPdfUrls.has(r.directPdfUrl)) {
         seenPdfUrls.add(r.directPdfUrl);
         allPdfUrls.push(r.directPdfUrl);
       }
@@ -646,8 +868,13 @@ async function performFullSearch(
       if (cleanTitle && !urlSearchTitle.has(r.directPdfUrl)) {
         urlSearchTitle.set(r.directPdfUrl, cleanTitle);
       }
+      if (typeof r.fileSize === "number" && r.fileSize > 0 && !urlFileSize.has(r.directPdfUrl)) {
+        urlFileSize.set(r.directPdfUrl, r.fileSize);
+      }
     } else if (r.url && r.access === "download_page") {
-      if (!seenDownloadPages.has(r.url)) {
+      if (isJunkDownloadUrl(r.url)) {
+        redis.incr("tel:dl:junk_url_skipped").catch(() => {});
+      } else if (!seenDownloadPages.has(r.url)) {
         seenDownloadPages.add(r.url);
         downloadablePageFallbacks.push(r.url);
       }
@@ -697,6 +924,22 @@ async function performFullSearch(
       book: bookName.slice(0, 50),
     });
     validUrls = [...new Set(downloadablePageFallbacks)].slice(0, 3);
+  }
+
+  // Fallback paths skip findValidPdfUrls — re-check blacklist so we don't
+  // burn a download attempt (and the user's patience) on known-bad URLs.
+  if (validUrls.length > 0) {
+    const blFlags = await Promise.all(validUrls.map((u) => isBlacklisted(u).catch(() => false)));
+    const before = validUrls.length;
+    validUrls = validUrls.filter((_, i) => !blFlags[i]);
+    if (validUrls.length < before) {
+      L.info("bot", "Filtered blacklisted candidates before download loop", {
+        book: bookName.slice(0, 50),
+        removed: before - validUrls.length,
+        remaining: validUrls.length,
+      });
+      redis.incrby("tel:dl:preloop_blacklist_filtered", before - validUrls.length).catch(() => {});
+    }
   }
 
   // ── ترتيب URLs الذكي — 3 معايير مدمجة ──────────────────────────────
@@ -750,10 +993,92 @@ async function performFullSearch(
         } else {
           reliablePenalty = 1;
         }
-        return filenameScore * 0.5 + sourceRate * 0.3 + reliablePenalty * 0.2;
+        // (4) size preference when known (Telegram): smaller = better under bot cap
+        const sz = urlFileSize.get(url) ?? 0;
+        let sizeBoost = 0;
+        if (sz > 0) {
+          if (sz <= 5 * 1024 * 1024) sizeBoost = 0.15;
+          else if (sz <= 20 * 1024 * 1024) sizeBoost = 0.06;
+          else if (sz <= 35 * 1024 * 1024) sizeBoost = 0.0;
+          else sizeBoost = -0.08;
+        }
+        // (5) latency class: invert so lower class (faster) scores higher
+        const lat = latencyClassForUrl(url);
+        const latencyBoost = Math.max(0, 1 - lat * 0.18); // 0→1.0, 1→0.82, 5→0.1
+        // (6) FIX-DELIVERY: opaque digit-only filenames (Hindawi /books/123.pdf)
+        // have zero title signal — they burn domain caps on wrong books.
+        // Deprioritize unless search-title relevance rescues them.
+        const opaque = hasUninformativeFilename(url);
+        const searchT = urlSearchTitle.get(url) || "";
+        let titleBoost = 0;
+        if (searchT) {
+          const titleAsUrl = `https://x/${encodeURIComponent(searchT)}.pdf`;
+          titleBoost = urlFilenameRelevance(bookName, titleAsUrl);
+        }
+        const opaquePenalty = opaque && filenameScore < 0.15 && titleBoost < 0.35 ? -0.45 : 0;
+        const effectiveName = Math.max(filenameScore, titleBoost * 0.9);
+        return (
+          effectiveName * 0.48 +
+          sourceRate * 0.16 +
+          reliablePenalty * 0.10 +
+          sizeBoost * 0.10 +
+          latencyBoost * 0.10 +
+          opaquePenalty
+        );
       };
       return scoreUrl(b) - scoreUrl(a);
     });
+
+    // Domain diversity: after score sort, interleave hosts so attempt #1..N
+    // sample different sources (reduces found_no_send from one bad domain).
+    // Stable secondary key: prefer lower latency class within interleave.
+    validUrls = diversifyUrlsByDomain(validUrls);
+    // FIX-DELIVERY: previous micro-pass re-sorted head by latency only,
+    // which floated Hindawi numeric PDFs (latency class 0) above
+    // high-relevance candidates and burned the domain cap on wrong books.
+    // Keep diversity order; only swap within the same host to prefer
+    // higher filename/title relevance.
+    {
+      const head = validUrls.slice(0, 8);
+      const rest = validUrls.slice(8);
+      const scored = (u: string): number => {
+        const fn = urlFilenameRelevance(bookName, u);
+        const st = urlSearchTitle.get(u) || "";
+        const tb = st ? urlFilenameRelevance(bookName, `https://x/${encodeURIComponent(st)}.pdf`) : 0;
+        const opaque = hasUninformativeFilename(u) ? -0.3 : 0;
+        return Math.max(fn, tb) + opaque - latencyClassForUrl(u) * 0.02;
+      };
+      // Stable domain-interleave already applied; re-order within each
+      // domain bucket by score, then re-interleave.
+      const buckets = new Map<string, string[]>();
+      const order: string[] = [];
+      for (const u of head) {
+        let host = "";
+        try { host = new URL(u.startsWith("tg://") ? "https://t.me.local" : u).hostname.toLowerCase(); } catch {
+          host = (u.split("/")[2] || "unknown").toLowerCase();
+        }
+        if (u.includes("t.me/") || u.startsWith("tg://")) host = "t.me";
+        if (!buckets.has(host)) { buckets.set(host, []); order.push(host); }
+        buckets.get(host)!.push(u);
+      }
+      for (const h of order) {
+        buckets.get(h)!.sort((a, b) => scored(b) - scored(a));
+      }
+      const out: string[] = [];
+      let progress = true;
+      while (progress) {
+        progress = false;
+        // Prefer hosts whose next URL has higher score (not just first-seen order)
+        const ready = order
+          .filter(h => (buckets.get(h)?.length ?? 0) > 0)
+          .sort((ha, hb) => scored(buckets.get(hb)![0]) - scored(buckets.get(ha)![0]));
+        for (const h of ready) {
+          const arr = buckets.get(h)!;
+          if (arr.length) { out.push(arr.shift()!); progress = true; break; }
+        }
+      }
+      validUrls = [...out, ...rest];
+    }
 
     // الحماية في pdfValidator — يقرأ metaTitle من PDF بعد التحميل
 
@@ -786,11 +1111,8 @@ async function performFullSearch(
   // already knows how to extract a PDF from a download_page (it does
   // exactly that in the no-PDF fallback path above); we just give it
   // more shots before declaring failure.
-  const RESCUE_BEST_PDF_THRESHOLD = 0.30;
-  const RESCUE_FALLBACK_THRESHOLD = 0.50;
-  const RESCUE_MAX_FALLBACKS      = 3;
+  // Thresholds from config (overridable via env) — see RESCUE_* in config.ts
   if (
-    validUrls.length > 0 &&
     downloadablePageFallbacks.length > 0
   ) {
     // URL-based score is fragile for trailing-slash URLs (path's
@@ -806,27 +1128,66 @@ async function performFullSearch(
       return Math.max(urlScore, urlFilenameRelevance(bookName, titleAsUrl));
     };
 
-    const bestPdfScore = scoreWithTitleFallback(validUrls[0]);
-    if (bestPdfScore < RESCUE_BEST_PDF_THRESHOLD) {
+    const bestPdfScore = validUrls.length > 0
+      ? scoreWithTitleFallback(validUrls[0])
+      : 0;
+    // Rescue when: (a) top PDF is weak relevance, OR (b) too few candidates
+    // (production: 14–21 hits → 1 PDF → one permanent fail = dead request).
+    const needRescue =
+      bestPdfScore < RESCUE_BEST_PDF_THRESHOLD ||
+      validUrls.length < RESCUE_MIN_CANDIDATES;
+    if (needRescue) {
+      const want = Math.max(
+        RESCUE_MAX_FALLBACKS,
+        RESCUE_MIN_CANDIDATES - validUrls.length,
+      );
+      const scoreFloor = validUrls.length < RESCUE_MIN_CANDIDATES
+        ? Math.min(RESCUE_FALLBACK_THRESHOLD, 0.25) // looser when starved for candidates
+        : RESCUE_FALLBACK_THRESHOLD;
       const augmented = [...new Set(downloadablePageFallbacks)]
         .filter((u) => !validUrls.includes(u))
         .map((u) => ({ url: u, score: scoreWithTitleFallback(u) }))
-        .filter(({ score }) => score >= RESCUE_FALLBACK_THRESHOLD)
+        .filter(({ score }) => score >= scoreFloor)
         .sort((a, b) => b.score - a.score)
-        .slice(0, RESCUE_MAX_FALLBACKS);
+        .slice(0, want);
       if (augmented.length > 0) {
         L.info(
           "bot",
-          `rescue_low_relevance — augmenting ${validUrls.length} PDF candidate(s) with ${augmented.length} download_page fallback(s)`,
+          `rescue_candidates — augmenting ${validUrls.length} PDF candidate(s) with ${augmented.length} download_page fallback(s)`,
           {
             book:           bookName.slice(0, 50),
             bestPdfScore:   bestPdfScore.toFixed(2),
+            reason:         bestPdfScore < RESCUE_BEST_PDF_THRESHOLD ? "low_relevance" : "too_few",
             fallbackScores: augmented.map((a) => a.score.toFixed(2)),
           },
         );
         validUrls.push(...augmented.map((a) => a.url));
+        // Re-diversify after append so new domains interleave
+        validUrls = diversifyUrlsByDomain(validUrls);
         redis.incr("tel:dl:rescue_augmented").catch(() => {});
       }
+    }
+  }
+
+
+  // FORCE-RESCUE: production found_no_send often has candidates=1 while
+  // search returned 15+ hits. Score floor drops every fallback → user gets
+  // "no results". Absolute last resort: inject top download pages / page
+  // URLs without score filter (still junk-filtered).
+  if (validUrls.length < RESCUE_MIN_CANDIDATES) {
+    const pool = [
+      ...downloadablePageFallbacks,
+      ...pageUrlFallbacks,
+    ].filter((u) => !isJunkDownloadUrl(u) && !validUrls.includes(u));
+    const forced = [...new Set(pool)].slice(0, Math.max(0, RESCUE_MIN_CANDIDATES - validUrls.length + 2));
+    if (forced.length > 0) {
+      L.info("bot", `force_rescue — injecting ${forced.length} unfiltered fallback(s)`, {
+        book: bookName.slice(0, 50),
+        before: validUrls.length,
+      });
+      validUrls.push(...forced);
+      validUrls = diversifyUrlsByDomain(validUrls);
+      redis.incr("tel:dl:force_rescue").catch(() => {});
     }
   }
 
@@ -868,8 +1229,19 @@ async function performFullSearch(
   // MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN. 0 disables the corresponding cap.
   let attemptedDownloads = 0;
   const attemptsByDomain = new Map<string, number>();
+  const contentRejectsByDomain = new Map<string, number>();
   let globalCapReached = false;
   let domainCapHits = 0;
+  let tooLargeHits = 0;
+
+  // Final junk filter (author pages, category URLs)
+  {
+    const beforeJ = validUrls.length;
+    validUrls = validUrls.filter((u) => !isJunkDownloadUrl(u));
+    if (validUrls.length < beforeJ) {
+      redis.incrby("tel:dl:junk_url_skipped", beforeJ - validUrls.length).catch(() => {});
+    }
+  }
 
   try {
     for (const pdfUrl of validUrls) {
@@ -955,6 +1327,22 @@ async function performFullSearch(
         // poisoning the auto-disable signal.
         if (result.rejectedContent) {
           trackSourceMistralReject(dlDomain).catch(() => {});
+          // FIX-DELIVERY: local title_mismatch / Mistral NO both mean this
+          // domain's remaining candidates for THIS query are likely wrong
+          // books (especially Hindawi numeric IDs). After 2 content rejects
+          // from the same host, burn the rest of its cap immediately so we
+          // spend attempts on other domains.
+          const crej = (contentRejectsByDomain.get(dlDomain) ?? 0) + 1;
+          contentRejectsByDomain.set(dlDomain, crej);
+          if (crej >= 2 && MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN > 0) {
+            attemptsByDomain.set(dlDomain, MAX_DOWNLOAD_ATTEMPTS_PER_DOMAIN);
+            L.info("bot", "early domain abandon after content rejects", {
+              book: bookName.slice(0, 50),
+              domain: dlDomain,
+              contentRejects: crej,
+            });
+            redis.incr("tel:dl:early_domain_abandon").catch(() => {});
+          }
         } else {
           trackSourceAttempt(dlDomain, false).catch(() => {});
         }
@@ -963,9 +1351,12 @@ async function performFullSearch(
         // for every attempt and no terminal phase — operators have to
         // infer reasons from logger output. Categorize so funnel views
         // can split timeout vs HTTP vs Mistral vs heuristic rejects.
-        const failReason = result.rejectedContent
-          ? (result.mistralRejected ? "mistral_no" : "heuristic_reject")
-          : (result.permanent ? "permanent_error" : "transient_error");
+        if (result.tooLarge) tooLargeHits++;
+        const failReason = result.tooLarge
+          ? "too_large"
+          : result.rejectedContent
+            ? (result.mistralRejected ? "mistral_no" : "heuristic_reject")
+            : (result.permanent ? "permanent_error" : "transient_error");
         trace.phase("download_failed", {
           url: pdfUrl.slice(0, 80),
           domain: dlDomain,
@@ -1017,18 +1408,29 @@ async function performFullSearch(
         // hit بيرسل الـ telegramFileId مباشرة بدون أيّ re-validation —
         // فلو كان غلط، يتسبب في "wrong-file delivered to many users"
         // (10 entries مسممة شُوهدت في production 2026-05-03).
+        // FIX-SPEED: cache file_id even for opaque Telegram/Hindawi URLs once
+        // pdfValidator has accepted the content for THIS book query. Skipping
+        // them forced multi-minute re-uploads on every request for bestsellers.
+        // Wrong-book risk is mitigated by: validation gate + isSuspectFile.
         const opaqueUrl = hasUninformativeFilename(pdfUrl);
-        if (sentFileId && !isSuspectFile && !opaqueUrl) {
+        if (sentFileId && !isSuspectFile) {
           storage.cacheBook({
             bookQuery: bookName, bookQueryNormalized: normalizeForCache(bookName),
             telegramFileId: sentFileId, fileName: `${bookName}.pdf`, bookName, sourceUrl: pdfUrl,
           }).catch(() => {});
-        } else if (sentFileId && opaqueUrl) {
-          redis.incr("tel:cache:opaque_url_skipped").catch(() => {});
-          L.info("cache", "Skipping cache write — opaque source URL (digit-only filename)", {
-            book: bookName.slice(0, 50),
-            url:  pdfUrl.slice(0, 80),
-          });
+          if (opaqueUrl) {
+            redis.incr("tel:cache:opaque_url_cached").catch(() => {});
+          }
+          // Instant re-send map for telegram channel messages
+          try {
+            const parsed = parseTelegramUrl(pdfUrl);
+            if (parsed && sentFileId) {
+              const fk = `tg:fid:${parsed.channelRef}:${parsed.msgId}`;
+              redis.setex(fk, 30 * 86400, sentFileId).catch(() => {});
+            }
+          } catch { /* optional */ }
+        } else if (sentFileId && isSuspectFile) {
+          redis.incr("tel:cache:suspect_skipped").catch(() => {});
         }
         Promise.all([
           storage.incrementDailyDownload(userId),
@@ -1061,6 +1463,7 @@ async function performFullSearch(
     const isSuspectFile = sentFilenameScore < 0.05;
 
     await sendSuccessMessage(bot, chatId, userId, dlCount + 1, dailyLimit, bookName, sentSourceUrl, sentSizeMB, false, isSuspectFile, isPrem);
+    recordDelivery(Date.now() - t0, "ok_send").catch(() => {});
     clearProgressWatchdog(msgId);
     if (userMessageId) reactRandom(bot, chatId, userMessageId, REACTION_SUCCESS).catch(() => {});
     // Telemetry + Funnel
@@ -1092,6 +1495,7 @@ async function performFullSearch(
     // operators measure the impact of the download-cap mitigations.
     if (results.length > 0) {
       redis.incr("tel:dl:found_no_send").catch(() => {});
+      recordDelivery(Date.now() - t0, "fail_found_no_send").catch(() => {});
       L.warn("bot", "found_no_send — search returned results but no PDF was delivered", {
         book: bookName.slice(0, 50),
         results: results.length,
@@ -1099,6 +1503,7 @@ async function performFullSearch(
         attempted: attemptedDownloads,
         domainCapHits,
         globalCapReached,
+        tooLargeHits,
       });
     }
     // FIX-PAID-FALSE-POSITIVE: قبل ده كنا نبعت buildPaidBookMessage *دايماً*
@@ -1141,20 +1546,32 @@ async function performFullSearch(
     // books the buy-page link would mislead the user into thinking the
     // PDF is one click away.
     const hasFallbackLinks = !showPaidBookMessage && validUrls.length > 0;
-    if (hasFallbackLinks) {
+    // When every attempted candidate was over Telegram's bot upload limit,
+    // don't pretend "not found" — tell the user the book exists but is too large.
+    const allTooLarge = tooLargeHits > 0 && tooLargeHits >= attemptedDownloads && attemptedDownloads > 0;
+    if (allTooLarge) {
+      redis.incr("tel:dl:fail_all_too_large").catch(() => {});
+    } else if (hasFallbackLinks) {
       redis.incr("tel:dl:links_only_message_sent").catch(() => {});
     }
-    const failMsg = showPaidBookMessage
+    let failMsg = showPaidBookMessage
       ? buildPaidBookMessage(bookName, /* apologetic */ true)
+      : allTooLarge
+        ? buildTooLargeMsg(
+            bookName,
+            validUrls.filter((u) => /^https?:\/\/t\.me\//i.test(u)).slice(0, 3),
+          )
       : hasFallbackLinks
-        ? buildLinksOnly(bookName, validUrls)
+        ? buildLinksOnly(bookName, validUrls) + "\n\n_" + buildFoundNoSendHint({ domainCapHits, tooLargeHits, attempted: attemptedDownloads }) + "_"
         : buildNoResults(bookName, false, /* apologetic */ true);
 
     // Skip auto-retry if we have a *strong* paid-signal — those books
     // are deliberately not free, so retrying won't change the outcome
     // and would just spam the user. For the no-signal failure path
     // (search/download flake), record so the worker can recover later.
-    if (!showPaidBookMessage && userMessageId) {
+    // Size failures are permanent for bot delivery — don't enqueue
+    // auto-retry spam for the same oversized PDFs.
+    if (!showPaidBookMessage && !allTooLarge && userMessageId) {
       recordFailure({
         userId:        userId,
         chatId:        chatId,
@@ -1165,10 +1582,25 @@ async function performFullSearch(
       }).catch(() => {});
     }
 
+    // Attach "هل تقصد" suggestions when download failed (actionable alternatives)
+    let failKb = kbNoResults(bookName);
+    if (!showPaidBookMessage && !allTooLarge) {
+      try {
+        const dym = await buildDidYouMeanMessage(bookName, false);
+        if (dym.suggestions.length > 0) {
+          failKb = kbDidYouMean(bookName, dym.suggestions);
+          if (!hasFallbackLinks) {
+            // enrich plain no-results with suggestion list already in dym.text
+            // keep failMsg (links_only / no_results) but add short hint
+            failMsg += "\n\n💡 _جرّب أحد العناوين المقترحة من الأزرار_";
+          }
+        }
+      } catch { /* keep kbNoResults */ }
+    }
     await bot.sendMessage(chatId, failMsg, {
       parse_mode:               "Markdown",
       disable_web_page_preview: true,
-      reply_markup:             kbNoResults(bookName),
+      reply_markup:             failKb,
       // See no_results path above for rationale.
       ...(userMessageId
         ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }
@@ -1180,24 +1612,165 @@ async function performFullSearch(
 
 // ── Helpers ───────────────────────────────────
 
+
+function buildFoundNoSendHint(opts: {
+  domainCapHits: number;
+  tooLargeHits: number;
+  attempted: number;
+}): string {
+  const bits: string[] = [];
+  if (opts.tooLargeHits > 0) {
+    bits.push("بعض الملفات أكبر من حد تيليجرام للبوت (50MB)");
+  }
+  if (opts.domainCapHits > 0) {
+    bits.push("نتائج كثيرة من مصدر واحد كانت غير مطابقة للعنوان");
+  }
+  if (opts.attempted > 0) {
+    bits.push(`جرّبتُ ${opts.attempted} رابطاً موثوقاً`);
+  }
+  if (bits.length === 0) {
+    return "وجدتُ نتائج بحث لكن لم يمرّ أي PDF من فحوصات الجودة.";
+  }
+  return bits.join(" · ") + ".";
+}
+
 async function sendSuccessMessage(
   bot: TelegramBot, chatId: number, userId: string, dlCount: number, limit: number,
   bookName: string, sourceUrl: string, sizeMB?: string, fromCache = false,
   _isSuspect = false, isPrem = false
 ): Promise<void> {
-  // ── Streak update — atomic via Lua (شاهد streak.ts للتفاصيل) ──
-  // نستدعيها قبل buildSuccessMsg عشان نُضيف سطر السلسلة لو ≥ 2 يوم.
-  // فشلها لا يُعطّل الإرسال — fail-open.
-  const streak: StreakUpdate = await updateStreakOnDownload(userId);
+  // ── Streak update — atomic via Lua ──
+  let streak: StreakUpdate = await updateStreakOnDownload(userId);
+
+  // ── Streak shield: if a long streak just broke, try weekly shield ──
+  if (streak.brokenStreak >= 3) {
+    const saved = await tryUseStreakShield(userId, streak.brokenStreak).catch(() => false);
+    if (saved) {
+      try {
+        const today = (await import("./text.js")).cairoDateString();
+        await redis.set(`streak:cur:${userId}`, String(streak.brokenStreak));
+        await redis.set(`streak:last:${userId}`, today);
+        streak = {
+          ...streak,
+          current: streak.brokenStreak,
+          brokenStreak: 0,
+          transitioned: true,
+        };
+        bot.sendMessage(
+          chatId,
+          `🛡️ *درع السلسلة أنقذك!*
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+_حافظنا على سلسلتك (${streak.current} يوم) — الدرع يُستخدم مرة كل أسبوع._`,
+          { parse_mode: "Markdown" },
+        ).catch(() => {});
+      } catch { /* shield restore best-effort */ }
+    }
+  }
+
   const streakLine = formatStreakLine(streak) ?? undefined;
 
-  const msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
+  const series = seriesAfter(bookName, 2);
+  const relatedBase = await getRelatedBooks(bookName, userId, 2).catch(() => [] as string[]);
+  const related: string[] = [];
+  const seenR = new Set<string>();
+  for (const t of [...series, ...relatedBase]) {
+    const k = t.trim().toLowerCase();
+    if (!k || seenR.has(k) || k === bookName.trim().toLowerCase()) continue;
+    seenR.add(k);
+    related.push(t);
+    if (related.length >= 2) break;
+  }
+  const tip = pickReadingTip(bookName + userId);
+  recordInterest(userId, bookName).catch(() => {});
+  recordLibraryDownload(userId, bookName, { sizeMB, fromCache }).catch(() => {});
+  maybeGroupDeliveryWhisper(bot, chatId, bookName).catch(() => {});
+  celebrateGroupDelivery(bot, chatId, bookName).catch(() => {});
+
+  let msg = buildSuccessMsg(bookName, dlCount, limit, sizeMB, fromCache, isPrem, streakLine);
+  msg += buildQualityBlock({
+    bookName,
+    sourceUrl,
+    sizeMB,
+    fromCache,
+    isSuspect: _isSuspect,
+    isPrem,
+  });
+  if (related.length > 0) {
+    const seriesNote = series.length > 0 ? "سلسلة · " : "";
+    const rlines = related
+      .map((t, i) => `  ${i + 1}. ${t.replace(/[_*`\[]/g, "").slice(0, 48)}`)
+      .join("\n");
+    msg += `
+
+✨ *${seriesNote}قد يعجبك:*
+${rlines}
+_اضغط الزر أدناه للتحميل_`;
+  }
+  const tipPlain = tip.replace(/[_*`\[]/g, "").slice(0, 120);
+  if (tipPlain) msg += `
+
+💬 _${tipPlain}_`;
+
+  const libTip = await maybeLibraryWelcomeTip(userId).catch(() => null);
+  if (libTip) msg += `
+
+${libTip}`;
+
+  // Soft summary nudge once/day (private chat) — button already on keyboard
+  if (chatId > 0) {
+    try {
+      const day = new Date().toISOString().slice(0, 10);
+      const ok = await redis.set(`sum:nudge:${userId}:${day}`, "1", "EX", 86400, "NX");
+      if (ok === "OK") {
+        redis.incr("tel:summary:soft_nudge").catch(() => {});
+        msg += `
+
+📘 _ملخّص سريع من الزر أدناه إن رغبت_`;
+      }
+    } catch { /* */ }
+  }
+
   await bot.sendMessage(
     chatId, msg,
-    { parse_mode: "Markdown", reply_markup: kbAfterSuccess(bookName, sourceUrl) }
+    {
+      parse_mode: "Markdown",
+      reply_markup: kbAfterSuccess(bookName, sourceUrl, { isPrem, fromCache, related }),
+      disable_web_page_preview: true,
+    },
   );
 
-  // ── Engagement signals — fire-and-forget لتجنب تأخير الـ user-facing flow ──
+  // ── Retention: quests / XP / comeback (non-blocking) ──
+  onSuccessfulDownload(userId, {
+    fromCache,
+    streakTransitioned: streak.transitioned,
+  }).then(async (ret) => {
+    for (const m of ret.messages) {
+      await bot.sendMessage(chatId, m, { parse_mode: "Markdown" }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    // extra badges: comeback / level / quest streak
+    const { getXpState } = await import("./retention.js");
+    const xp = await getXpState(userId);
+    if (xp.level >= 5) {
+      const b = await tryAwardBadge(userId, "level5");
+      if (b) {
+        const text = await buildNewBadgeMessage(userId, b);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+      }
+    }
+    const qs = parseInt((await redis.get(`ret:qstreak:${userId}`).catch(() => "0")) || "0", 10) || 0;
+    if (qs >= 7) {
+      const b = await tryAwardBadge(userId, "quest7");
+      if (b) {
+        const text = await buildNewBadgeMessage(userId, b);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" }).catch(() => {});
+      }
+    }
+  }).catch((e) => {
+    L.warn("retention", "onSuccessfulDownload failed", { userId, err: String(e).slice(0, 100) });
+  });
+
+  // ── Engagement signals — fire-and-forget ──
   dispatchEngagementSignals(bot, chatId, userId, streak).catch((e) => {
     L.warn("engagement", "dispatchEngagementSignals failed", { userId, err: String(e).slice(0, 100) });
   });
@@ -1340,32 +1913,18 @@ async function buildNoResultMessage(
   bookName: string,
   apologetic = false,
 ): Promise<string> {
-  // لو Firecrawl quota منتهية → رسالة صادقة بدل "لم أجد"
   const fcDown = await isFirecrawlDown().catch(() => false);
   if (fcDown) {
     const apology = apologetic
-      ? `🙏 _عذراً، لم أتمكّن من البحث الآن._\n\n`
+      ? `🙏 _عذراً، لم أتمكّن من البحث الآن._
+
+`
       : "";
-    return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*\n_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
+    return apology + `🔧 *خدمة البحث مؤقتاً غير متاحة*
+_جارٍ العمل على إصلاحها — جرّب بعد قليل_ ⏳`;
   }
-  // Llama suggestions (audit follow-up #3, 2026-05-09): when search
-  // genuinely came up empty, ask Llama-on-Cloudflare for 3 topic-relevant
-  // Arabic books. Empty array → silent fallback to the generic message
-  // (no behaviour change). See server/bot/aiProviders/llamaSuggestions.ts.
-  const base = buildNoResults(bookName, false, apologetic);
-  const suggestions = await getLlamaSuggestions(bookName).catch(() => []);
-  if (suggestions.length === 0) return base;
-  const block = suggestions
-    .slice(0, 3)
-    .map((s) => `◦ ${escMd(s.slice(0, 80))}`)
-    .join("\n");
-  return (
-    base +
-    `\n\n` +
-    `📚 *كتب مشابهة قد تجدها بسهولة:*\n` +
-    `${block}\n\n` +
-    `_جرّب البحث عن أحدها — قد يكون أقرب لما تريد._`
-  );
+  const dym = await buildDidYouMeanMessage(bookName, apologetic);
+  return dym.text;
 }
 
 

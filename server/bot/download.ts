@@ -23,6 +23,205 @@ import {
 } from "./telegramFallback.js";
 import type { DownloadResult } from "./types.js";
 
+
+// ══════════════════════════════════════════════
+// SIZE / UPLOAD ERROR HELPERS
+// Telegram Bot API hard-caps sendDocument at 50MB. Channel files (via
+// userbot) and some web hosts serve larger PDFs. Without early rejection
+// we download → validate → upload → 413, then bookRequest retries the
+// same URL as a "transient" failure (production 2026-07-15: إحياء علوم
+// الدين burned 4 attempts / ~6 min on two 413s).
+// ══════════════════════════════════════════════
+export function isTelegramUploadSizeError(err: unknown): boolean {
+  const e = String((err as any)?.message || err || "").toLowerCase();
+  return (
+    e.includes("413") ||
+    e.includes("request entity too large") ||
+    e.includes("file is too big") ||
+    e.includes("file_too_big") ||
+    e.includes("payload too large") ||
+    (e.includes("document_invalid") && e.includes("size"))
+  );
+}
+
+export function rejectIfTempTooLarge(tempPath: string, pdfUrl: string): DownloadResult | null {
+  try {
+    if (!fs.existsSync(tempPath)) return null;
+    const size = fs.statSync(tempPath).size;
+    if (size > MAX_PDF_SIZE) {
+      L.dlTooLarge(pdfUrl, size / 1024 / 1024);
+      redis.incr("tel:dl:too_large").catch(() => {});
+      safeDeleteTemp(tempPath);
+      // permanent: bookRequest must NOT re-download the same URL
+      return { ok: false, permanent: true, tooLarge: true };
+    }
+  } catch {
+    /* ignore stat errors — upload path will surface real failures */
+  }
+  return null;
+}
+
+
+// ══════════════════════════════════════════════
+// sendLocalDocumentGuarded
+// FIX-DOUBLE-SEND (2026-07-17): never abandon an in-flight sendDocument
+// on soft timeout. If we return failure while Telegram is still uploading,
+// bookRequest re-downloads and re-sends → user gets the PDF twice.
+// Soft timeout: log + wait for the original promise (grace window).
+// Hard timeout: only then fail (and still swallow late rejections).
+// Temp file is deleted ONLY after the send promise settles.
+// ══════════════════════════════════════════════
+async function sendLocalDocumentGuarded(
+  bot: TelegramBot,
+  chatId: number,
+  tempPath: string,
+  caption: string,
+  fname: string,
+  logTag: string,
+): Promise<
+  | { ok: true; message: TelegramBot.Message }
+  | { ok: false; tooLarge?: boolean; timedOut?: boolean; err?: string }
+> {
+  const sendDocPromise = bot.sendDocument(
+    chatId,
+    tempPath,
+    { caption, parse_mode: "HTML" },
+    { filename: fname, contentType: "application/pdf" },
+  ) as Promise<TelegramBot.Message>;
+
+  let softTimer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const sent = await Promise.race([
+      sendDocPromise,
+      new Promise<never>((_, rej) => {
+        softTimer = setTimeout(
+          () => rej(new Error("UPLOAD_TIMEOUT")),
+          TIMEOUT_UPLOAD,
+        );
+      }),
+    ]);
+    return { ok: true, message: sent };
+  } catch (e: any) {
+    const errStr = String(e?.message || e);
+    if (isTelegramUploadSizeError(e)) {
+      sendDocPromise.catch(() => {});
+      return { ok: false, tooLarge: true, err: errStr };
+    }
+    if (!errStr.includes("UPLOAD_TIMEOUT")) {
+      sendDocPromise.catch(() => {});
+      return { ok: false, err: errStr };
+    }
+
+    // Soft timeout: keep waiting on the SAME send — do not start another.
+    L.warn("download", `${logTag} upload soft-timeout — awaiting in-flight sendDocument`, {
+      timeoutMs: TIMEOUT_UPLOAD,
+    });
+    redis.incr("tel:dl:upload_soft_timeout").catch(() => {});
+
+    const graceMs = Math.max(TIMEOUT_UPLOAD, 90_000);
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const sent = await Promise.race([
+        sendDocPromise,
+        new Promise<never>((_, rej) => {
+          hardTimer = setTimeout(
+            () => rej(new Error("UPLOAD_TIMEOUT_HARD")),
+            graceMs,
+          );
+        }),
+      ]);
+      L.info("download", `${logTag} late sendDocument success after soft-timeout`, {});
+      redis.incr("tel:dl:upload_late_success").catch(() => {});
+      return { ok: true, message: sent };
+    } catch (e2: any) {
+      sendDocPromise.catch((lateErr) => {
+        L.debug("download", `${logTag} sendDocument late-rejection after hard-timeout`, {
+          err: String(lateErr).slice(0, 100),
+        });
+      });
+      if (isTelegramUploadSizeError(e2)) {
+        return { ok: false, tooLarge: true, err: String(e2?.message || e2) };
+      }
+      return {
+        ok: false,
+        timedOut: true,
+        err: String(e2?.message || e2).slice(0, 120),
+      };
+    } finally {
+      if (hardTimer !== null) clearTimeout(hardTimer);
+    }
+  } finally {
+    if (softTimer !== null) clearTimeout(softTimer);
+    // Ensure the promise has finished (or been swallowed) before deleting
+    // the temp file so we don't corrupt an in-flight multipart upload.
+    await sendDocPromise.then(() => undefined, () => undefined);
+    safeDeleteTemp(tempPath);
+  }
+}
+
+
+
+// ══════════════════════════════════════════════
+// FIX-SPEED: copy/forward Telegram channel messages
+// Re-uploading a channel PDF via bot.sendDocument often takes 1–3 minutes
+// (AWS→Telegram). copyMessage is usually <2s when the source is a public
+// channel or a chat the bot can access.
+// ══════════════════════════════════════════════
+async function tryCopyTelegramMessage(
+  bot: TelegramBot,
+  chatId: number,
+  channelRef: string,
+  msgId: number,
+  caption: string,
+): Promise<TelegramBot.Message | null> {
+  // Prefer public username form (@channel); numeric ids need -100 prefix for bots
+  let fromChat: string | number = channelRef;
+  if (/^-?\d+$/.test(channelRef)) {
+    const n = Number(channelRef);
+    // Bot API channel ids are usually -100XXXXXXXXXX
+    fromChat = channelRef.startsWith("-100") ? n : Number(`-100${channelRef.replace(/^-/, "")}`);
+  } else {
+    fromChat = channelRef.startsWith("@") ? channelRef : `@${channelRef}`;
+  }
+
+  try {
+    const copied = await bot.copyMessage(chatId, fromChat as any, msgId, {
+      caption,
+      parse_mode: "HTML",
+    } as any);
+    // copyMessage may return { message_id } only — treat as success if no throw
+    redis.incr("tel:tg:copy_success").catch(() => {});
+    L.info("download", "telegram copyMessage success", {
+      from: String(fromChat).slice(0, 40),
+      msgId,
+    });
+    // Synthesize a Message-like object when API returns only message_id
+    if (copied && typeof copied === "object" && "message_id" in (copied as object)) {
+      return copied as TelegramBot.Message;
+    }
+    return { message_id: (copied as any)?.message_id } as TelegramBot.Message;
+  } catch (e1: any) {
+    try {
+      const fwd = await bot.forwardMessage(chatId, fromChat as any, msgId);
+      redis.incr("tel:tg:forward_success").catch(() => {});
+      L.info("download", "telegram forwardMessage success", {
+        from: String(fromChat).slice(0, 40),
+        msgId,
+      });
+      return fwd;
+    } catch (e2: any) {
+      L.warn("download", "telegram copy/forward failed — will re-upload", {
+        from: String(fromChat).slice(0, 40),
+        msgId,
+        copyErr: String(e1?.message || e1).slice(0, 80),
+        fwdErr: String(e2?.message || e2).slice(0, 80),
+      });
+      redis.incr("tel:tg:copy_fail").catch(() => {});
+      return null;
+    }
+  }
+}
+
 // ══════════════════════════════════════════════
 // SKIP_DIRECT_DOMAINS
 // كل موقع هنا → السيرفر يحمّله محلياً أولاً
@@ -225,6 +424,16 @@ export function buildPdfFilename(bookName: string, metaTitle: string): string {
 // Caption shown in Telegram. Always includes user query so they see
 // what they asked for. If validation surfaced a different real title,
 // surface it explicitly so users can spot mismatches before opening.
+export function escHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Caption shown in Telegram. Always includes user query so they see
+// what they asked for. If validation surfaced a different real title,
+// surface it explicitly so users can spot mismatches before opening.
 export function buildCaption(bookName: string, metaTitle: string): string {
   const cleanMeta = (metaTitle || "").trim();
   // Show the actual title only when it diverges meaningfully from the
@@ -235,9 +444,9 @@ export function buildCaption(bookName: string, metaTitle: string): string {
                      cleanMeta.length >= 4 &&
                      norm(cleanMeta) !== norm(bookName);
   if (showActual) {
-    return `📚 *${escMd(bookName)}*\n📖 _${escMd(cleanMeta)}_\n\n✅ من خلاصة الكتب`;
+    return `📚 <b>${escHtml(bookName)}</b>\n📖 <i>${escHtml(cleanMeta)}</i>\n\n✅ من رفيق`;
   }
-  return `📚 *${escMd(bookName)}*\n\n✅ من خلاصة الكتب`;
+  return `📚 <b>${escHtml(bookName)}</b>\n\n✅ من رفيق`;
 }
 
 // ══════════════════════════════════════════════
@@ -444,7 +653,7 @@ async function expandMktbtypdfUrl(url: string): Promise<string | null> {
     // كل كتاب بيظهر في الـ landing بـ form واحد بس. لو طلبنا `external=1` على
     // كتاب محلي بنرجع "Book file not found"، والعكس صحيح.
     // الحل: خذ الرابط من الـ HTML كما هو (نفضّل external لو موجود لأن CDN
-    // بيكون أسرع، نفـ fallback للـ bare لو مش موجود).
+    // بيكون أسرع، نفـ fallback للـ bare إن لم موجود).
     const extM =
       html.match(/mktbtypdf\.com\/download\/?\?id=(\d+)(?:&|&amp;)external=1/i);
     const bareM =
@@ -609,7 +818,7 @@ export async function downloadAndSend(
             // caption can flag it when the search-result page title
             // diverges from the user's query.
             caption:    buildCaption(bookName, searchResultTitle),
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
           }),
         });
         d = await r.json();
@@ -758,7 +967,8 @@ export async function downloadAndSend(
         );
         if (bodyBuf.length > MAX_PDF_SIZE) {
           L.dlTooLarge(pdfUrl, bodyBuf.length / 1024 / 1024);
-          return { ok: false };
+          redis.incr("tel:dl:too_large").catch(() => {});
+          return { ok: false, permanent: true, tooLarge: true };
         }
         try {
           await fsPromises.writeFile(tempPath, bodyBuf);
@@ -825,7 +1035,8 @@ export async function downloadAndSend(
         safeDeleteTemp(tempPath);
         if (pipeErr?.message === "FILE_TOO_LARGE") {
           L.dlTooLarge(pdfUrl, totalBytes / 1024 / 1024);
-          return { ok: false };
+          redis.incr("tel:dl:too_large").catch(() => {});
+          return { ok: false, permanent: true, tooLarge: true };
         }
         if (String(pipeErr).includes("abort") || String(pipeErr).includes("timeout")) {
           L.dlTimeout(pdfUrl, Date.now() - t0);
@@ -882,6 +1093,15 @@ export async function downloadAndSend(
       return { ok: false };
     }
 
+    // ── size gate (Telegram bot upload limit) ───
+    {
+      const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+      if (tooBig) {
+        await recordUrlFailure(pdfUrl);
+        return tooBig;
+      }
+    }
+
     // ── validatePdfContent — تحقق من المحتوى ─────
     // نمرّر originalUrl (لا الـ resolved) كـ URL hint:
     // الأصل بيحتوي slug الكتاب (مثل …/book/آنا-كارنينا-pdf) المفيد لـ Mistral،
@@ -919,44 +1139,33 @@ export async function downloadAndSend(
     // user knows what they asked for.
     const fname = buildPdfFilename(bookName, validation.metaTitle);
 
-    // ── إرسال لـ Telegram ─────────────────────────
-    let sent: TelegramBot.Message;
-    let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
-    // مجرد الإشارة للـ sendDocument promise عشان لو غلب الـ timeout (فاز بالـ
-    // race) وبعدين الـ sendDocument فشل لاحقاً، نمسك الـ rejection بدل ما تتحول
-    // لـ unhandled-rejection warning في الـ logs.
-    const sendDocPromise = bot.sendDocument(
+    // ── إرسال لـ Telegram (FIX-DOUBLE-SEND guarded) ─
+    const upload = await sendLocalDocumentGuarded(
+      bot,
       chatId,
       tempPath,
-      {
-        caption:    buildCaption(bookName, validation.metaTitle),
-        parse_mode: "Markdown",
-      },
-      { filename: fname, contentType: "application/pdf" },
-    ) as Promise<TelegramBot.Message>;
-    try {
-      sent = await Promise.race([
-        sendDocPromise,
-        new Promise<never>((_, rej) => {
-          uploadTimerId = setTimeout(
-            () => rej(new Error("UPLOAD_TIMEOUT")),
-            TIMEOUT_UPLOAD
-          );
-        }),
-      ]);
-    } catch (raceErr) {
-      // خسرنا الـ race (غالباً timeout). لو الـ sendDocument رفض لاحقاً،
-      // نمسكه بصمت (لو Telegram تأخر ورجع error بعد ما دعشناه تايماوت).
-      sendDocPromise.catch((lateErr) => {
-        L.debug("download", "sendDocument late-rejection (race already lost)", {
-          err: String(lateErr).slice(0, 100),
-        });
-      });
-      throw raceErr;
-    } finally {
-      if (uploadTimerId !== null) clearTimeout(uploadTimerId);
-      safeDeleteTemp(tempPath);
+      buildCaption(bookName, validation.metaTitle),
+      fname,
+      "local",
+    );
+    if (!upload.ok) {
+      L.dlFail(pdfUrl, `local upload: ${upload.err || "failed"}`.slice(0, 120));
+      if (upload.tooLarge) {
+        redis.incr("tel:dl:too_large").catch(() => {});
+        await recordUrlFailure(pdfUrl);
+        return { ok: false, permanent: true, tooLarge: true };
+      }
+      // Soft/hard upload timeout: permanent so bookRequest does not re-send
+      // (first attempt may still be delivering).
+      if (upload.timedOut) {
+        redis.incr("tel:dl:upload_hard_timeout").catch(() => {});
+        await recordUrlFailure(pdfUrl);
+        return { ok: false, permanent: true };
+      }
+      await recordUrlFailure(pdfUrl);
+      return { ok: false };
     }
+    const sent = upload.message;
 
     const sizeMB = (totalBytes / 1024 / 1024).toFixed(1);
     L.dlLocal(bookName, sizeMB, Date.now() - t0);
@@ -974,6 +1183,12 @@ export async function downloadAndSend(
     if (err.includes("UPLOAD_TIMEOUT")) {
       safeDeleteTemp(tempPath);
       L.dlTimeout(pdfUrl, Date.now() - t0);
+    } else if (isTelegramUploadSizeError(e)) {
+      safeDeleteTemp(tempPath);
+      L.dlTooLarge(pdfUrl, 0); // totalBytes not in catch scope
+      redis.incr("tel:dl:too_large").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true, tooLarge: true };
     } else if (err.includes("abort") || err.includes("timeout")) {
       L.dlTimeout(pdfUrl, Date.now() - t0);
       safeDeleteTemp(tempPath);
@@ -1055,6 +1270,15 @@ async function welibDownloadAndSend(
     return { ok: false };
   }
 
+  // ── size gate ────────────────────────────────
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
+  }
+
   // ── content validation ───────────────────────
   // originalUrl (e.g. /md5/{hash}) بيدخل لـ Mistral كـ URL hint — الـ md5 فيه
   // مفيش slug للكتاب، لكن الـ metaTitle من PDF بيكون عربي وصحيح.
@@ -1082,43 +1306,28 @@ async function welibDownloadAndSend(
   const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
 
-  let sent: TelegramBot.Message;
-  let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
-  const sendDocPromise = bot.sendDocument(
-    chatId,
-    tempPath,
-    {
-      caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
-    },
-    { filename: fname, contentType: "application/pdf" },
-  ) as Promise<TelegramBot.Message>;
-  try {
-    sent = await Promise.race([
-      sendDocPromise,
-      new Promise<never>((_, rej) => {
-        uploadTimerId = setTimeout(
-          () => rej(new Error("UPLOAD_TIMEOUT")),
-          TIMEOUT_UPLOAD,
-        );
-      }),
-    ]);
-  } catch (e: any) {
-    sendDocPromise.catch((lateErr) => {
-      L.debug("download", "welib sendDocument late-rejection (race already lost)", {
-        err: String(lateErr).slice(0, 100),
-      });
-    });
-    safeDeleteTemp(tempPath);
-    L.dlFail(pdfUrl, `welib upload: ${String(e?.message || e).slice(0, 80)}`);
+    // FIX-DOUBLE-SEND
+  const upload = await sendLocalDocumentGuarded(
+    bot, chatId, tempPath, buildCaption(bookName, validation.metaTitle), fname, "welib",
+  );
+  if (!upload.ok) {
+    L.dlFail(pdfUrl, `welib upload: ${upload.err || "failed"}`.slice(0, 120));
+    if (upload.tooLarge) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true, tooLarge: true };
+    }
+    if (upload.timedOut) {
+      redis.incr("tel:dl:upload_hard_timeout").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true };
+    }
     await recordUrlFailure(pdfUrl);
     return { ok: false };
-  } finally {
-    if (uploadTimerId !== null) clearTimeout(uploadTimerId);
-    safeDeleteTemp(tempPath);
   }
+  const sent = upload.message;
 
-  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
   L.dlLocal(bookName, sizeMB, Date.now() - t0);
   await recordUrlSuccess(pdfUrl);
 
@@ -1195,6 +1404,15 @@ async function noorBookDownloadAndSend(
 
   // ── content validation ───────────────────────
   // originalUrl فيه slug الكتاب — مفيد لـ Mistral
+  // ── size gate ────────────────────────────────
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
+  }
+
   const validation = await validatePdfContent(tempPath, bookName, originalUrl, skipMistral, "", searchResultTitle);
   if (!validation.accepted) {
     L.warn("download", "noor-book PDF rejected — content mismatch", {
@@ -1217,45 +1435,28 @@ async function noorBookDownloadAndSend(
   const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.sizeBytes ?? fs.statSync(tempPath).size;
 
-  let sent: TelegramBot.Message;
-  let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
-  // توثيق الـ sendDocument promise بشكل منفصل عشان نمسك late-rejection لو
-  // غلب الـ timeout في الـ race وبعدين Telegram رفض بعدوا.
-  const sendDocPromise = bot.sendDocument(
-    chatId,
-    tempPath,
-    {
-      caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
-    },
-    { filename: fname, contentType: "application/pdf" },
-  ) as Promise<TelegramBot.Message>;
-  try {
-    sent = await Promise.race([
-      sendDocPromise,
-      new Promise<never>((_, rej) => {
-        uploadTimerId = setTimeout(
-          () => rej(new Error("UPLOAD_TIMEOUT")),
-          TIMEOUT_UPLOAD,
-        );
-      }),
-    ]);
-  } catch (e: any) {
-    sendDocPromise.catch((lateErr) => {
-      L.debug("download", "noor-book sendDocument late-rejection (race already lost)", {
-        err: String(lateErr).slice(0, 100),
-      });
-    });
-    safeDeleteTemp(tempPath);
-    L.dlFail(pdfUrl, `noor-book upload: ${String(e?.message || e).slice(0, 80)}`);
+  // FIX-DOUBLE-SEND
+  const upload = await sendLocalDocumentGuarded(
+    bot, chatId, tempPath, buildCaption(bookName, validation.metaTitle), fname, "noor-book",
+  );
+  if (!upload.ok) {
+    L.dlFail(pdfUrl, `noor-book upload: ${upload.err || "failed"}`.slice(0, 120));
+    if (upload.tooLarge) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true, tooLarge: true };
+    }
+    if (upload.timedOut) {
+      redis.incr("tel:dl:upload_hard_timeout").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true };
+    }
     await recordUrlFailure(pdfUrl);
     return { ok: false };
-  } finally {
-    if (uploadTimerId !== null) clearTimeout(uploadTimerId);
-    safeDeleteTemp(tempPath);
   }
+  const sent = upload.message;
 
-  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
   L.dlLocal(bookName, sizeMB, Date.now() - t0);
   await recordUrlSuccess(pdfUrl);
 
@@ -1296,6 +1497,41 @@ async function telegramDownloadAndSend(
     return { ok: false };
   }
 
+  // FIX-SPEED: re-use bot file_id from a previous successful send of this
+  // channel message — skips multi-minute re-upload entirely.
+  try {
+    const fk = `tg:fid:${parsed.channelRef}:${parsed.msgId}`;
+    const cachedFid = await redis.get(fk);
+    if (cachedFid) {
+      try {
+        const sent = await bot.sendDocument(chatId, cachedFid, {
+          caption: buildCaption(bookName, searchResultTitle || ""),
+          parse_mode: "HTML",
+        });
+        L.info("download", "Instant file_id hit (telegram cache)", {
+          book: bookName.slice(0, 40),
+          channel: parsed.channelRef.slice(0, 30),
+          msgId: parsed.msgId,
+        });
+        redis.incr("tel:tg:fid_cache_hit").catch(() => {});
+        await recordUrlSuccess(pdfUrl);
+        return {
+          ok: true,
+          fileId: sent.document?.file_id || cachedFid,
+          sizeMB: "?",
+          sendMode: "local",
+        };
+      } catch (e) {
+        // file_id may be expired — drop and continue full path
+        redis.del(fk).catch(() => {});
+        redis.incr("tel:tg:fid_cache_stale").catch(() => {});
+        L.warn("download", "cached file_id stale — full download", {
+          err: String(e).slice(0, 80),
+        });
+      }
+    }
+  } catch { /* non-fatal */ }
+
   ensureTempDir();
   const tempPath = path.join(
     TEMP_DIR,
@@ -1304,10 +1540,24 @@ async function telegramDownloadAndSend(
 
   const result = await downloadTelegramFile(parsed.channelRef, parsed.msgId, tempPath);
   if (!result.ok) {
-    L.dlFail(pdfUrl, `telegram: ${result.error?.slice(0, 80) ?? "unknown"}`);
+    const errMsg = result.error?.slice(0, 80) ?? "unknown";
+    L.dlFail(pdfUrl, `telegram: ${errMsg}`);
     safeDeleteTemp(tempPath);
     await recordUrlFailure(pdfUrl);
+    if (errMsg.startsWith("too_large") || isTelegramUploadSizeError(errMsg)) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      return { ok: false, permanent: true, tooLarge: true };
+    }
     return { ok: false };
+  }
+
+  // Post-download size gate (declared size may be missing on some peers)
+  {
+    const tooBig = rejectIfTempTooLarge(tempPath, pdfUrl);
+    if (tooBig) {
+      await recordUrlFailure(pdfUrl);
+      return tooBig;
+    }
   }
 
   // ── magic bytes ──────────────────────────────
@@ -1370,44 +1620,51 @@ async function telegramDownloadAndSend(
   // ── sendDocument ─────────────────────────────
   const fname = buildPdfFilename(bookName, validation.metaTitle);
   const sizeBytes = result.size ?? fs.statSync(tempPath).size;
-
-  let sent: TelegramBot.Message;
-  let uploadTimerId: ReturnType<typeof setTimeout> | null = null;
-  const sendDocPromise = bot.sendDocument(
-    chatId,
-    tempPath,
-    {
-      caption:    buildCaption(bookName, validation.metaTitle),
-      parse_mode: "Markdown",
-    },
-    { filename: fname, contentType: "application/pdf" },
-  ) as Promise<TelegramBot.Message>;
-  try {
-    sent = await Promise.race([
-      sendDocPromise,
-      new Promise<never>((_, rej) => {
-        uploadTimerId = setTimeout(
-          () => rej(new Error("UPLOAD_TIMEOUT")),
-          TIMEOUT_UPLOAD,
-        );
-      }),
-    ]);
-  } catch (e: any) {
-    sendDocPromise.catch((lateErr) => {
-      L.debug("download", "telegram sendDocument late-rejection (race already lost)", {
-        err: String(lateErr).slice(0, 100),
-      });
-    });
+  const caption = buildCaption(bookName, validation.metaTitle);
+  // FIX-SPEED: prefer copyMessage (seconds) over re-upload (often 1–3 min)
+  const copied = await tryCopyTelegramMessage(
+    bot, chatId, parsed.channelRef, parsed.msgId, caption,
+  );
+  if (copied) {
     safeDeleteTemp(tempPath);
-    L.dlFail(pdfUrl, `telegram upload: ${String(e?.message || e).slice(0, 80)}`);
-    await recordUrlFailure(pdfUrl);
-    return { ok: false };
-  } finally {
-    if (uploadTimerId !== null) clearTimeout(uploadTimerId);
-    safeDeleteTemp(tempPath);
+    const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+    L.dlLocal(bookName, sizeMB, Date.now() - t0);
+    await recordUrlSuccess(pdfUrl);
+    const cFid = (copied as any).document?.file_id;
+    if (cFid) {
+      redis.setex(`tg:fid:${parsed.channelRef}:${parsed.msgId}`, 30 * 86400, cFid).catch(() => {});
+    }
+    return {
+      ok: true,
+      fileId: cFid,
+      sizeMB,
+      sendMode: "local",
+    };
   }
 
-  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+// FIX-DOUBLE-SEND: never abandon in-flight channel re-upload
+  const upload = await sendLocalDocumentGuarded(
+    bot, chatId, tempPath, caption, fname, "telegram",
+  );
+  if (!upload.ok) {
+    L.dlFail(pdfUrl, `telegram upload: ${upload.err || "failed"}`.slice(0, 120));
+    if (upload.tooLarge) {
+      redis.incr("tel:dl:too_large").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true, tooLarge: true };
+    }
+    if (upload.timedOut) {
+      // Do NOT let bookRequest retry this URL — risk of double delivery
+      redis.incr("tel:dl:upload_hard_timeout").catch(() => {});
+      await recordUrlFailure(pdfUrl);
+      return { ok: false, permanent: true };
+    }
+    await recordUrlFailure(pdfUrl);
+    return { ok: false };
+  }
+  const sent = upload.message;
+
+const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
   L.dlLocal(bookName, sizeMB, Date.now() - t0);
   await recordUrlSuccess(pdfUrl);
 

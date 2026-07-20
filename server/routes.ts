@@ -173,6 +173,19 @@ export async function registerRoutes(httpServer: any, app: Express): Promise<voi
     res.json({ ok: true, uptime: Math.floor(process.uptime()), ts: Date.now() });
   });
 
+  // ── Ops observability (auth) ─────────────────
+  app.get("/api/ops/metrics", auth, wrap(async (_req, res) => {
+    const { buildOpsMetrics } = await import("./bot/observability.js");
+    ok(res, await buildOpsMetrics());
+  }));
+  app.get("/api/ops/dashboard", auth, wrap(async (_req, res) => {
+    const { buildOpsMetrics, renderOpsDashboardHtml } = await import("./bot/observability.js");
+    const data = await buildOpsMetrics();
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(200).send(renderOpsDashboardHtml(data));
+  }));
+
+
   // ═══════════════════════════════════════════════════════════
   //  PROTECTED ADMIN API
   // ═══════════════════════════════════════════════════════════

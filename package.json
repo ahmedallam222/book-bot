@@ -1,7 +1,7 @@
 {
-  "name": "kholasa-books-bot",
+  "name": "rafiq-book-bot",
   "version": "32.2.0",
-  "description": "خلاصة الكتب — Arabic Telegram Book Download Bot",
+  "description": "رفيق — Arabic Telegram book companion bot",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -11,6 +11,8 @@
     "build":     "tsx script/build.ts",
     "start":     "node dist/index.cjs",
     "test":      "node script/run-tests.mjs",
+    "smoke":     "node script/smoke_rafiq.mjs",
+    "test:unit": "npx tsx tests/test-tool-helpers.mjs",
     "typecheck": "tsc --noEmit",
     "db:push":   "drizzle-kit push",
     "db:studio": "drizzle-kit studio"

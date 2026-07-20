@@ -21,8 +21,7 @@ import {
   SEARCH_CACHE_TTL_HIT, SEARCH_CACHE_TTL_MISS,
   FC_QUOTA_EXCEEDED_KEY, FC_RATE_LIMITED_KEY, FC_RATE_LIMITED_TTL_SEC,
   FC_QUOTA_TTL_SEC, TRUSTED_PDF_DOMAINS, MIN_QUERY_LENGTH,
-  SOURCE_RANK_MIN_SAMPLES,
-} from "./config.js";
+  SOURCE_RANK_MIN_SAMPLES, MAX_PDF_SIZE } from "./config.js";
 
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || "";
 const FIRECRAWL_SEARCH  = "https://api.firecrawl.dev/v2";
@@ -236,7 +235,9 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // welib pages), so we hit it directly via the existing welibResolver
   // browser singleton. Promise.allSettled keeps either source from
   // taking the other down.
-  const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 25_000);
+  // FIX-SPEED: default welib budget 8s (was 25s). Welib is Playwright+CF
+  // and often returns 0 results while still blocking the whole search.
+  const welibBudgetMs = Number(process.env.WELIB_SEARCH_BUDGET_MS || 8_000);
   const welibMaxResults = Number(process.env.WELIB_SEARCH_MAX_RESULTS || 8);
 
   // Telegram-channels fallback is a 3rd parallel leg. The userbot is a
@@ -245,20 +246,42 @@ export async function searchAllSources(query: string): Promise<BookResult[]> {
   // channels Telegram surfaces in global results) in one MTProto RPC,
   // typically in <500ms. When credentials aren't set the call short-
   // circuits to `[]` so this leg is free on dev boxes.
-  const [fcSettled, welibSettled, tgSettled] = await Promise.allSettled([
-    fcPaused
-      ? Promise.resolve([] as BookResult[])
-      : unifiedSearch(arabicDomains, query, true),
-    welibSourceConfig
-      ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
-      : Promise.resolve([] as WelibSearchResult[]),
-    TG_FALLBACK_ENABLED
-      ? searchTelegramChannels(query)
-      : Promise.resolve([] as TelegramSearchResult[]),
-  ]);
+  //
+  // FIX-SPEED: wait for Firecrawl + Telegram first (fast). Only await
+  // welib when those legs are thin — otherwise welib's 10–25s empty
+  // search delayed every successful TG hit (prod: "فكر وازدد ثراء"
+  // TG 261ms + welib 16s empty before download started).
+  const fcPromise = fcPaused
+    ? Promise.resolve([] as BookResult[])
+    : unifiedSearch(arabicDomains, query, true);
+  const tgPromise = TG_FALLBACK_ENABLED
+    ? searchTelegramChannels(query)
+    : Promise.resolve([] as TelegramSearchResult[]);
+  const welibPromise = welibSourceConfig
+    ? searchWelib(query, { maxResults: welibMaxResults, timeoutMs: welibBudgetMs })
+    : Promise.resolve([] as WelibSearchResult[]);
+
+  const [fcSettled, tgSettled] = await Promise.allSettled([fcPromise, tgPromise]);
   const fcResults = fcSettled.status === "fulfilled" ? fcSettled.value : [];
-  const welibResults = welibSettled.status === "fulfilled" ? welibSettled.value : [];
   const tgResults = tgSettled.status === "fulfilled" ? tgSettled.value : [];
+
+  const fastCount = fcResults.length + tgResults.length;
+  const needWelib = fastCount < 6; // enough candidates → skip waiting on welib
+  let welibResults: WelibSearchResult[] = [];
+  if (needWelib) {
+    const welibSettled = await Promise.allSettled([welibPromise]);
+    welibResults = welibSettled[0].status === "fulfilled" ? welibSettled[0].value : [];
+  } else {
+    // Let welib finish in background for cache warmth, but don't block delivery.
+    welibPromise.then(() => {
+      redis.incr("tel:engine:welib_skipped_wait").catch(() => {});
+    }).catch(() => {});
+    L.info("engine", "skipping welib wait — FC/TG already have candidates", {
+      query: query.slice(0, 50),
+      fc: fcResults.length,
+      tg: tgResults.length,
+    });
+  }
 
   const seen = new Set(fcResults.map((r) => r.url));
   const welibAsBookResults: BookResult[] = [];
@@ -544,12 +567,30 @@ export function telegramResultToBookResult(
   const title = t.fileName.replace(/\.pdf$/i, "").trim() ||
                 t.caption.split("\n")[0]?.slice(0, 80) ||
                 t.channelTitle;
-  const score = scoreResult(
+  let score = scoreResult(
     { url: t.url, markdown: "", metadata: { title } },
     t.url,
     "direct_pdf",
     userQuery,
   );
+  // Size-aware ranking: prefer smaller deliverable PDFs (faster send,
+  // less 413 risk). Unknown size (0) stays neutral.
+  if (t.fileSize > 0) {
+    if (t.fileSize > MAX_PDF_SIZE) {
+      score -= 1.5; // should already be filtered at search
+    } else if (t.fileSize <= 5 * 1024 * 1024) {
+      score += 0.20;
+    } else if (t.fileSize <= 20 * 1024 * 1024) {
+      score += 0.08;
+    } else if (t.fileSize <= 35 * 1024 * 1024) {
+      score += 0.02;
+    } else {
+      score -= 0.05; // still under cap but large
+    }
+  }
+  const sizeNote = t.fileSize > 0
+    ? `, ${(t.fileSize / 1024 / 1024).toFixed(1)}MB`
+    : "";
   return {
     id:           `tg-${t.channelId}-${t.msgId}-${Date.now()}`,
     title,
@@ -557,8 +598,9 @@ export function telegramResultToBookResult(
     directPdfUrl: t.url,
     source:       TELEGRAM_SOURCE,
     access:       "direct_pdf",
-    accessReason: `telegram search hit (${t.channelTitle.slice(0, 40)})`,
+    accessReason: `telegram search hit (${t.channelTitle.slice(0, 40)}${sizeNote})`,
     _score:       score,
+    fileSize:     t.fileSize > 0 ? t.fileSize : undefined,
   };
 }
 

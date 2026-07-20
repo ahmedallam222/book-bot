@@ -61,8 +61,9 @@ export class GlobalSummaryLimitError extends Error {
 // popular book instead of 1 cache hit. The inflight summary lock and
 // the DB cache key both already use `canonicalizeForCache`; this gets
 // the response cache aligned with them.
-function cacheKey(bookName: string): string {
-  return CACHE_PREFIX + (canonicalizeForCache(bookName) || bookName).slice(0, 200);
+function cacheKey(bookName: string, depth: string = "quick"): string {
+  const base = (canonicalizeForCache(bookName) || bookName).slice(0, 180);
+  return CACHE_PREFIX + (depth === "deep" ? "d:" : "q:") + base;
 }
 
 function todayKey(): string {
@@ -136,9 +137,9 @@ async function consumeGlobalQuota(): Promise<boolean> {
   return true;
 }
 
-export async function getCachedSummary(bookName: string): Promise<SummaryResponse | null> {
+export async function getCachedSummary(bookName: string, depth: string = "quick"): Promise<SummaryResponse | null> {
   try {
-    const raw = await redis.get(cacheKey(bookName));
+    const raw = await redis.get(cacheKey(bookName, depth));
     if (!raw) return null;
     return JSON.parse(raw) as SummaryResponse;
   } catch {
@@ -146,9 +147,9 @@ export async function getCachedSummary(bookName: string): Promise<SummaryRespons
   }
 }
 
-async function setCachedSummary(bookName: string, resp: SummaryResponse): Promise<void> {
+async function setCachedSummary(bookName: string, resp: SummaryResponse, depth: string = "quick"): Promise<void> {
   try {
-    await redis.set(cacheKey(bookName), JSON.stringify(resp), "EX", SUMMARY_CACHE_TTL_SECONDS);
+    await redis.set(cacheKey(bookName, depth), JSON.stringify(resp), "EX", SUMMARY_CACHE_TTL_SECONDS);
   } catch (e) {
     L.warn("summary", "cache write failed", { err: String(e).slice(0, 100) });
   }
@@ -192,6 +193,8 @@ async function fetchPdfBuffer(url: string): Promise<Buffer | null> {
 }
 
 export interface SummaryOptions {
+  /** deep = ملخص أطول وأغنى */
+  depth?: "quick" | "deep";
   // PDF source. Either a Buffer (caller already has the file in
   // memory — fastest path) or a URL we can download from. Both
   // optional; if neither is supplied we go straight to text-only.
@@ -209,9 +212,10 @@ export async function getBookSummary(
   opts: SummaryOptions = {},
 ): Promise<SummaryResponse> {
   const t0 = Date.now();
+  const depth = opts.depth === "deep" ? "deep" : "quick";
 
   if (!opts.forceFresh) {
-    const cached = await getCachedSummary(bookName);
+    const cached = await getCachedSummary(bookName, depth);
     if (cached) {
       L.info("summary", "cache hit", { book: bookName.slice(0, 50) });
       return cached;
@@ -249,6 +253,15 @@ export async function getBookSummary(
   // Will be augmented with Firecrawl markdown for premium users (step 3.5).
   // The text-only failover path (step 5) consumes this combined context.
   let context = wikiContext;
+  if (depth === "deep") {
+    const deepHint =
+      "\n\n[تعليمات الملخص العميق] DEEP_SUMMARY " +
+      "ملخص عميق: روايات 450-700 كلمة بلا حرق؛ " +
+      "غير روائي: 5-7 نقاط + مفاهيم مفتاحية + تطبيق عملي أسبوعي + لماذا تقرأه. " +
+      "لغة فصحى دافئة، بدون Markdown.";
+    context = (context || "") + deepHint;
+    redis.incr("tel:summary:deep_requested").catch(() => {});
+  }
   // Set to true when the Firecrawl fast-path produced usable markdown
   // for a premium user. Skips the multimodal Gemini PDF tier (step 4)
   // entirely so we don't spend the Gemini free-tier quota on premium
@@ -334,7 +347,7 @@ export async function getBookSummary(
         context,
         premium: opts.premium,
       }, { requirePDF: true });
-      await setCachedSummary(bookName, out);
+      await setCachedSummary(bookName, out, depth);
       L.info("summary", "PDF-tier ok", {
         book:     bookName.slice(0, 50),
         provider: out.providerName,
@@ -358,7 +371,7 @@ export async function getBookSummary(
         context,
         premium: opts.premium,
       }, { requirePDF: false });
-      await setCachedSummary(bookName, out);
+      await setCachedSummary(bookName, out, depth);
       L.info("summary", "text-tier ok", {
         book:     bookName.slice(0, 50),
         provider: out.providerName,
@@ -385,7 +398,7 @@ export async function getBookSummary(
       providerName: "wikipedia-fallback",
       source:       "wikipedia_only",
     };
-    await setCachedSummary(bookName, fallback);
+    await setCachedSummary(bookName, fallback, depth);
     L.info("summary", "wikipedia-only fallback used", {
       book:        bookName.slice(0, 50),
       capExceeded: !globalOk,

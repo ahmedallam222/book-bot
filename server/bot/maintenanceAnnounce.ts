@@ -7,7 +7,7 @@ import { listKnownGroups, removeGroup } from "./groupTracker.js";
 // MAINTENANCE ANNOUNCE — رسالة "انتهت الصيانة" للجروبات
 // ══════════════════════════════════════════════
 //
-// لما المشرف يطفي وضع الصيانة، البوت يبعت تلقائياً رسالة في كل الجروبات
+// لما المشرف يطفي وضع الصيانة، البوت يبعت تلقائياً رسالة في كل المجموعةات
 // المعروفة (groupTracker) + أي chat IDs مضافة في الـ env كـ override.
 //
 // Idempotence: نستخدم Redis NX lock مدّته 60 ثانية عشان لو حصل toggle مرتين
@@ -21,7 +21,7 @@ const SEND_DELAY_MS      = 50; // بين كل رسالتين عشان Telegram r
 const DEFAULT_MESSAGE =
   `✅ *عادت الخدمة*\n` +
   `▔▔▔▔▔▔▔▔▔▔▔▔\n\n` +
-  `انتهت أعمال الصيانة، البوت رجع للعمل بشكل طبيعي 🎉\n\n` +
+  `انتهت أعمال الصيانة، وعاد البوت إلى العمل بصورة طبيعية 🎉\n\n` +
   `_شكراً لصبركم 🙏 — اكتب اسم أي كتاب لتحميله 📚_`;
 
 function envChatIds(): number[] {
@@ -90,7 +90,7 @@ export async function announceMaintenanceEnd(bot: TelegramBot): Promise<void> {
     } catch (e) {
       failed++;
       const errStr = String(e).toLowerCase();
-      // الجروب مش متاح — نشيله من الـ tracker
+      // المجموعة مش متاح — نشيله من الـ tracker
       if (
         errStr.includes("kicked") ||
         errStr.includes("chat not found") ||

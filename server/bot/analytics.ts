@@ -2,6 +2,7 @@ import { redis, scanKeys } from "./redis.js";
 import {
   cairoDateString, canonicalBookKey, isoWeekKey, isComplaintQuery,
 } from "./text.js";
+// personal week tracked from trackDownload when found
 import {
   SOURCE_AUTO_DISABLE_MAX_RATE,
   SOURCE_AUTO_DISABLE_MIN_ATTEMPTS,
@@ -244,6 +245,18 @@ export async function trackDownload(
   }
   touchDailyTtl(pipe, dailyKey);
   await pipe.exec().catch(() => {});
+  // تقرير أسبوعي شخصي (fail-open)
+  if (found) {
+    try {
+      const { recordPersonalWeekDownload } = await import("./personalWeek.js");
+      const title = (canonicalTitle && canonicalTitle.trim()) ? canonicalTitle.trim() : bookName;
+      await recordPersonalWeekDownload(userId, title);
+      try {
+        const { recordPersonalMonthDownload } = await import("./personalMonth.js");
+        await recordPersonalMonthDownload(userId, title);
+      } catch { /* */ }
+    } catch { /* */ }
+  }
   // Bug #11 — source counters now live in per-day buckets so the
   // rolling 7-day window can be aggregated on read.
   if (found && !fromCache && domain) await recordSourceCounter(domain, "ok");
