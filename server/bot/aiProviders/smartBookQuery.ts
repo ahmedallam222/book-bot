@@ -3,7 +3,7 @@
 //
 // Pipeline (cheap → expensive):
 //   1) lightNormalizeQuery
-//   2) local spelling map (partial + full)
+//   2) local spelling map (static + learned from successes)
 //   3) optional AI correction (Arabic typos + foreign names)
 //
 // Used before search and again on no-results.
@@ -24,6 +24,8 @@ import {
 const CACHE_TTL = 7 * 24 * 3600;
 const AI_TIMEOUT_MS = 7000;
 const MIN_LEN = 3;
+const LEARNED_KEY = "smartq:learned";
+const LEARNED_CACHE_MS = 5 * 60 * 1000;
 
 /** Extra local fixes beyond fuzzy.ts (Arabic typos + popular books). */
 const LOCAL_FIXES: Record<string, string> = {
@@ -50,7 +52,6 @@ const LOCAL_FIXES: Record<string, string> = {
   "قوانين الطبيعه": "قوانين الطبيعة البشرية",
   "الطبيعه البشريه": "الطبيعة البشرية",
   "فهم الطبيعه البشريه": "فهم الطبيعة البشرية",
-  "الذكاء العاطفي": "الذكاء العاطفي",
   "ذكا عاطفي": "الذكاء العاطفي",
   "العادات السبع": "العادات السبع للناس الأكثر فاعلية",
   "كيف تكسب الاصدقاء": "كيف تكسب الأصدقاء وتؤثر في الناس",
@@ -63,15 +64,11 @@ const LOCAL_FIXES: Record<string, string> = {
   "موسم الهجره": "موسم الهجرة إلى الشمال",
   "موسم الهجرة": "موسم الهجرة إلى الشمال",
   "لانك الله": "لأنك الله",
-  "لا تحزن": "لا تحزن",
-  "قوة اللاوعي": "قوة اللاوعي",
   "قوة العاده": "قوة العادة",
   "السر روندا": "السر",
   "اتوميك هابيتس": "العادات الذرية",
   "atomic habits": "العادات الذرية",
   "deep work": "العمل العميق",
-  "العمل العميق": "العمل العميق",
-  "دوستويفسكي": "دوستويفسكي",
   "دستيوفسكي": "دوستويفسكي",
   "دوستيفيسكي": "دوستويفسكي",
   "ماركيز": "غابرييل غارسيا ماركيز",
@@ -80,16 +77,70 @@ const LOCAL_FIXES: Record<string, string> = {
   "فرانكشتاين": "فرانكنشتاين",
   "البؤسا": "البؤساء",
   "الفيل الازرق": "الفيل الأزرق",
-  "عزازيل": "عزازيل",
-  "تراب الماس": "تراب الماس",
+  "كليله ودمنه": "كليلة ودمنة",
+  "نهج البلاغه": "نهج البلاغة",
+  "فهرنهيت": "فهرنهايت 451",
+  "مئة عام": "مئة عام من العزلة",
+  "مائة عام": "مئة عام من العزلة",
+  "الحرافيش": "ملحمة الحرافيش",
+  "psychologie of money": "سيكولوجية المال",
+  "psychology of money": "سيكولوجية المال",
 };
 
 export type SmartQueryResult = {
   original: string;
   resolved: string;
   changed: boolean;
-  source: "none" | "local" | "ai";
+  source: "none" | "local" | "ai" | "learned";
 };
+
+let learnedCache: Record<string, string> = {};
+let learnedCacheAt = 0;
+
+export async function refreshLearnedFixes(): Promise<void> {
+  if (Date.now() - learnedCacheAt < LEARNED_CACHE_MS && Object.keys(learnedCache).length > 0) {
+    return;
+  }
+  try {
+    const all = await redis.hgetall(LEARNED_KEY);
+    learnedCache = all || {};
+    learnedCacheAt = Date.now();
+  } catch {
+    /* keep previous cache */
+  }
+}
+
+/**
+ * Remember a correction that actually recovered a failed search.
+ * Caps hash size roughly by overwriting same keys only.
+ */
+export async function learnSuccessfulCorrection(
+  from: string,
+  to: string,
+): Promise<void> {
+  const a = (from || "").trim();
+  const b = (to || "").trim();
+  if (!a || !b || a.length < 3 || b.length < 3) return;
+  if (a.length > 80 || b.length > 80) return;
+  if (!meaningfulChange(a, b)) return;
+  // don't learn if "to" looks like garbage
+  if (/https?:\/\//i.test(b) || b.split(/\s+/).length > 12) return;
+  try {
+    await redis.hset(LEARNED_KEY, a, b);
+    // also store normalized-ish key
+    const light = lightNormalizeQuery(a) || a;
+    if (light !== a) await redis.hset(LEARNED_KEY, light, b);
+    learnedCache[a] = b;
+    learnedCache[light] = b;
+    redis.incr("tel:smartq:learned_saved").catch(() => {});
+    L.info("smartBookQuery", "learned_correction", {
+      from: a.slice(0, 40),
+      to: b.slice(0, 40),
+    });
+  } catch {
+    /* */
+  }
+}
 
 function cacheKey(q: string): string {
   const h = createHash("sha256").update(canonicalizeForCache(q)).digest("hex").slice(0, 16);
@@ -107,20 +158,15 @@ function meaningfulChange(a: string, b: string): boolean {
   return !!b && n(a) !== n(b);
 }
 
-/** Local spelling map: exact then longest partial key. */
-export function applyLocalSpellingFixes(raw: string): string {
-  let t = lightNormalizeQuery(raw || "") || (raw || "").trim();
-  if (!t) return t;
-
-  // exact
-  if (LOCAL_FIXES[t]) return LOCAL_FIXES[t];
+function applyMap(t: string, map: Record<string, string>): string {
+  if (!t || !map) return t;
+  if (map[t]) return map[t];
   const lower = t.toLowerCase();
-  if (LOCAL_FIXES[lower]) return LOCAL_FIXES[lower];
+  if (map[lower]) return map[lower];
 
-  // longest key contained in query
   let bestKey = "";
   let bestVal = "";
-  for (const [k, v] of Object.entries(LOCAL_FIXES)) {
+  for (const [k, v] of Object.entries(map)) {
     if (k.length < 4) continue;
     if (t.includes(k) || lower.includes(k.toLowerCase())) {
       if (k.length > bestKey.length) {
@@ -130,21 +176,26 @@ export function applyLocalSpellingFixes(raw: string): string {
     }
   }
   if (bestKey) {
-    // replace key with value once
     const re = new RegExp(bestKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    t = t.replace(re, bestVal);
+    return t.replace(re, bestVal);
+  }
+  return t;
+}
+
+/** Local spelling map: exact then longest partial key (+ learned cache). */
+export function applyLocalSpellingFixes(raw: string): string {
+  let t = lightNormalizeQuery(raw || "") || (raw || "").trim();
+  if (!t) return t;
+
+  const before = t;
+  t = applyMap(t, learnedCache);
+  if (t !== before) {
+    redis.incr("tel:smartq:learned_hit").catch(() => {});
+    return t.replace(/\s{2,}/g, " ").trim();
   }
 
-  // light character-level common Arabic typos
-  t = t
-    .replace(/ة(?=\s|$)/g, (m, off, s) => {
-      // keep ة usually; no-op for safety
-      return m;
-    })
-    .replace(/\s{2,}/g, " ")
-    .trim();
-
-  return t;
+  t = applyMap(t, LOCAL_FIXES);
+  return t.replace(/\s{2,}/g, " ").trim();
 }
 
 function parseAiLine(raw: string): string {
@@ -160,7 +211,8 @@ function parseAiLine(raw: string): string {
 
 const SYSTEM = `أنت مصحّح عناوين كتب عربية. مهمتك: إصلاح الإملاء والترجمة الصوتية لأسماء الكتب والمؤلفين.
 أرجع سطراً واحداً فقط: العنوان المصحّح بالعربية (أو كما يُكتب في الكتالوجات).
-لا تشرح. لا تضف علامات اقتباس. إن كان العنوان سليماً أعده كما هو.`;
+لا تشرح. لا تضف علامات اقتباس. إن كان العنوان سليماً أعده كما هو.
+أمثلة: العادت الذريه→العادات الذرية | وتيدصي درايدن→ويندي درايدن | الخميائي→الخيميائي`;
 
 async function callCloudflareLlama(query: string): Promise<string | null> {
   if (!CLOUDFLARE_AI_ACCOUNT_ID || !CLOUDFLARE_AI_API_TOKEN) return null;
@@ -262,18 +314,18 @@ export async function correctBookQueryAI(
       const corrected = hit;
       return { corrected, changed: meaningfulChange(original, corrected) };
     }
-  } catch { /* */ }
+  } catch {
+    /* */
+  }
 
   redis.incr("tel:smartq:ai_used").catch(() => {});
   let ai =
-    (await callCloudflareLlama(original)) ||
-    (await callMistral(original));
+    (await callCloudflareLlama(original)) || (await callMistral(original));
 
   if (!ai || ai.length < MIN_LEN) {
     redis.incr("tel:smartq:ai_fail").catch(() => {});
     return null;
   }
-  // safety: don't let AI invent a completely unrelated 1-token answer
   if (ai.length > 120) ai = ai.slice(0, 120);
 
   const changed = meaningfulChange(original, ai);
@@ -289,7 +341,7 @@ export async function correctBookQueryAI(
 }
 
 /**
- * Full resolve: local first, then optional AI.
+ * Full resolve: refresh learned → local → optional AI.
  * @param opts.useAi  default true for no-results; false for cheap pre-search local only
  */
 export async function smartResolveBookQuery(
@@ -301,10 +353,16 @@ export async function smartResolveBookQuery(
     return { original: "", resolved: "", changed: false, source: "none" };
   }
 
+  await refreshLearnedFixes().catch(() => {});
+
   const local = applyLocalSpellingFixes(original);
+  const localSource: SmartQueryResult["source"] =
+    learnedCache[original] || learnedCache[lightNormalizeQuery(original) || ""]
+      ? "learned"
+      : "local";
+
   if (meaningfulChange(original, local)) {
     redis.incr("tel:smartq:local_fixed").catch(() => {});
-    // still try AI to refine if requested
     if (opts?.useAi !== false) {
       const ai = await correctBookQueryAI(local);
       if (ai?.changed) {
@@ -316,19 +374,23 @@ export async function smartResolveBookQuery(
         };
       }
     }
-    return { original, resolved: local, changed: true, source: "local" };
+    return {
+      original,
+      resolved: local,
+      changed: true,
+      source: localSource,
+    };
   }
 
   if (opts?.useAi === false) {
-    return { original, resolved: local || original, changed: false, source: "none" };
+    return {
+      original,
+      resolved: local || original,
+      changed: false,
+      source: "none",
+    };
   }
 
-  // Heuristic: run AI when query looks messy (dialect marks, rare spelling)
-  const messy =
-    /[أإآ]/.test(original) === false && /ا/.test(original) // often missing hamza isn't enough
-      ? false
-      : /[ء-ي]{2,}/.test(original);
-  // Always allow AI on explicit request; for pre-search useAi true means try AI
   const ai = await correctBookQueryAI(local || original);
   if (ai?.changed) {
     return {
@@ -343,6 +405,6 @@ export async function smartResolveBookQuery(
     original,
     resolved: local || original,
     changed: meaningfulChange(original, local),
-    source: meaningfulChange(original, local) ? "local" : "none",
+    source: meaningfulChange(original, local) ? localSource : "none",
   };
 }

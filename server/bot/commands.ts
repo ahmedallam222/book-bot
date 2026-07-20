@@ -40,6 +40,8 @@ import {
 } from "./groupPolicy.js";
 import { lightNormalizeQuery } from "./queryNormalize.js";
 import { applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
+import { kbDidYouMean } from "./didYouMean.js";
 import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
 import { storeRetryKey } from "./session.js";
 import {
@@ -1146,9 +1148,32 @@ export function registerMessageHandler(
       bookName.split(/\s+/).length <= 12 &&
       !/^(?:ازيك|عامل|مرحبا|السلام)/i.test(bookName);
 
-    if (likelyBook) {
-      finalWantsSummary = summaryHint;
-      finalBookName = await parseBookName(bookName);
+    // فهم محلي عميق أولاً (حشو محادثة / مؤلف / نوع / زي كذا) — بدون شبكة
+    const refined = refineBookName(bookName);
+    if (refined.wantsSummary) {
+      /* merge below */
+    }
+    // نوع أدبي بدون عنوان → أزرار اقتراحات بدل بحث أعمى
+    if (refined.mode === "genre" && refined.suggestions && refined.suggestions.length > 0) {
+      const lines = refined.suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n");
+      await bot.sendMessage(
+        chatId,
+        `📚 *${refined.note || "اقتراحات لك"}*\n\n${lines}\n\n_اضغط عنواناً للتحميل_`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: kbDidYouMean(refined.suggestions[0], refined.suggestions),
+          ...(msg.message_id
+            ? { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+            : {}),
+        } as any,
+      ).catch(() => {});
+      redis.incr("tel:intent:genre_menu").catch(() => {});
+      return;
+    }
+
+    if (likelyBook || refined.mode === "author" || refined.mode === "similar" || refined.changed) {
+      finalWantsSummary = summaryHint || refined.wantsSummary;
+      finalBookName = await parseBookName(refined.bookName || bookName);
       redis.incr("tel:intent:fast_path").catch(() => {});
     } else {
       const intent = await parseChatIntent(bookName);
@@ -1156,8 +1181,8 @@ export function registerMessageHandler(
         await bot.sendMessage(chatId, intent.response, { parse_mode: "Markdown" }).catch(() => {});
         return;
       }
-      finalBookName = intent.bookName || "";
-      finalWantsSummary = !!intent.wantsSummary || summaryHint;
+      finalBookName = intent.bookName || refined.bookName || "";
+      finalWantsSummary = !!intent.wantsSummary || summaryHint || refined.wantsSummary;
       if (!finalBookName || finalBookName.trim().length < 2) {
         finalBookName = await parseBookName(bookName);
       }

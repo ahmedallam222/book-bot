@@ -93,7 +93,24 @@ const COMMON_FIXES: Record<string, string> = {
 };
 
 function applyCommonFixes(text: string): string {
-  return COMMON_FIXES[text.trim()] ?? text;
+  const t = text.trim();
+  if (!t) return t;
+  if (COMMON_FIXES[t]) return COMMON_FIXES[t];
+  const lower = t.toLowerCase();
+  if (COMMON_FIXES[lower]) return COMMON_FIXES[lower];
+  // longest partial key (typo inside longer query)
+  let bestK = "", bestV = "";
+  for (const [k, v] of Object.entries(COMMON_FIXES)) {
+    if (k.length < 4) continue;
+    if (t.includes(k) || lower.includes(k.toLowerCase())) {
+      if (k.length > bestK.length) { bestK = k; bestV = v; }
+    }
+  }
+  if (bestK) {
+    const re = new RegExp(bestK.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    return t.replace(re, bestV);
+  }
+  return t;
 }
 
 // ── Arabic Normalization ──────────────────────

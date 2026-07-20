@@ -14,7 +14,9 @@ import {
   correctTransliteration,
   TEL_TLIT_RETRY_RECOVERED,
 } from "./aiProviders/llamaTransliteration.js";
-import { smartResolveBookQuery, applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
+import { smartResolveBookQuery, applyLocalSpellingFixes, learnSuccessfulCorrection } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
+import { localDidYouMean } from "./didYouMean.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { isBlacklisted } from "./blacklist.js";
@@ -148,6 +150,22 @@ export async function handleBookRequest(
   userMessageId?: number,
   wantsSummary?: boolean,
 ): Promise<void> {
+  // فهم نية الطلب مبكراً (حشو/مؤلف/نوع) — محلي وسريع
+  {
+    const refined = refineBookName(bookName);
+    if (refined.bookName && refined.bookName.trim().length >= 2) {
+      if (refined.changed) {
+        L.info("bot", "query understood", {
+          mode: refined.mode,
+          from: bookName.slice(0, 40),
+          to: refined.bookName.slice(0, 40),
+        });
+      }
+      bookName = refined.bookName;
+      if (refined.wantsSummary) wantsSummary = true;
+    }
+  }
+
   // ── دمج كل الفحوصات الأولية في استعلامين متوازيين بدل 7+ متسلسلة ──
   // Premium check needs 3 keys (Set membership + exp TTL + manual flag) لكي
   // ندعم انتهاء الاشتراك الصحيح + lazy cleanup. كلهم في نفس الـ pipeline
@@ -692,6 +710,7 @@ async function performFullSearch(
           corrected: tlit.corrected.slice(0, 50),
           results:   tlitResults.length,
         });
+        learnSuccessfulCorrection(bookName, tlit.corrected).catch(() => {});
         await editMsg(
           token, chatId, msgId,
           buildProgress(2, tlit.corrected, `💡 صححت لـ: _"${escMd(tlit.corrected)}"_`),
@@ -715,6 +734,10 @@ async function performFullSearch(
           source: smart.source,
           results: smartResults.length,
         });
+        learnSuccessfulCorrection(bookName, smart.resolved).catch(() => {});
+        if (smart.original && smart.original !== bookName) {
+          learnSuccessfulCorrection(smart.original, smart.resolved).catch(() => {});
+        }
         await editMsg(
           token, chatId, msgId,
           buildProgress(2, smart.resolved, `💡 فهمتُ: _"${escMd(smart.resolved.slice(0, 40))}"_`),
@@ -728,6 +751,30 @@ async function performFullSearch(
     usedFuzzy: usedFuzzy || false,
     ms:        Date.now() - t0,
   });
+
+  // High-confidence spelling from didYouMean map → one more search
+  if (results.length === 0) {
+    const local = localDidYouMean(bookName, 1);
+    if (local.spellingFix && local.spellingFix !== bookName) {
+      const prevQuery = bookName;
+      const { results: fixResults } = await searchWithFuzzyFallback(local.spellingFix);
+      if (fixResults.length > 0) {
+        results = fixResults;
+        cleanedQuery = local.spellingFix;
+        bookName = local.spellingFix;
+        redis.incr("tel:smartq:dym_auto_recovered").catch(() => {});
+        learnSuccessfulCorrection(prevQuery, local.spellingFix).catch(() => {});
+        L.info("bot", "Auto-retry with didYouMean spellingFix", {
+          to: local.spellingFix.slice(0, 50),
+          results: fixResults.length,
+        });
+        await editMsg(
+          token, chatId, msgId,
+          buildProgress(2, local.spellingFix, `💡 هل تقصد: _"${escMd(local.spellingFix.slice(0, 40))}"_`),
+        ).catch(() => {});
+      }
+    }
+  }
 
   if (results.length === 0) {
     await deleteMsg(token, chatId, msgId);

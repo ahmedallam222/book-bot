@@ -16,6 +16,7 @@ import { getLlamaSuggestions } from "./aiProviders/llamaSuggestions.js";
 import { buildNoResults } from "./ui.js";
 import { sampleBooksForGenre } from "./curated.js";
 import { inferGenre } from "./interests.js";
+import { applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
 
 // أخطاء شائعة — منسوخة/موسَّعة من fuzzy.ts
 const COMMON_FIXES: Record<string, string> = {
@@ -130,6 +131,11 @@ function scoreMatch(query: string, candidate: string): number {
 }
 
 function applyCommonFix(query: string): string | null {
+  // smart local map (static + learned) first
+  try {
+    const smart = applyLocalSpellingFixes(query);
+    if (smart && norm(smart) !== norm(query)) return smart;
+  } catch { /* */ }
   const n = norm(query);
   // exact key
   for (const [wrong, right] of Object.entries(COMMON_FIXES)) {

@@ -16,17 +16,21 @@ export async function parseChatIntent(userText: string): Promise<{
     { url: "https://router.bynara.id/v1/chat/completions", key: BYNARA_API_KEY_2, model: "mistral-large" }
   ].filter(e => !!e.key);
 
-  const systemPrompt = `You are a helpful AI assistant for a Telegram bot named "رفيق" (Rafiq — warm book companion). Prefer calm warm Arabic; never pressure downloads.
-Your goal is to parse user intents. 
-If the user is chatting, saying hi, or asking a general question, reply kindly in Arabic.
-If they want a book, extract the exact, clean book name.
-If they want a summary (ملخص/تلخيص), extract the clean book name and mark summary as true.
+  const systemPrompt = `أنت مساعد بوت تيليجرام اسمه «رفيق» — رفيق كتب عربي هادئ.
+حلّل نية المستخدم وأخرج JSON فقط:
 
-Output your response ONLY in valid JSON format:
+قواعد:
+1) دردشة/تحية/سؤال عام → isChat=true + رد عربي دافئ قصير.
+2) طلب كتاب/رواية → isChat=false + bookName = العنوان النظيف فقط (بدون: عايز، عندك، تحميل، pdf، رواية، لو سمحت).
+3) صحّح الإملاء الواضح إن أمكن (العادت الذريه→العادات الذرية).
+4) طلب كتب لمؤلف ("كتب نجيب محفوظ") → bookName = اسم المؤلف.
+5) ملخص/تلخيص → wantsSummary=true + عنوان نظيف.
+6) لا تخترع عناوين غير مذكورة.
+
 {
   "isChat": boolean,
-  "response": "Your Arabic response if isChat is true, otherwise empty",
-  "bookName": "The clean book name if isChat is false, otherwise empty",
+  "response": "رد عربي إن isChat وإلا فارغ",
+  "bookName": "عنوان نظيف إن لم تكن دردشة",
   "wantsSummary": boolean
 }`;
 
