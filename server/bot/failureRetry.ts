@@ -66,7 +66,7 @@ const RETRY_RESCUE_MAX_FALLBACKS      = 3;               // mirrors bookRequest.
 // Lock key — only one retry worker pass at a time across the whole
 // fleet (we run a single bot instance, but this guards against the
 // admin command and the scheduled sweep colliding).
-const PASS_LOCK_KEY     = "retry:fail:lock";
+const PASS_LOCK_KEY     = "retry:worker:pass_lock"; // outside retry:fail:* SCAN space
 const PASS_LOCK_TTL_SEC = 10 * 60;
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -204,7 +204,20 @@ export async function listPendingFailures(
         const v = vals[i];
         if (!v) continue;
         try {
-          collected.push({ key: keys[i], rec: JSON.parse(v) as FailedSearch });
+          // skip non-record keys (legacy lock collision defense)
+          if (keys[i].endsWith(":lock") || keys[i].split(":").length < 4) {
+            continue;
+          }
+          const rec = JSON.parse(v) as FailedSearch;
+          if (!rec || typeof rec !== "object" || typeof rec.bookName !== "string" || rec.bookName.trim().length < 2) {
+            await redis.del(keys[i]).catch(() => {});
+            continue;
+          }
+          if (!Number.isFinite(Number(rec.chatId)) || !rec.userId) {
+            await redis.del(keys[i]).catch(() => {});
+            continue;
+          }
+          collected.push({ key: keys[i], rec });
         } catch {
           // corrupt entry — drop it
           await redis.del(keys[i]).catch(() => {});
@@ -233,6 +246,13 @@ async function retryOne(
   key:    string,
   rec:    FailedSearch,
 ): Promise<{ outcome: "delivered" | "still_no_pdf" | "expired" | "cooldown" | "blocked" | "error" }> {
+  // Guard corrupt/legacy records (e.g. old lock key scanned as failure)
+  if (!rec || typeof rec.bookName !== "string" || rec.bookName.trim().length < 2) {
+    await removeFailure(key);
+    return { outcome: "expired" };
+  }
+  rec.bookName = rec.bookName.trim();
+
   // Cooldown — don't hammer the same record too often. The first
   // attempt fires immediately (lastTs === firstTs), subsequent
   // attempts wait at least RETRY_MIN_COOLDOWN_MS.
@@ -286,7 +306,7 @@ async function retryOne(
       results = await searchAllSources(rec.bookName).catch(() => [] as BookResult[]);
     }
   } catch (e) {
-    L.warn("retry", "search threw", { book: query.slice(0, 40), err: String(e).slice(0, 100) });
+    L.warn("retry", "search threw", { book: (query || "").slice(0, 40), err: String(e).slice(0, 100) });
     return { outcome: "error" };
   }
   if (!results || results.length === 0) {
@@ -366,6 +386,38 @@ async function retryOne(
     return { outcome: "still_no_pdf" };
   }
 
+  // Score by filename/title relevance, then diversify domains
+  {
+    const score = (u: string): number => {
+      const a = urlFilenameRelevance(searchBookName, u);
+      const t = urlSearchTitle.get(u);
+      if (!t) return a;
+      const titleAsUrl = `https://x/${encodeURIComponent(t)}.pdf`;
+      return Math.max(a, urlFilenameRelevance(searchBookName, titleAsUrl));
+    };
+    validUrls = [...validUrls].sort((a, b) => score(b) - score(a));
+    const buckets = new Map<string, string[]>();
+    const order: string[] = [];
+    for (const u of validUrls) {
+      let host = "x";
+      try { host = new URL(u).hostname.toLowerCase(); } catch { /* */ }
+      if (!buckets.has(host)) { buckets.set(host, []); order.push(host); }
+      buckets.get(host)!.push(u);
+    }
+    if (buckets.size > 1) {
+      const mixed: string[] = [];
+      let progress = true;
+      while (progress) {
+        progress = false;
+        for (const h of order) {
+          const arr = buckets.get(h)!;
+          if (arr.length) { mixed.push(arr.shift()!); progress = true; }
+        }
+      }
+      validUrls = mixed;
+    }
+  }
+
   // ── Try each candidate until one delivers ──────────────────────
   // 2026-05-24: The apology was previously sent BEFORE the download
   // loop. That caused two user-visible bugs:
@@ -377,7 +429,7 @@ async function retryOne(
   // The apology is now sent INSIDE the `if (dl?.ok)` branch, right
   // before `removeFailure`, so it fires exactly once per record and
   // only when a PDF actually goes out with it.
-  for (const url of validUrls.slice(0, 3)) {
+  for (const url of validUrls.slice(0, 5)) {
     const title = urlSearchTitle.get(url) ?? "";
     let dl;
     try {

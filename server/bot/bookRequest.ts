@@ -60,7 +60,7 @@ import { onSuccessfulDownload, tryUseStreakShield } from "./retention.js";
 import { recordInterest } from "./interests.js";
 import { maybeGroupDeliveryWhisper } from "./groupClub.js";
 import { celebrateGroupDelivery } from "./groupInteract.js";
-import { recordLibraryDownload } from "./library.js";
+import { recordLibraryDownload, maybeLibraryWelcomeTip } from "./library.js";
 import { buildQualityBlock } from "./quality.js";
 import { seriesAfter } from "./curated.js";
 import { getRelatedBooks, pickReadingTip, buildDiscoverFooter } from "./discover.js";
@@ -1710,6 +1710,25 @@ _اضغط الزر أدناه للتحميل_`;
   if (tipPlain) msg += `
 
 💬 _${tipPlain}_`;
+
+  const libTip = await maybeLibraryWelcomeTip(userId).catch(() => null);
+  if (libTip) msg += `
+
+${libTip}`;
+
+  // Soft summary nudge once/day (private chat) — button already on keyboard
+  if (chatId > 0) {
+    try {
+      const day = new Date().toISOString().slice(0, 10);
+      const ok = await redis.set(`sum:nudge:${userId}:${day}`, "1", "EX", 86400, "NX");
+      if (ok === "OK") {
+        redis.incr("tel:summary:soft_nudge").catch(() => {});
+        msg += `
+
+📘 _ملخّص سريع من الزر أدناه إن رغبت_`;
+      }
+    } catch { /* */ }
+  }
 
   await bot.sendMessage(
     chatId, msg,

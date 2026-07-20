@@ -99,6 +99,19 @@ export async function recordLibraryDownload(
   } catch { /* fail-open */ }
 }
 
+
+/** مرة واحدة لكل مستخدم: تلميح أن التحميل دخل «مكتبتي» */
+export async function maybeLibraryWelcomeTip(userId: string): Promise<string | null> {
+  try {
+    const ok = await redis.set(`lib:welcome_tip:${userId}`, "1", "EX", 400 * 86400, "NX");
+    if (ok !== "OK") return null;
+    redis.incr("tel:lib:welcome_tip").catch(() => {});
+    return "📚 _أُضيف إلى «مكتبتي» بحالة أقرؤه — غيّر الحالة من الزر أو /library_";
+  } catch {
+    return null;
+  }
+}
+
 export async function getLastBook(userId: string): Promise<string | null> {
   try {
     const t = await redis.get(LAST(userId));

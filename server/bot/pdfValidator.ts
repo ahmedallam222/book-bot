@@ -398,6 +398,14 @@ function looksLikeUselessTitle(title: string): boolean {
     /^\s*new\s*document\s*\d*\s*$/i,         // "New Document"
     /^\s*pdf\s*\d*\s*$/i,                    // "PDF", "PDF1"
     /^\s*book\s*\d*\s*$/i,                   // "Book", "Book1"
+    /^\s*layer\s*\d+/i,                        // "Layer 40 copy Image"
+    /copy\s*image/i,                             // design export placeholders
+    /^\s*adobe\b/i,
+    /^\s*illustrator\b/i,
+    /^\s*photoshop\b/i,
+    /^\s*scan\s*\d*\s*$/i,
+    /^\s*img[_\-]?\d+\s*$/i,
+    /^\s*picture\s*\d*\s*$/i,
     /^\s*كتاب\s*\d*\s*$/,                    // Arabic "كتاب"
     /^\s*ملف\s*\d*\s*$/,                     // Arabic "ملف"
   ];
