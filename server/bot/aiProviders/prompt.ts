@@ -65,9 +65,37 @@ export const SYSTEM_INSTRUCTION = `أنت محرر ثقافي عربي محتر�
 }`;
 
 export function buildUserPrompt(bookName: string, context?: string): string {
-  const ctxBlock = context && context.trim()
-    ? `\n\nسياق متاح من المصادر العامة (Wikipedia/Goodreads):\n${context.trim().slice(0, 4000)}`
+  const rawCtx = (context || "").trim();
+  const isDeep = rawCtx.includes("[تعليمات الملخص العميق]") || rawCtx.includes("DEEP_SUMMARY");
+  const ctxForModel = rawCtx
+    .replace(/\[تعليمات الملخص العميق\][\s\S]*$/u, "")
+    .replace(/DEEP_SUMMARY/g, "")
+    .trim();
+  const ctxBlock = ctxForModel
+    ? `\n\nسياق متاح من المصادر العامة (Wikipedia/Goodreads/نص الكتاب):\n${ctxForModel.slice(0, isDeep ? 7000 : 4000)}`
     : "";
+
+  if (isDeep) {
+    return `الكتاب المطلوب تلخيصه بعمق: "${bookName}"${ctxBlock}
+
+وضع: ملخص عميق (deep).
+أعد JSON فقط. داخل حقل summary:
+
+• novel/poetry: 450-700 كلمة فقرة متّصلة، بدون كشف النهاية أو twists.
+  غطّ: العالم/الأجواء، الشخصيات الرئيسية ودوافعها العامة، الصراع المركزي،
+  الثيمات، أسلوب السرد، ولمن يناسب — دون حل العقدة.
+
+• non-fiction/textbook/religion: استخدم البنية حرفياً:
+  🌟 النقاط الرئيسية: 5-7 نقاط •
+  💡 الأفكار المحورية: فقرة 120-220 كلمة
+  🧩 مفاهيم مفتاحية: 3-5 مفاهيم بسطر لكل منها
+  🎯 لمن يناسب: جملتان
+  🛠 تطبيق عملي: خطوة واحدة يمكن تنفيذها هذا الأسبوع
+  📖 لماذا تقرأه: جملتان
+
+ممنوع Markdown (* _ # []) داخل summary. إيموجي ونقاط • فقط.`;
+  }
+
   return `الكتاب المطلوب تلخيصه: "${bookName}"${ctxBlock}
 
 أعد JSON فقط حسب الصيغة المحددة. اختر بنية الـ summary حسب نوع الكتاب: prose للروايات/الشعر، أقسام مهيكلة بالإيموجي للكتب غير الروائية. ممنوع Markdown داخل الـ summary.`;

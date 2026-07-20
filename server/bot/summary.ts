@@ -255,10 +255,12 @@ export async function getBookSummary(
   let context = wikiContext;
   if (depth === "deep") {
     const deepHint =
-      "\n\n[تعليمات الملخص العميق] قدّم ملخصاً أغنى: " +
-      "للروايات 450-650 كلمة دون كشف النهاية؛ " +
-      "لغير الروايات 5-7 نقاط + أفكار موسّعة + تطبيق عملي واحد.";
+      "\n\n[تعليمات الملخص العميق] DEEP_SUMMARY " +
+      "ملخص عميق: روايات 450-700 كلمة بلا حرق؛ " +
+      "غير روائي: 5-7 نقاط + مفاهيم مفتاحية + تطبيق عملي أسبوعي + لماذا تقرأه. " +
+      "لغة فصحى دافئة، بدون Markdown.";
     context = (context || "") + deepHint;
+    redis.incr("tel:summary:deep_requested").catch(() => {});
   }
   // Set to true when the Firecrawl fast-path produced usable markdown
   // for a premium user. Skips the multimodal Gemini PDF tier (step 4)
