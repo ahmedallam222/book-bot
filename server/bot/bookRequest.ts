@@ -14,6 +14,7 @@ import {
   correctTransliteration,
   TEL_TLIT_RETRY_RECOVERED,
 } from "./aiProviders/llamaTransliteration.js";
+import { smartResolveBookQuery, applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { isBlacklisted } from "./blacklist.js";
@@ -169,7 +170,7 @@ export async function handleBookRequest(
       .get(`ulimit:${userId}`)
       .exec();
     if (pipelineRes) {
-  // Light dialect/typo normalize (conservative)
+  // Light dialect + local spelling + (cheap) AI title repair
   {
     const normed = lightNormalizeQuery(bookName);
     if (normed && normed !== bookName) {
@@ -178,6 +179,13 @@ export async function handleBookRequest(
       });
       redis.incr("tel:query:light_normalized").catch(() => {});
       bookName = normed;
+    }
+    const localFixed = applyLocalSpellingFixes(bookName);
+    if (localFixed && localFixed !== bookName) {
+      L.info("bot", "query local-spelling-fixed", {
+        from: bookName.slice(0, 40), to: localFixed.slice(0, 40),
+      });
+      bookName = localFixed;
     }
   }
 
@@ -621,6 +629,24 @@ async function performFullSearch(
   await editMsg(token, chatId, msgId, buildProgress(1, bookName, tip(isPrem)));
   armProgressWatchdog(token, chatId, msgId, 1, bookName);
 
+  // AI-assisted title understanding (local map + optional model)
+  // useAi: true but cached — fixes typos before first Firecrawl call
+  {
+    const smart = await smartResolveBookQuery(bookName, { useAi: false }).catch(() => null);
+    if (smart && smart.changed && smart.resolved.length >= 2) {
+      L.info("bot", "smart query pre-search", {
+        from: bookName.slice(0, 40),
+        to: smart.resolved.slice(0, 40),
+        source: smart.source,
+      });
+      bookName = smart.resolved;
+      await editMsg(
+        token, chatId, msgId,
+        buildProgress(1, bookName, `💡 فهمتُ: _"${escMd(bookName.slice(0, 40))}"_`),
+      ).catch(() => {});
+    }
+  }
+
   const { results: rawResults, usedFuzzy } = await searchWithFuzzyFallback(bookName);
 
   // ── Auto-retry بالاستعلام المنظف ──────────────
@@ -653,6 +679,7 @@ async function performFullSearch(
   // popular bad queries don't re-burn neurons.
   // Module: server/bot/aiProviders/llamaTransliteration.ts
   if (results.length === 0) {
+    // 1) legacy transliteration module
     const tlit = await correctTransliteration(bookName).catch(() => null);
     if (tlit && tlit.changed) {
       const { results: tlitResults } = await searchWithFuzzyFallback(tlit.corrected);
@@ -670,6 +697,29 @@ async function performFullSearch(
           buildProgress(2, tlit.corrected, `💡 صححت لـ: _"${escMd(tlit.corrected)}"_`),
         );
         armProgressWatchdog(token, chatId, msgId, 2, tlit.corrected);
+      }
+    }
+  }
+  // 2) broader AI spelling repair (Arabic + foreign) if still empty
+  if (results.length === 0) {
+    const smart = await smartResolveBookQuery(bookName, { useAi: true }).catch(() => null);
+    if (smart && smart.changed && smart.resolved !== cleanedQuery) {
+      const { results: smartResults } = await searchWithFuzzyFallback(smart.resolved);
+      if (smartResults.length > 0) {
+        results = smartResults;
+        cleanedQuery = smart.resolved;
+        redis.incr("tel:smartq:retry_recovered").catch(() => {});
+        L.info("bot", "Auto-retry with smartBookQuery succeeded", {
+          original: bookName.slice(0, 50),
+          corrected: smart.resolved.slice(0, 50),
+          source: smart.source,
+          results: smartResults.length,
+        });
+        await editMsg(
+          token, chatId, msgId,
+          buildProgress(2, smart.resolved, `💡 فهمتُ: _"${escMd(smart.resolved.slice(0, 40))}"_`),
+        );
+        armProgressWatchdog(token, chatId, msgId, 2, smart.resolved);
       }
     }
   }

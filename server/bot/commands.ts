@@ -39,6 +39,7 @@ import {
   isFreeTextGroupLive,
 } from "./groupPolicy.js";
 import { lightNormalizeQuery } from "./queryNormalize.js";
+import { applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
 import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
 import { storeRetryKey } from "./session.js";
 import {
@@ -1164,6 +1165,7 @@ export function registerMessageHandler(
 
     if (!finalBookName || finalBookName.trim().length < 2) return;
     finalBookName = lightNormalizeQuery(finalBookName) || finalBookName;
+    finalBookName = applyLocalSpellingFixes(finalBookName) || finalBookName;
 
     bot.sendChatAction(chatId, "typing").catch(() => {});
     await handleBookRequest(bot, chatId, userId, finalBookName, token, msg.from?.username, msg.message_id, finalWantsSummary);
