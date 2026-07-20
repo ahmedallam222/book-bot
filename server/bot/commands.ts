@@ -25,7 +25,7 @@ import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./on
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { sendPersonalMonthReport } from "./personalMonth.js";
 import { buildShareCardMessage, buildShareCardHtml, kbShareCard } from "./shareCard.js";
-import { tryGroupSocialReply, sendGroupPlaybook } from "./groupInteract.js";
+import { tryGroupSocialReply, sendGroupPlaybook, extractEmbeddedBookRequest, extractBookFromReplyContext } from "./groupInteract.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue } from "./library.js";
 import { buildPrefsMessage, kbPrefs, getAllPrefs } from "./notifPrefs.js";
 import { buildMicroMessage, hasAnsweredMicro } from "./microHabit.js";
@@ -1080,10 +1080,21 @@ export function registerMessageHandler(
         const trigger = GROUP_TRIGGER_WORDS.find((w) => lower.startsWith(w.toLowerCase()));
         if (trigger) {
           bookName = text.slice(trigger.length).trim();
-        } else if ((await isFreeTextGroupLive(chatId)) && looksLikeBookRequest(text) && !isUiChromeText(text)) {
-          // Free-text: عنوان كتاب فقط — ليس دردشة ولا زر واجهة
-          bookName = text;
-          redis.incr("tel:group:free_text_hit").catch(() => {});
+        } else if (await isFreeTextGroupLive(chatId)) {
+          // 1) رد على رسالة: «حمّله» → عنوان من الرسالة الأصلية
+          const fromReply = extractBookFromReplyContext(msg);
+          // 2) جملة فيها عنوان: «فين كتاب X»
+          const embedded = extractEmbeddedBookRequest(text);
+          if (fromReply) {
+            bookName = fromReply;
+            redis.incr("tel:group:reply_context_hit").catch(() => {});
+          } else if (embedded) {
+            bookName = embedded;
+            redis.incr("tel:group:embedded_hit").catch(() => {});
+          } else if (looksLikeBookRequest(text) && !isUiChromeText(text)) {
+            bookName = text;
+            redis.incr("tel:group:free_text_hit").catch(() => {});
+          }
         }
       }
       // بعد الاستخراج: ارفض إن كان الناتج واجهة/دردشة
@@ -1227,7 +1238,14 @@ function looksLikeBookRequest(input: string): boolean {
   }
   const instructionStart =
     /^(?:ارسل|ابعت|ابعث|ود[يّ]|ارسال|ابعثلي|ارسلي|ابعتلي|اريد\s*منك|ممكن\s*تبعت|لو\s*سمحت\s*ابعت|هو\s*فين|فين\s*ال|مش\s*عارف|يعني\s*ايه)/i;
-  if (instructionStart.test(t) && words.length >= 3) return false;
+  // Conversational delivery requests WITH a book cue are valid book intents
+  // e.g. "ابعتلي كتاب العادات" — do NOT reject those.
+  if (instructionStart.test(t) && words.length >= 3) {
+    const hasBookCue =
+      /(?:كتاب|رواية|قصة|ملخص|pdf|تحميل)/i.test(t) ||
+      extractEmbeddedBookRequest(t) != null;
+    if (!hasBookCue) return false;
+  }
   if (/(?:وليس\s*رابط|مش\s*رابط|ملف\s*وليس|ابعت\s*لي|ارسل\s*لي)/i.test(t)) return false;
   // chatty multi-word without bookish structure
   if (words.length >= 4 && /(?:يعني|اصلا|أصلا|برضه|كمان|طيب|والله|بس|يعني\s*هو)/i.test(t) && !/(?:كتاب|رواية|تأليف|لـ|للكاتب)/i.test(t)) {

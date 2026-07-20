@@ -828,7 +828,53 @@ const TOOL_GRANT_PREMIUM_AUDIT: Tool = {
   },
 };
 
+
+const TOOL_SMART_QUERY_STATS: Tool = {
+  name: "get_smart_query_stats",
+  description:
+    "إحصاءات فهم العناوين والأخطاء الإملائية: smartq (local/ai/learned/cache) + intent (author/genre/similar) + dym auto-recover + group embed hits.",
+  parameters: { type: "object", properties: {} },
+  isWrite: false,
+  async run() {
+    const patterns = [
+      "tel:smartq:*",
+      "tel:intent:*",
+      "tel:group:embedded*",
+      "tel:group:reply*",
+      "tel:group:recommend",
+      "tel:group:free_text*",
+      "tel:retry:delivered",
+      "tel:dl:found_no_send",
+      "tel:dl:force_rescue",
+      "tel:dl:links_only*",
+    ];
+    const out: Record<string, number> = {};
+    for (const pat of patterns) {
+      let cursor = "0";
+      do {
+        const [next, keys] = await redis.scan(cursor, "MATCH", pat, "COUNT", 80);
+        cursor = next;
+        for (const k of keys.slice(0, 40)) {
+          const v = await redis.get(k);
+          const n = parseInt(v || "0", 10);
+          if (Number.isFinite(n)) out[k] = n;
+        }
+      } while (cursor !== "0" && Object.keys(out).length < 80);
+    }
+    let learned = 0;
+    try {
+      learned = await redis.hlen("smartq:learned");
+    } catch { /* */ }
+    return {
+      counters: out,
+      learned_spelling_entries: learned,
+      hint: "smartq:ai_corrected / learned_saved / dym_auto_recovered = جودة فهم العناوين",
+    };
+  },
+};
+
 export const RAFIQA_TOOLS: Tool[] = [
+  TOOL_SMART_QUERY_STATS,
   TOOL_GET_DASHBOARD,
   TOOL_GET_SYSTEM_HEALTH,
   TOOL_GET_DELIVERY,

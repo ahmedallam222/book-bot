@@ -1554,7 +1554,7 @@ async function performFullSearch(
     } else if (hasFallbackLinks) {
       redis.incr("tel:dl:links_only_message_sent").catch(() => {});
     }
-    const failMsg = showPaidBookMessage
+    let failMsg = showPaidBookMessage
       ? buildPaidBookMessage(bookName, /* apologetic */ true)
       : allTooLarge
         ? buildTooLargeMsg(
@@ -1582,10 +1582,25 @@ async function performFullSearch(
       }).catch(() => {});
     }
 
+    // Attach "هل تقصد" suggestions when download failed (actionable alternatives)
+    let failKb = kbNoResults(bookName);
+    if (!showPaidBookMessage && !allTooLarge) {
+      try {
+        const dym = await buildDidYouMeanMessage(bookName, false);
+        if (dym.suggestions.length > 0) {
+          failKb = kbDidYouMean(bookName, dym.suggestions);
+          if (!hasFallbackLinks) {
+            // enrich plain no-results with suggestion list already in dym.text
+            // keep failMsg (links_only / no_results) but add short hint
+            failMsg += "\n\n💡 _جرّب أحد العناوين المقترحة من الأزرار_";
+          }
+        }
+      } catch { /* keep kbNoResults */ }
+    }
     await bot.sendMessage(chatId, failMsg, {
       parse_mode:               "Markdown",
       disable_web_page_preview: true,
-      reply_markup:             kbNoResults(bookName),
+      reply_markup:             failKb,
       // See no_results path above for rationale.
       ...(userMessageId
         ? { reply_to_message_id: userMessageId, allow_sending_without_reply: true }

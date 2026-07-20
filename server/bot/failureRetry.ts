@@ -42,6 +42,9 @@ import { L } from "./logger.js";
 import { redis } from "./redis.js";
 import { canonicalizeForCache, escMd, urlFilenameRelevance } from "./text.js";
 import { searchAllSources } from "./engine.js";
+import { searchWithFuzzyFallback } from "./fuzzy.js";
+import { smartResolveBookQuery, learnSuccessfulCorrection } from "./aiProviders/smartBookQuery.js";
+import { refineBookName } from "./queryUnderstand.js";
 import { findValidPdfUrls } from "./verify.js";
 import { downloadAndSend } from "./download.js";
 import { isBanned } from "./guards.js";
@@ -259,17 +262,38 @@ async function retryOne(
   };
   await redis.set(key, JSON.stringify(updated), "EX", RETRY_TTL_DAYS * 86400).catch(() => {});
 
-  // ── Run the search ─────────────────────────────────────────────
+  // ── Run the search (understand → smart spelling → fuzzy) ───────
+  let query = rec.bookName;
+  try {
+    const refined = refineBookName(query);
+    if (refined.bookName && refined.bookName.length >= 2) query = refined.bookName;
+    const smart = await smartResolveBookQuery(query, { useAi: true }).catch(() => null);
+    if (smart?.changed && smart.resolved.length >= 2) {
+      L.info("retry", "smart query on failure-retry", {
+        from: query.slice(0, 40),
+        to: smart.resolved.slice(0, 40),
+        source: smart.source,
+      });
+      query = smart.resolved;
+    }
+  } catch { /* keep original */ }
+
   let results: BookResult[];
   try {
-    results = await searchAllSources(rec.bookName);
+    const fuzzy = await searchWithFuzzyFallback(query);
+    results = fuzzy.results;
+    if ((!results || results.length === 0) && query !== rec.bookName) {
+      results = await searchAllSources(rec.bookName).catch(() => [] as BookResult[]);
+    }
   } catch (e) {
-    L.warn("retry", "searchAllSources threw", { book: rec.bookName.slice(0, 40), err: String(e).slice(0, 100) });
+    L.warn("retry", "search threw", { book: query.slice(0, 40), err: String(e).slice(0, 100) });
     return { outcome: "error" };
   }
   if (!results || results.length === 0) {
     return { outcome: "still_no_pdf" };
   }
+  // use resolved query for download scoring / titles
+  const searchBookName = query;
 
   // Gather candidates — same triage as bookRequest.ts but without
   // the verbose UI scaffolding.
@@ -319,11 +343,11 @@ async function retryOne(
   // retries pick up the same fix that motivated this whole feature.
   if (validUrls.length > 0 && downloadablePageFallbacks.length > 0) {
     const score = (u: string): number => {
-      const a = urlFilenameRelevance(rec.bookName, u);
+      const a = urlFilenameRelevance(searchBookName, u);
       const t = urlSearchTitle.get(u);
       if (!t) return a;
       const titleAsUrl = `https://x/${encodeURIComponent(t)}.pdf`;
-      return Math.max(a, urlFilenameRelevance(rec.bookName, titleAsUrl));
+      return Math.max(a, urlFilenameRelevance(searchBookName, titleAsUrl));
     };
     const bestPdfScore = score(validUrls[0]);
     if (bestPdfScore < RETRY_RESCUE_BEST_PDF_THRESHOLD) {
@@ -357,7 +381,7 @@ async function retryOne(
     const title = urlSearchTitle.get(url) ?? "";
     let dl;
     try {
-      dl = await downloadAndSend(bot, rec.chatId, url, rec.bookName, token, false, false, title);
+      dl = await downloadAndSend(bot, rec.chatId, url, searchBookName, token, false, false, title);
     } catch (e) {
       L.warn("retry", "downloadAndSend threw", { url: url.slice(0, 60), err: String(e).slice(0, 100) });
       continue;
@@ -394,6 +418,9 @@ async function retryOne(
       });
       await removeFailure(key);
       await redis.incr("tel:retry:delivered").catch(() => {});
+      if (searchBookName !== rec.bookName) {
+        learnSuccessfulCorrection(rec.bookName, searchBookName).catch(() => {});
+      }
       return { outcome: "delivered" };
     }
   }
