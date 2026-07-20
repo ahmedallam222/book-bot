@@ -54,23 +54,85 @@ export function isReplyKeyboardLabel(text: string): boolean {
   return ALL_LABELS.has(text.trim());
 }
 
-/** لوحة ثابتة أسفل الشات (محادثة خاصة) */
+/**
+ * لوحة مدمجة للخاص فقط (3 صفوف) — لا تملأ نصف الشاشة.
+ * بقية الأوامر عبر «القائمة» (inline) أو /commands.
+ */
 export function replyKeyboardMain(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
       [{ text: RK.SEARCH }, { text: RK.RANDOM }],
-      [{ text: RK.CHECKIN }, { text: RK.PROFILE }],
-      [{ text: RK.TODAY }, { text: RK.BALANCE }],
-      [{ text: RK.LIBRARY }, { text: RK.CONTINUE }],
-      [{ text: RK.LISTS }, { text: RK.MYWEEK }],
-      [{ text: RK.MYMONTH }, { text: RK.PULSE }],
-      [{ text: RK.HELP }, { text: RK.PREFS }],
-      [{ text: RK.HISTORY }, { text: RK.MENU }],
+      [{ text: RK.CHECKIN }, { text: RK.LIBRARY }],
+      [{ text: RK.MENU }, { text: RK.HELP }],
     ],
     resize_keyboard: true,
     is_persistent: true,
     input_field_placeholder: "اكتب عنوان كتاب…",
   } as TelegramBot.ReplyKeyboardMarkup;
+}
+
+/** إخفاء لوحة الرد — للجروبات وأي سياق لا نريد فيه أزرار ثابتة */
+export function replyKeyboardRemove(): TelegramBot.ReplyKeyboardRemove {
+  return { remove_keyboard: true, selective: false } as TelegramBot.ReplyKeyboardRemove;
+}
+
+/**
+ * هل النص من «واجهة» البوت (أزرار / اختصارات) وليس عنوان كتاب؟
+ * يمنع: ضغط «مفاجأة» → بحث عن رواية اسمها مفاجأة.
+ */
+export function isUiChromeText(raw: string): boolean {
+  const t = (raw || "").trim();
+  if (!t) return false;
+  if (ALL_LABELS.has(t)) return true;
+  // بدون إيموجي
+  const bare = t.replace(/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+/u, "").trim();
+  const bareLabels = new Set(
+    [...ALL_LABELS].map((s) => s.replace(/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+/u, "").trim()),
+  );
+  if (bareLabels.has(bare) || bareLabels.has(t)) return true;
+  // كلمات واجهة شائعة (حتى لو كتبها المستخدم بدون الزر)
+  const uiWord =
+    /^(?:مفاجأة|مفاجاه|كتاب\s*مفاجأة|سج[ّل]\s*حضورك|حضور|ملفي|ملفي\s*الشخصي|رصيدي|رصيدي\s*اليوم|كتاب\s*اليوم|مكتبتي|قوائم|قائمه|أسبوعي|شهري|إشعارات|اشعارات|سجل[ّي]|القائمة|القائمه|كيف\s*أستخدم|مساعدة|ابحث|بحث|أكمل\s*رحلتي|لحظة|المزيد)$/i;
+  if (uiWord.test(bare) || uiWord.test(t)) return true;
+  return false;
+}
+
+/** معالجة أزرار الواجهة أيضاً في الجروب (بدون إظهار لوحة) */
+export function matchReplyKeyboardAction(text: string): string | null {
+  const t = (text || "").trim();
+  if (!t) return null;
+  if (ALL_LABELS.has(t)) return t;
+  // map bare words → canonical RK label
+  const map: Record<string, string> = {
+    "مفاجأة": RK.RANDOM,
+    "مفاجاه": RK.RANDOM,
+    "كتاب مفاجأة": RK.RANDOM,
+    "كتاب مفاجاه": RK.RANDOM,
+    "سجّل حضورك": RK.CHECKIN,
+    "سجل حضورك": RK.CHECKIN,
+    "حضور": RK.CHECKIN,
+    "ملفي": RK.PROFILE,
+    "رصيدي": RK.BALANCE,
+    "رصيدي اليوم": RK.BALANCE,
+    "كتاب اليوم": RK.TODAY,
+    "مكتبتي": RK.LIBRARY,
+    "قوائم": RK.LISTS,
+    "أسبوعي": RK.MYWEEK,
+    "شهري": RK.MYMONTH,
+    "إشعارات": RK.PREFS,
+    "اشعارات": RK.PREFS,
+    "سجلّي": RK.HISTORY,
+    "سجلي": RK.HISTORY,
+    "القائمة": RK.MENU,
+    "القائمه": RK.MENU,
+    "ابحث": RK.SEARCH,
+    "ابحث عن كتاب": RK.SEARCH,
+    "مساعدة": RK.HELP,
+    "لحظة": RK.PULSE,
+    "أكمل رحلتي": RK.CONTINUE,
+  };
+  const bare = t.replace(/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+/u, "").trim();
+  return map[bare] || map[t] || (isUiChromeText(t) ? t : null);
 }
 
 export function searchPromptText(): string {
@@ -97,15 +159,41 @@ export async function tryHandleReplyKeyboard(
   token: string,
   getBotUsername: () => string,
 ): Promise<boolean> {
-  const text = (msg.text || "").trim();
-  if (!text || !isReplyKeyboardLabel(text)) return false;
+  const raw = (msg.text || "").trim();
+  const matched = matchReplyKeyboardAction(raw);
+  if (!matched && !isReplyKeyboardLabel(raw)) return false;
+  const text = isReplyKeyboardLabel(raw) ? raw : (matched || raw);
 
-  // الردود فقط في الخاص — في المجموعات الأزرار لا تُعرض عادة
-  if (msg.chat.type !== "private") return false;
-
+  const isPrivate = msg.chat.type === "private";
   const chatId = msg.chat.id;
   const userId = String(msg.from?.id || "");
   if (!userId) return true;
+
+  // في الجروب: لا نعرض لوحة — وننفّذ فقط الأوامر الآمنة المختصرة أو نتجاهل كدردشة
+  const kb = isPrivate ? replyKeyboardMain() : replyKeyboardRemove();
+
+  // أزرار «خاصة» في الجروب → لا نبحث؛ نوجّه بلطف أو نتجاهل
+  if (!isPrivate) {
+    // معالجة محدودة في الجروب: random / club-like tips فقط
+    if (text === RK.RANDOM || matchReplyKeyboardAction(raw) === RK.RANDOM) {
+      await handleRandomCommand(bot, chatId, userId, token, msg.from?.username);
+      // hide any sticky keyboard some clients show in group
+      await bot.sendMessage(chatId, "_في الجروب: اكتب عنوان الكتاب مباشرةً — الأزرار للخاص فقط._", {
+        parse_mode: "Markdown",
+        reply_markup: replyKeyboardRemove(),
+      }).catch(() => {});
+      return true;
+    }
+    // أي زر واجهة آخر في الجروب = دردشة/واجهة — لا تبحث عن كتاب
+    await bot.sendMessage(
+      chatId,
+      `🌿 هذا زرّ واجهة — في *الجروب* اكتب *عنوان الكتاب* فقط.\n` +
+      `_للأزرار الكاملة راسلني في الخاص._`,
+      { parse_mode: "Markdown", reply_markup: replyKeyboardRemove(),
+        reply_to_message_id: msg.message_id, allow_sending_without_reply: true } as any,
+    ).catch(() => {});
+    return true;
+  }
 
   switch (text) {
     case RK.SEARCH:
@@ -284,5 +372,15 @@ export function withReplyKeyboard(
   return {
     ...extra,
     reply_markup: replyKeyboardMain(),
+  };
+}
+
+/** للرسائل في الجروبات: أزل أي لوحة عالقة */
+export function withKeyboardRemoved(
+  extra?: TelegramBot.SendMessageOptions,
+): TelegramBot.SendMessageOptions {
+  return {
+    ...extra,
+    reply_markup: replyKeyboardRemove(),
   };
 }

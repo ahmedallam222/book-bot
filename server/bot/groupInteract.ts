@@ -10,6 +10,7 @@ import { isFreeTextGroup } from "./groupPolicy.js";
 import { getGroupClubBook, kbClubWithVotes } from "./groupClub.js";
 import { BOT_NAME } from "./brand.js";
 import { isFeatureOn } from "./featureFlags.js";
+import { replyKeyboardRemove, isUiChromeText } from "./replyKeyboard.js";
 
 const CHAT_CD = (chatId: number) => `grp:ix:cd:${chatId}`;
 const REACT_CD = (chatId: number) => `grp:ix:react:${chatId}`;
@@ -34,6 +35,7 @@ export async function tryGroupSocialReply(
   if (msg.chat.type === "private") return false;
   const text = (msg.text || "").trim();
   if (!text || text.startsWith("/")) return false;
+  if (isUiChromeText(text)) return false; // handled as UI elsewhere
   // only free-text groups or when bot mentioned
   const entities = msg.entities || [];
   const mentioned = entities.some((e) => e.type === "mention" || e.type === "text_mention");
@@ -77,6 +79,7 @@ export async function tryGroupSocialReply(
       parse_mode: "Markdown",
       reply_to_message_id: msg.message_id,
       allow_sending_without_reply: true,
+      reply_markup: replyKeyboardRemove(),
     } as any);
     redis.incr("tel:group:social_reply").catch(() => {});
     return true;

@@ -7,6 +7,7 @@ import { L } from "./logger.js";
 import { GROUP_FREE_TEXT_CHAT_IDS } from "./config.js";
 import { isFeatureOn } from "./featureFlags.js";
 import { GROUP_CLUB_WELCOME_EXTRA } from "./groupClub.js";
+import { replyKeyboardRemove } from "./replyKeyboard.js";
 
 const RATE_KEY = (chatId: number, userId: string) =>
   `grp:rate:${chatId}:${userId}`;
@@ -76,6 +77,7 @@ export async function maybeSoftNotBookReply(
         parse_mode: "Markdown",
         reply_to_message_id: replyToMsgId,
         allow_sending_without_reply: true,
+        reply_markup: replyKeyboardRemove(),
       } as any,
     );
     redis.incr("tel:group:soft_not_book").catch(() => {});

@@ -29,7 +29,7 @@ import { handleSummaryCallback } from "./summaryHandler.js";
 import { handleImageCallback } from "./imageGen.js";
 import { claimDaily, RETENTION_TIPS } from "./retention.js";
 import { getBookOfDay, buildBookOfDayMessage, kbBookOfDayAsync } from "./bookOfDay.js";
-import { replyKeyboardMain } from "./replyKeyboard.js";
+import { replyKeyboardMain, replyKeyboardRemove } from "./replyKeyboard.js";
 import { completeOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { buildLibraryMessage, kbLibrary, buildContinueMessage, kbContinue, libraryTitleAt, cycleLibStatus, statusBadge, exportLibraryText } from "./library.js";
@@ -725,7 +725,10 @@ if (data === "my_library") {
           parse_mode: "Markdown", reply_markup: kbMain(),
         });
         await bot.sendMessage(chatId, `_الأزرار السفلية جاهزة._`, {
-          parse_mode: "Markdown", reply_markup: replyKeyboardMain(),
+          parse_mode: "Markdown",
+          reply_markup: (query.message?.chat?.type === "private")
+            ? replyKeyboardMain()
+            : replyKeyboardRemove(),
         }).catch(() => {});
         break;
       }

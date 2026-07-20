@@ -20,7 +20,7 @@ import { parseBookName, detectSummaryIntent } from "./bookNameParser.js";
 import { parseChatIntent } from "./aiProviders/aiChatProvider.js";
 import { claimDaily, getDailyQuest, getXpState, buildDailyStatusMessage, RETENTION_TIPS } from "./retention.js";
 import { buildHelpMessage, kbHelp, kbAfterDaily } from "./copy.js";
-import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard } from "./replyKeyboard.js";
+import { tryHandleReplyKeyboard, replyKeyboardMain, withReplyKeyboard, replyKeyboardRemove, isUiChromeText, matchReplyKeyboardAction } from "./replyKeyboard.js";
 import { shouldShowOnboarding, buildOnboardingMessage, kbOnboarding } from "./onboarding.js";
 import { sendPersonalWeekReport } from "./personalWeek.js";
 import { sendPersonalMonthReport } from "./personalMonth.js";
@@ -1048,12 +1048,23 @@ export function registerMessageHandler(
 
     if (text.startsWith("/")) return;
 
-    // لوحة الرد السفلية (خاص فقط) — قبل تفسير النص كعنوان كتاب
-    if (!isGroup) {
+    // أزرار الواجهة / اختصارات — في الخاص والجروب (لا تُفسَّر كعنوان كتاب)
+    {
       const handledRk = await tryHandleReplyKeyboard(bot, msg, token, getBotUsername).catch(() => false);
       if (handledRk) return;
+      if (isUiChromeText(text) || matchReplyKeyboardAction(text)) {
+        // دفاع إضافي إن لم تُطابق لوحة الرد
+        if (isGroup) {
+          await bot.sendMessage(chatId, "🌿 _في الجروب اكتب عنوان الكتاب فقط._", {
+            parse_mode: "Markdown",
+            reply_markup: replyKeyboardRemove(),
+            reply_to_message_id: msg.message_id,
+            allow_sending_without_reply: true,
+          } as any).catch(() => {});
+        }
+        return;
+      }
     }
-
 
     let bookName = "";
     if (isGroup) {
@@ -1066,16 +1077,23 @@ export function registerMessageHandler(
         const trigger = GROUP_TRIGGER_WORDS.find((w) => lower.startsWith(w.toLowerCase()));
         if (trigger) {
           bookName = text.slice(trigger.length).trim();
-        } else if ((await isFreeTextGroupLive(chatId)) && looksLikeBookRequest(text)) {
-          // Free-text mode for allowlisted groups (e.g. @kholasa_elktob2):
-          // members often type only the book title without "بوت".
+        } else if ((await isFreeTextGroupLive(chatId)) && looksLikeBookRequest(text) && !isUiChromeText(text)) {
+          // Free-text: عنوان كتاب فقط — ليس دردشة ولا زر واجهة
           bookName = text;
           redis.incr("tel:group:free_text_hit").catch(() => {});
         }
       }
+      // بعد الاستخراج: ارفض إن كان الناتج واجهة/دردشة
+      if (bookName && (isUiChromeText(bookName) || !looksLikeBookRequest(bookName))) {
+        bookName = "";
+      }
       if (!bookName) {
         const social = await tryGroupSocialReply(bot, msg).catch(() => false);
-        if (social) return;
+        if (social) {
+          // أزل لوحة عالقة إن وُجدت
+          await bot.sendMessage(chatId, "\u200c", { reply_markup: replyKeyboardRemove() }).catch(() => {});
+          return;
+        }
         // Soft tip (rate-limited) so members learn free-text mode
         if (isFreeTextGroup(chatId) && text.length >= 2) {
           maybeSoftNotBookReply(bot, chatId, userId, msg.message_id).catch(() => {});
@@ -1160,24 +1178,36 @@ function looksLikeBookRequest(input: string): boolean {
   const t = input.replace(/\s+/g, " ").trim();
   if (t.length < 2 || t.length > 90) return false;
   if (/^https?:\/\//i.test(t)) return false;
-  if (/@\w+/.test(t) && t.startsWith("@")) return false; // bare mentions
-  // pure emoji / punctuation
+  if (/@\w+/.test(t) && t.startsWith("@")) return false;
   if (!/[\u0600-\u06FFa-zA-Z0-9]/.test(t)) return false;
-  // must have some letters (Arabic or Latin)
   const letters = (t.match(/[\u0600-\u06FFa-zA-Z]/g) || []).length;
   if (letters < 2) return false;
-  // chatty / social noise — do not treat as book search
+  // UI chrome / keyboard labels — never a book title
+  if (isUiChromeText(t)) return false;
+  // chatty / social
   const chatty =
-    /^(?:مرحبا|مرحباً|السلام\s*عليكم|سلام|هلا|أهلا|اهلا|صباح|مساء|شكرا|شكراً|يسلمو|تمام|اوك|أوك|طيب|هه+|هههه|لول|lol|ok|hi|hello|hey|bye|كيفك|عامل\s*ايه|اخبارك|مين|ايه|إيه|يعني|بجد|والله|يا\s*جماعة|جروب|القناة|ادمن|أدمن|البوت|بوت\??|help|مساعدة)(?:\s|[!?.…]*)$/i;
+    /^(?:مرحبا|مرحباً|السلام\s*عليكم|سلام|هلا|أهلا|اهلا|صباح|مساء|شكرا|شكراً|يسلمو|تمام|اوك|أوك|طيب|هه+|هههه|لول|lol|ok|hi|hello|hey|bye|كيفك|عامل\s*ايه|اخبارك|مين|ايه|إيه|يعني|بجد|والله|يا\s*جماعة|جروب|القناة|ادمن|أدمن|البوت|بوت\??|help|مساعدة|تمام|ماشي|حاضر|يلا|يلاه|صباح\s*الخير|مساء\s*الخير|تصبحون|رمضان\s*كريم)(?:\s|[!?.…]*)$/i;
   if (chatty.test(t)) return false;
-  // instruction-to-bot sentences (common in free-text groups)
+  // short conversational (1 word that is not a known book-like token)
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length === 1) {
+    // single word UI / slang
+    if (/^(?:مفاجأة|مفاجاه|حضور|ملفي|قوائم|أسبوعي|شهري|سجل|مساعدة|ابحث|لحظة|المزيد|نعم|لا|اوك|أوك)$/i.test(words[0])) {
+      return false;
+    }
+    // very short single tokens (< 3 letters) unlikely as book title alone
+    if (letters < 3) return false;
+  }
   const instructionStart =
-    /^(?:ارسل|ابعت|ابعث|ود[يّ]|ارسال|ابعثلي|ارسلي|ابعتلي|اريد\s*منك|ممكن\s*تبعت|لو\s*سمحت\s*ابعت)/i;
-  if (instructionStart.test(t) && t.split(/\s+/).length >= 5) return false;
-  if (/(?:وليس\s*رابط|مش\s*رابط|ملف\s*وليس)/i.test(t)) return false;
-  // long chat sentences with many conversational markers
-  if (t.split(/\s+/).length > 14) return false;
-  if (/[؟?]{1}/.test(t) && t.split(/\s+/).length > 8) return false;
+    /^(?:ارسل|ابعت|ابعث|ود[يّ]|ارسال|ابعثلي|ارسلي|ابعتلي|اريد\s*منك|ممكن\s*تبعت|لو\s*سمحت\s*ابعت|هو\s*فين|فين\s*ال|مش\s*عارف|يعني\s*ايه)/i;
+  if (instructionStart.test(t) && words.length >= 3) return false;
+  if (/(?:وليس\s*رابط|مش\s*رابط|ملف\s*وليس|ابعت\s*لي|ارسل\s*لي)/i.test(t)) return false;
+  // chatty multi-word without bookish structure
+  if (words.length >= 4 && /(?:يعني|اصلا|أصلا|برضه|كمان|طيب|والله|بس|يعني\s*هو)/i.test(t) && !/(?:كتاب|رواية|تأليف|لـ|للكاتب)/i.test(t)) {
+    return false;
+  }
+  if (words.length > 14) return false;
+  if (/[؟?]{1}/.test(t) && words.length > 6) return false;
   return true;
 }
 
