@@ -43,6 +43,7 @@ import { applyLocalSpellingFixes } from "./aiProviders/smartBookQuery.js";
 import { refineBookName } from "./queryUnderstand.js";
 import { kbDidYouMean } from "./didYouMean.js";
 import { getDeliveryStats, formatDeliveryStatsArabic } from "./deliveryMetrics.js";
+import { buildProductionPulse, formatProductionPulseArabic } from "./productionPulse.js";
 import { storeRetryKey } from "./session.js";
 import {
   MAX_BOOK_NAME_LEN, GROUP_TRIGGER_WORDS, GROUP_FREE_TEXT_CHAT_IDS, MAINTENANCE_KEY, PREMIUM_STARS_PRICE, DAILY_LIMIT, PREMIUM_LIMIT,
@@ -947,6 +948,23 @@ export function registerCommands(
     if (!isAdmin(userId)) return;
     const stats = await getDeliveryStats();
     await bot.sendMessage(msg.chat.id, formatDeliveryStatsArabic(stats), { parse_mode: "Markdown" }).catch(() => {});
+  });
+
+  // Ops: full production pulse
+  bot.onText(/^\/ops_pulse(?:@\w+)?$/, async (msg) => {
+    const userId = String(msg.from?.id || "");
+    if (!isAdmin(userId)) return;
+    try {
+      const pulse = await buildProductionPulse();
+      await bot.sendMessage(msg.chat.id, formatProductionPulseArabic(pulse), {
+        parse_mode: "Markdown",
+      }).catch(() => {});
+    } catch (e) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `⚠️ فشل نبض الإنتاج: ${String(e).slice(0, 120)}`,
+      ).catch(() => {});
+    }
   });
 
 
